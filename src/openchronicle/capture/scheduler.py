@@ -7,6 +7,7 @@ import contextlib
 import hashlib
 import json
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -23,6 +24,7 @@ from .event_dispatcher import EventDispatcher
 from .watcher import AXWatcherProcess
 
 logger = get("openchronicle.capture")
+_WARNED_BAD_PATTERNS: set[str] = set()
 
 
 def _now_iso() -> str:
@@ -31,6 +33,57 @@ def _now_iso() -> str:
 
 def _safe_filename(ts: str) -> str:
     return ts.replace(":", "-").replace("+", "p")
+
+
+def _exact_match(value: str | None, patterns: list[str]) -> bool:
+    if not value:
+        return False
+    folded = value.casefold()
+    return any(pattern.casefold() == folded for pattern in patterns if pattern)
+
+
+def _regex_match(value: str | None, patterns: list[str]) -> bool:
+    if not value:
+        return False
+    for pattern in patterns:
+        if not pattern:
+            continue
+        try:
+            if re.search(pattern, value, flags=re.IGNORECASE):
+                return True
+        except re.error as exc:
+            if pattern not in _WARNED_BAD_PATTERNS:
+                logger.warning(
+                    "invalid capture denylist regex %r: %s; falling back to substring match",
+                    pattern,
+                    exc,
+                )
+                _WARNED_BAD_PATTERNS.add(pattern)
+            if pattern.casefold() in value.casefold():
+                return True
+    return False
+
+
+def _denylist_reason(cfg: CaptureConfig, out: dict[str, Any]) -> str | None:
+    meta = out.get("window_meta") or {}
+    trigger = out.get("trigger") or {}
+    focused = out.get("focused_element") or {}
+
+    if _exact_match(meta.get("app_name"), cfg.deny_app_names):
+        return "app_name"
+    if _exact_match(meta.get("bundle_id"), cfg.deny_bundle_ids):
+        return "bundle_id"
+    if _regex_match(meta.get("title"), cfg.deny_window_title_patterns):
+        return "window_title"
+    if _regex_match(trigger.get("window_title"), cfg.deny_window_title_patterns):
+        return "trigger_window_title"
+    if _regex_match(out.get("url"), cfg.deny_url_patterns):
+        return "url"
+    if _regex_match(focused.get("value"), cfg.deny_text_patterns):
+        return "focused_value"
+    if _regex_match(out.get("visible_text"), cfg.deny_text_patterns):
+        return "visible_text"
+    return None
 
 
 def _build_capture(
@@ -59,6 +112,16 @@ def _build_capture(
         "bundle_id": meta.bundle_id,
     }
 
+    reason = _denylist_reason(cfg, out)
+    if reason is not None:
+        logger.info(
+            "capture skipped (denylist: %s): trigger=%s app=%r",
+            reason,
+            (out.get("trigger") or {}).get("event_type"),
+            meta.app_name,
+        )
+        return None
+
     if provider.available:
         result = provider.capture_frontmost(focused_window_only=True)
         if result is not None:
@@ -66,6 +129,18 @@ def _build_capture(
             out["ax_metadata"] = result.metadata
     else:
         out["ax_unavailable"] = True
+
+    s1_parser.enrich(out)
+
+    reason = _denylist_reason(cfg, out)
+    if reason is not None:
+        logger.info(
+            "capture skipped (denylist: %s): trigger=%s app=%r",
+            reason,
+            (out.get("trigger") or {}).get("event_type"),
+            meta.app_name,
+        )
+        return None
 
     if cfg.include_screenshot:
         shot = screenshot.grab(
@@ -79,7 +154,6 @@ def _build_capture(
                 "height": shot.height,
             }
 
-    s1_parser.enrich(out)
     return out
 
 

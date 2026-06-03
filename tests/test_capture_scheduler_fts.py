@@ -7,7 +7,39 @@ import time
 from pathlib import Path
 
 from openchronicle.capture import scheduler as scheduler_mod
+from openchronicle.capture import window_meta
+from openchronicle.capture.ax_models import AXCaptureResult
+from openchronicle.config import CaptureConfig
 from openchronicle.store import fts
+
+
+class _FakeProvider:
+    def __init__(self, raw_json: dict | None = None) -> None:
+        self.raw_json = raw_json
+        self.calls = 0
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    def capture_frontmost(self, *, focused_window_only: bool = True) -> AXCaptureResult | None:
+        self.calls += 1
+        if self.raw_json is None:
+            return None
+        return AXCaptureResult(
+            raw_json=self.raw_json,
+            timestamp="2026-04-22T14:00:00+08:00",
+            apps=self.raw_json.get("apps", []),
+            metadata={},
+        )
+
+    def capture_all_visible(self) -> AXCaptureResult | None:
+        return self.capture_frontmost()
+
+    def capture_app(
+        self, app_name: str, *, focused_window_only: bool = True
+    ) -> AXCaptureResult | None:
+        return self.capture_frontmost(focused_window_only=focused_window_only)
 
 
 def _capture_dict(
@@ -31,6 +63,80 @@ def _capture_dict(
             "width": 100, "height": 50,
         },
     }
+
+
+def _edge_ax_tree(url: str, text: str = "visible page text") -> dict:
+    return {
+        "apps": [
+            {
+                "name": "Microsoft Edge",
+                "bundle_id": "com.microsoft.edgemac",
+                "is_frontmost": True,
+                "windows": [
+                    {
+                        "title": "Account",
+                        "focused": True,
+                        "elements": [
+                            {"role": "AXTextField", "title": "Address", "value": url},
+                            {"role": "AXStaticText", "title": text, "value": text},
+                        ],
+                    }
+                ],
+            }
+        ]
+    }
+
+
+def test_denylist_title_skips_before_ax_and_screenshot(
+    ac_root: Path, monkeypatch,
+) -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate", "无痕"])
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://example.com"))
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(
+            app_name="Microsoft Edge",
+            title="New tab - InPrivate Browsing",
+            bundle_id="com.microsoft.edgemac",
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab",
+        lambda **_: (_ for _ in ()).throw(AssertionError("screenshot should be skipped")),
+    )
+
+    out = scheduler_mod._build_capture(
+        cfg, provider, {"event_type": "AXFocusedWindowChanged"}
+    )
+
+    assert out is None
+    assert provider.calls == 0
+
+
+def test_denylist_url_skips_before_screenshot(ac_root: Path, monkeypatch) -> None:
+    cfg = CaptureConfig(deny_url_patterns=["account\\.example"])
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://account.example/private"))
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(
+            app_name="Microsoft Edge",
+            title="Account",
+            bundle_id="com.microsoft.edgemac",
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab",
+        lambda **_: (_ for _ in ()).throw(AssertionError("screenshot should be skipped")),
+    )
+
+    out = scheduler_mod._build_capture(cfg, provider, {"event_type": "AXValueChanged"})
+
+    assert out is None
+    assert provider.calls == 1
 
 
 def test_write_capture_indexes_into_fts(ac_root: Path) -> None:

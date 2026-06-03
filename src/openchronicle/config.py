@@ -11,6 +11,16 @@ from typing import Any
 from . import paths
 
 
+def _str_list(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return []
+
+
 @dataclass
 class ModelConfig:
     model: str = "gpt-5.4-nano"
@@ -47,6 +57,20 @@ class CaptureConfig:
     screenshot_jpeg_quality: int = 80
     ax_depth: int = 100
     ax_timeout_seconds: int = 3
+    # Privacy denylist. App/bundle entries are exact case-insensitive matches;
+    # pattern entries are case-insensitive regular expressions.
+    deny_app_names: list[str] = field(default_factory=list)
+    deny_bundle_ids: list[str] = field(default_factory=list)
+    deny_window_title_patterns: list[str] = field(default_factory=list)
+    deny_url_patterns: list[str] = field(default_factory=list)
+    deny_text_patterns: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        self.deny_app_names = _str_list(self.deny_app_names)
+        self.deny_bundle_ids = _str_list(self.deny_bundle_ids)
+        self.deny_window_title_patterns = _str_list(self.deny_window_title_patterns)
+        self.deny_url_patterns = _str_list(self.deny_url_patterns)
+        self.deny_text_patterns = _str_list(self.deny_text_patterns)
 
 
 @dataclass
@@ -242,6 +266,14 @@ screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                # Electron apps (Claude Desktop, VS Code, Slack) have deep DOM; 8 only reaches the chrome
 ax_timeout_seconds = 3
+# Privacy denylist. App/bundle entries are exact case-insensitive matches;
+# pattern entries are case-insensitive regexes. A match skips JSON write,
+# screenshot capture, FTS indexing, timeline ingestion, and model processing.
+deny_app_names = []
+deny_bundle_ids = []
+deny_window_title_patterns = []
+deny_url_patterns = []
+deny_text_patterns = []
 
 [timeline]
 window_minutes = 1             # length of each aggregator block (verbatim-preserving normalizer)

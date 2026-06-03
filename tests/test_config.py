@@ -34,6 +34,26 @@ api_key_env = "ANTHROPIC_API_KEY"
     assert classifier.api_key_env == "ANTHROPIC_API_KEY"
 
 
+def test_capture_denylist_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        r"""
+[capture]
+deny_app_names = ["Passwords"]
+deny_bundle_ids = ["com.microsoft.edgemac"]
+deny_window_title_patterns = ["InPrivate", "无痕"]
+deny_url_patterns = ["account\\.example"]
+deny_text_patterns = ["secret token"]
+"""
+    )
+    cfg = config.load(path)
+    assert cfg.capture.deny_app_names == ["Passwords"]
+    assert cfg.capture.deny_bundle_ids == ["com.microsoft.edgemac"]
+    assert cfg.capture.deny_window_title_patterns == ["InPrivate", "无痕"]
+    assert cfg.capture.deny_url_patterns == ["account\\.example"]
+    assert cfg.capture.deny_text_patterns == ["secret token"]
+
+
 def test_write_default_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
     assert config.write_default_if_missing(p)

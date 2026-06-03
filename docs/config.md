@@ -97,6 +97,11 @@ screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                       # Electron apps need deep trees; 8 only reaches chrome
 ax_timeout_seconds = 3
+deny_app_names = []                  # exact app-name denylist, case-insensitive
+deny_bundle_ids = []                 # exact bundle-id denylist, case-insensitive
+deny_window_title_patterns = []      # regex denylist for window titles
+deny_url_patterns = []               # regex denylist for extracted URLs
+deny_text_patterns = []              # regex denylist for focused value + visible text
 ```
 
 Tuning notes:
@@ -108,6 +113,30 @@ Tuning notes:
 - **`buffer_retention_hours`.** Whole-JSON deletion cutoff. Default 7 days lets `read_recent_capture` reach back that far — shrink to a few hours if you only care about the current work session, bump if you want longer recall.
 - **`screenshot_retention_hours`.** After this many hours the screenshot field is stripped (rest of the JSON stays). Screenshots aren't used by timeline / reducer / classifier today — setting this ≪ `buffer_retention_hours` is what makes long retention cheap. `0` or very large values keep screenshots for the full window.
 - **`buffer_max_mb`.** Hard ceiling in MB. When exceeded, the cleanup pass evicts oldest absorbed files until under. Set to `0` to disable (pure time-based retention).
+- **Denylist fields.** App/bundle lists are exact case-insensitive matches. The `*_patterns` lists are case-insensitive Python regular expressions. A match skips the capture before JSON write, FTS indexing, timeline ingestion, and model processing. Window-title matches run before AX and screenshot capture; URL/text matches run after AX parsing but still before screenshot capture.
+
+Common privacy starter:
+
+```toml
+deny_app_names = ["Passwords", "1Password"]
+deny_window_title_patterns = [
+  "InPrivate",
+  "Incognito",
+  "Private Browsing",
+  "无痕",
+  "密码",
+]
+deny_url_patterns = [
+  "account\\.example",
+  "bank",
+]
+deny_text_patterns = [
+  "password",
+  "api[_ -]?key",
+  "secret",
+  "token",
+]
+```
 
 ## `[timeline]`
 
