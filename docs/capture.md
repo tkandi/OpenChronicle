@@ -13,7 +13,7 @@ Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 1. `window_meta.active_window()` — app name, title, bundle_id via `NSRunningApplication`.
 2. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers.
 3. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from the AX tree (see [S1 fields](#s1-fields) below).
-4. `screenshot.grab()` — unless `include_screenshot = false`.
+4. `screenshot.grab_many()` — unless `include_screenshot = false`.
 5. Write `{iso8601_safe}.json` to the buffer.
 
 Privacy denylist checks can short-circuit this flow:
@@ -90,12 +90,32 @@ A 10×+ ratio means there's content past depth 30 you'd miss.
     "image_base64": "iVBORw0KGgoAAAANS...",
     "mime_type": "image/jpeg",
     "width": 1920,
-    "height": 1200
-  }
+    "height": 1200,
+    "monitor": {
+      "index": 1,
+      "left": 0,
+      "top": 0,
+      "width": 1920,
+      "height": 1200
+    }
+  },
+  "screenshots": [
+    {
+      "image_base64": "iVBORw0KGgoAAAANS...",
+      "mime_type": "image/jpeg",
+      "width": 1920,
+      "height": 1200,
+      "monitor": { "index": 1, "left": 0, "top": 0, "width": 1920, "height": 1200 }
+    }
+  ]
 }
 ```
 
-`trigger` is `{"event_type": "heartbeat"}` for timer captures and `{"event_type": "manual"}` for `capture-once`. Screenshot is omitted entirely when `include_screenshot = false`.
+`trigger` is `{"event_type": "heartbeat"}` for timer captures and `{"event_type": "manual"}` for `capture-once`. Screenshot fields are omitted entirely when `include_screenshot = false`.
+
+`screenshots[]` is present only when `screenshot_monitor = "separate"`.
+
+`screenshot_monitor` controls the image shape: `primary` keeps one legacy `screenshot`, `all` stores one `screenshot` of the all-monitors virtual desktop, and `separate` stores one entry per physical monitor in `screenshots[]` while also copying the first image into `screenshot` for older readers.
 
 Secure fields (password inputs) are replaced with `"[REDACTED]"` at the helper level — the Python side never sees them.
 
@@ -116,10 +136,10 @@ Captures are pruned by the timeline tick, not the writer. After each timeline sc
 | Pass | Condition | Action |
 |---|---|---|
 | **Delete** | mtime older than `buffer_retention_hours` (default **168** = 7 days) | Whole JSON removed |
-| **Strip screenshot** | mtime older than `screenshot_retention_hours` (default **24**) | Rewrite JSON without `screenshot` field; sets `screenshot_stripped: true`. The AX tree, `visible_text`, `focused_element`, and `url` stay |
+| **Strip screenshot** | mtime older than `screenshot_retention_hours` (default **24**) | Rewrite JSON without `screenshot` / `screenshots` fields; sets `screenshot_stripped: true`. The AX tree, `visible_text`, `focused_element`, and `url` stay |
 | **Evict by size** | Total buffer > `buffer_max_mb` (default **2000**, i.e. 2 GB; `0` disables) | Delete oldest absorbed files until under the cap |
 
-Why tiered: the screenshot base64 is ~77% of each capture's bytes but nothing downstream consumes it today (it's kept for future vision stages + debugging). Stripping it at 24h drops each stale capture to ~20% of its original size, which is what makes a 7-day window affordable. Typical steady-state footprint is in the 100s of MB.
+Why tiered: screenshot base64 is most of each capture's bytes but nothing downstream consumes it today (it's kept for future vision stages + debugging). Stripping it at 24h drops each stale capture to a fraction of its original size, which is what makes a 7-day window affordable. Typical steady-state footprint is in the 100s of MB.
 
 To wipe manually:
 

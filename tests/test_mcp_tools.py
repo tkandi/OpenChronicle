@@ -1,7 +1,9 @@
 """Test MCP tool functions directly (bypassing FastMCP wiring)."""
 
+import json
 from pathlib import Path
 
+from openchronicle import paths
 from openchronicle.mcp import captures as captures_mod
 from openchronicle.mcp import server as mcp_server
 from openchronicle.store import entries as entries_mod
@@ -172,3 +174,48 @@ def test_current_context_app_filter(ac_root: Path) -> None:
 
     ctx = captures_mod.current_context(app_filter="Safari", headline_limit=5)
     assert [h["file_stem"] for h in ctx["recent_captures_headline"]] == ["c2"]
+
+
+def test_read_recent_capture_includes_separate_screenshots(ac_root: Path) -> None:
+    capture = {
+        "timestamp": "2026-04-22T14:30:12+08:00",
+        "window_meta": {
+            "app_name": "Cursor",
+            "title": "main.py",
+            "bundle_id": "com.todesktop.230313mzl4w4u92",
+        },
+        "focused_element": {"role": "AXTextArea", "value": "x=1"},
+        "visible_text": "x=1",
+        "url": None,
+        "screenshot": {
+            "image_base64": "AAAA",
+            "mime_type": "image/jpeg",
+            "width": 100,
+            "height": 50,
+        },
+        "screenshots": [
+            {
+                "image_base64": "AAAA",
+                "mime_type": "image/jpeg",
+                "width": 100,
+                "height": 50,
+                "monitor": {"index": 1},
+            },
+            {
+                "image_base64": "BBBB",
+                "mime_type": "image/jpeg",
+                "width": 200,
+                "height": 80,
+                "monitor": {"index": 2},
+            },
+        ],
+    }
+    path = paths.capture_buffer_dir() / "2026-04-22T14-30-12p08-00.json"
+    path.write_text(json.dumps(capture), encoding="utf-8")
+
+    out = captures_mod.read_recent_capture(include_screenshot=True)
+
+    assert out is not None
+    assert out["screenshot_b64"] == "AAAA"
+    assert [shot["image_base64"] for shot in out["screenshots"]] == ["AAAA", "BBBB"]
+    assert out["screenshots"][1]["monitor"]["index"] == 2

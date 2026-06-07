@@ -90,9 +90,10 @@ min_capture_gap_seconds = 2.0        # hard floor between consecutive captures, 
 dedup_interval_seconds = 1.0         # same-event-type dedup window
 same_window_dedup_seconds = 5.0      # non-focus-change events in the same bundle+window are dropped if within this gap
 buffer_retention_hours = 168         # 7 days; stale absorbed captures past this are deleted
-screenshot_retention_hours = 24      # after 24h, strip screenshot (77% of bytes) but keep AX+text
+screenshot_retention_hours = 24      # after 24h, strip screenshot payloads but keep AX+text
 buffer_max_mb = 2000                 # hard ceiling (MB); oldest absorbed files evicted first (0 disables)
 include_screenshot = true
+screenshot_monitor = "primary"       # "primary", "all", or "separate"
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                       # Electron apps need deep trees; 8 only reaches chrome
@@ -111,7 +112,8 @@ Tuning notes:
 - **`same_window_dedup_seconds`.** When the user types for a long time in the same document, this is the knob that decides how frequently you re-capture the same (bundle, window) pair. Focus changes always bypass this.
 - **`heartbeat_minutes`.** Periodic capture as a safety net. `0` disables it completely (watcher-only). Values `>0` are clamped to a 60s floor.
 - **`buffer_retention_hours`.** Whole-JSON deletion cutoff. Default 7 days lets `read_recent_capture` reach back that far — shrink to a few hours if you only care about the current work session, bump if you want longer recall.
-- **`screenshot_retention_hours`.** After this many hours the screenshot field is stripped (rest of the JSON stays). Screenshots aren't used by timeline / reducer / classifier today — setting this ≪ `buffer_retention_hours` is what makes long retention cheap. `0` or very large values keep screenshots for the full window.
+- **`screenshot_retention_hours`.** After this many hours screenshot payload fields are stripped (rest of the JSON stays). Screenshots aren't used by timeline / reducer / classifier today — setting this ≪ `buffer_retention_hours` is what makes long retention cheap. `0` or very large values keep screenshots for the full window.
+- **`screenshot_monitor`.** `primary` keeps the legacy single-monitor `screenshot` field. `all` stores one `screenshot` image for the full virtual desktop across all monitors. `separate` stores one image per physical monitor in `screenshots[]` and also keeps the first image in `screenshot` for compatibility.
 - **`buffer_max_mb`.** Hard ceiling in MB. When exceeded, the cleanup pass evicts oldest absorbed files until under. Set to `0` to disable (pure time-based retention).
 - **Denylist fields.** App/bundle lists are exact case-insensitive matches. The `*_patterns` lists are case-insensitive Python regular expressions. A match skips the capture before JSON write, FTS indexing, timeline ingestion, and model processing. Window-title matches run before AX and screenshot capture; URL/text matches run after AX parsing but still before screenshot capture.
 

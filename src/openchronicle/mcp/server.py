@@ -463,7 +463,7 @@ def build_server(cfg: Config | None = None):
                                     (e.g. "Cursor", "Claude", "Chrome").
           window_title_substring  — case-insensitive substring of the window
                                     title (e.g. a filename, tab title).
-          include_screenshot      — include the base64 JPEG. Default false —
+          include_screenshot      — include base64 JPEG payloads. Default false —
                                     screenshots are large and rarely needed.
           max_age_minutes         — when `at` is given, only return captures
                                     within this many minutes of `at`. Default 15.
@@ -472,7 +472,7 @@ def build_server(cfg: Config | None = None):
         `window_title`, `url`, `focused_element.value` (what the user was
         typing), and `visible_text` (~10 k chars of rendered AX text). The buffer
         retention is bounded (see `[capture]` in config); older captures have
-        their `screenshot` field stripped but keep text. Returns `null` if
+        their `screenshot` / `screenshots` fields stripped but keep text. Returns `null` if
         nothing matches.
 
         Typical flow: read an event-daily entry, notice `[HH:MM-HH:MM, <app>]`,

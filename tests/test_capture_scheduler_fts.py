@@ -103,7 +103,7 @@ def test_denylist_title_skips_before_ax_and_screenshot(
     )
     monkeypatch.setattr(
         scheduler_mod.screenshot,
-        "grab",
+        "grab_many",
         lambda **_: (_ for _ in ()).throw(AssertionError("screenshot should be skipped")),
     )
 
@@ -129,7 +129,7 @@ def test_denylist_url_skips_before_screenshot(ac_root: Path, monkeypatch) -> Non
     )
     monkeypatch.setattr(
         scheduler_mod.screenshot,
-        "grab",
+        "grab_many",
         lambda **_: (_ for _ in ()).throw(AssertionError("screenshot should be skipped")),
     )
 
@@ -137,6 +137,101 @@ def test_denylist_url_skips_before_screenshot(ac_root: Path, monkeypatch) -> Non
 
     assert out is None
     assert provider.calls == 1
+
+
+def test_separate_screenshot_mode_writes_array_and_legacy_field(
+    ac_root: Path, monkeypatch,
+) -> None:
+    cfg = CaptureConfig(screenshot_monitor="separate")
+    provider = _FakeProvider(raw_json=None)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(
+            app_name="Cursor",
+            title="main.py",
+            bundle_id="com.todesktop.230313mzl4w4u92",
+        ),
+    )
+
+    def fake_grab_many(**kwargs):
+        calls.append(kwargs)
+        return [
+            scheduler_mod.screenshot.Screenshot(
+                image_base64="AAAA",
+                width=100,
+                height=50,
+                monitor_index=1,
+                monitor_left=0,
+                monitor_top=0,
+                monitor_width=100,
+                monitor_height=50,
+            ),
+            scheduler_mod.screenshot.Screenshot(
+                image_base64="BBBB",
+                width=200,
+                height=80,
+                monitor_index=2,
+                monitor_left=100,
+                monitor_top=0,
+                monitor_width=200,
+                monitor_height=80,
+            ),
+        ]
+
+    monkeypatch.setattr(scheduler_mod.screenshot, "grab_many", fake_grab_many)
+
+    out = scheduler_mod._build_capture(cfg, provider, {"event_type": "manual"})
+
+    assert calls[0]["monitor_mode"] == "separate"
+    assert out is not None
+    assert out["screenshot"]["image_base64"] == "AAAA"
+    assert out["screenshot"] == out["screenshots"][0]
+    assert [shot["image_base64"] for shot in out["screenshots"]] == ["AAAA", "BBBB"]
+    assert out["screenshots"][1]["monitor"] == {
+        "index": 2,
+        "left": 100,
+        "top": 0,
+        "width": 200,
+        "height": 80,
+    }
+
+
+def test_all_screenshot_mode_writes_single_virtual_desktop_field(
+    ac_root: Path, monkeypatch,
+) -> None:
+    cfg = CaptureConfig(screenshot_monitor="all")
+    provider = _FakeProvider(raw_json=None)
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id=""),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: [
+            scheduler_mod.screenshot.Screenshot(
+                image_base64="FULL",
+                width=1920,
+                height=2197,
+                monitor_index=0,
+                monitor_left=-68,
+                monitor_top=-1080,
+                monitor_width=1920,
+                monitor_height=2197,
+                monitor_is_all=True,
+            )
+        ],
+    )
+
+    out = scheduler_mod._build_capture(cfg, provider, {"event_type": "manual"})
+
+    assert out is not None
+    assert "screenshots" not in out
+    assert out["screenshot"]["image_base64"] == "FULL"
+    assert out["screenshot"]["monitor"]["is_all"] is True
 
 
 def test_write_capture_indexes_into_fts(ac_root: Path) -> None:
@@ -152,7 +247,45 @@ def test_write_capture_indexes_into_fts(ac_root: Path) -> None:
         hits = fts.search_captures(conn, query="foo")
         assert len(hits) == 1
         assert hits[0].id == path.stem
-        assert hits[0].app_name == "Cursor"
+    assert hits[0].app_name == "Cursor"
+
+
+def test_cleanup_buffer_strips_screenshot_arrays(ac_root: Path) -> None:
+    out = _capture_dict(
+        ts="2026-04-22T14:00:00+08:00",
+        app="Cursor", title="main.py",
+        value="", text="visible text",
+    )
+    out["screenshots"] = [
+        {
+            "image_base64": "AAAA",
+            "mime_type": "image/jpeg",
+            "width": 100,
+            "height": 50,
+        },
+        {
+            "image_base64": "BBBB",
+            "mime_type": "image/jpeg",
+            "width": 100,
+            "height": 50,
+        },
+    ]
+    path = scheduler_mod._write_capture(out)
+    long_ago = time.time() - 48 * 3600
+    os.utime(path, (long_ago, long_ago))
+
+    stats = scheduler_mod.cleanup_buffer(
+        retention_hours=24 * 365,
+        processed_before_ts="2099-01-01T00:00:00+00:00",
+        screenshot_retention_hours=24,
+        max_mb=0,
+    )
+
+    data = path.read_text()
+    assert stats["stripped"] == 1
+    assert '"screenshot"' not in data
+    assert '"screenshots"' not in data
+    assert '"screenshot_stripped": true' in data
 
 
 def test_cleanup_buffer_removes_fts_rows(ac_root: Path) -> None:

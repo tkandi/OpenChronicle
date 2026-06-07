@@ -143,16 +143,16 @@ def _build_capture(
         return None
 
     if cfg.include_screenshot:
-        shot = screenshot.grab(
-            max_width=cfg.screenshot_max_width, jpeg_quality=cfg.screenshot_jpeg_quality
+        shots = screenshot.grab_many(
+            monitor_mode=cfg.screenshot_monitor,
+            max_width=cfg.screenshot_max_width,
+            jpeg_quality=cfg.screenshot_jpeg_quality,
         )
-        if shot is not None:
-            out["screenshot"] = {
-                "image_base64": shot.image_base64,
-                "mime_type": shot.mime_type,
-                "width": shot.width,
-                "height": shot.height,
-            }
+        if shots:
+            shot_dicts = [screenshot.to_dict(shot) for shot in shots]
+            if cfg.screenshot_monitor == "separate":
+                out["screenshots"] = shot_dicts
+            out["screenshot"] = shot_dicts[0]
 
     return out
 
@@ -448,10 +448,10 @@ def cleanup_buffer(
     trailing capture is never evicted:
 
     1. **Delete whole file** when mtime is older than ``retention_hours``.
-    2. **Strip screenshot** when mtime is older than
+    2. **Strip screenshot payloads** when mtime is older than
        ``screenshot_retention_hours`` (if provided and smaller than
-       ``retention_hours``). The screenshot field is 77% of the payload
-       and nothing downstream consumes it, so stripping keeps AX+text
+       ``retention_hours``). Screenshot payloads are most of the file size
+       and nothing downstream consumes them, so stripping keeps AX+text
        queryable for much longer at ~20% of the original size.
     3. **Evict by size** once total buffer size exceeds ``max_mb`` MB.
        Oldest already-absorbed files go first. ``max_mb=0`` disables this.
@@ -542,7 +542,7 @@ def _delete_captures_from_fts(stems: list[str]) -> None:
 
 
 def _strip_screenshot_inplace(path: Path) -> bool:
-    """Rewrite a capture JSON without its ``screenshot`` field. Returns True if stripped."""
+    """Rewrite a capture JSON without screenshot payloads. Returns True if stripped."""
     try:
         raw = path.read_text()
     except OSError:
@@ -551,9 +551,10 @@ def _strip_screenshot_inplace(path: Path) -> bool:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return False
-    if "screenshot" not in data:
+    if "screenshot" not in data and "screenshots" not in data:
         return False
     data.pop("screenshot", None)
+    data.pop("screenshots", None)
     data["screenshot_stripped"] = True
     try:
         path.write_text(json.dumps(data, ensure_ascii=False))

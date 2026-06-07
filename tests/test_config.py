@@ -54,6 +54,27 @@ deny_text_patterns = ["secret token"]
     assert cfg.capture.deny_text_patterns == ["secret token"]
 
 
+def test_capture_screenshot_monitor_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[capture]
+screenshot_monitor = "SEPARATE"
+"""
+    )
+    cfg = config.load(path)
+    assert cfg.capture.screenshot_monitor == "separate"
+
+    path.write_text(
+        """
+[capture]
+screenshot_monitor = "unknown"
+"""
+    )
+    cfg = config.load(path)
+    assert cfg.capture.screenshot_monitor == "primary"
+
+
 def test_write_default_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
     assert config.write_default_if_missing(p)

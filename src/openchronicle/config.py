@@ -44,8 +44,8 @@ class CaptureConfig:
     # Tiered buffer retention:
     #   * whole JSON is deleted once older than `buffer_retention_hours`
     #     AND already absorbed by a timeline block
-    #   * screenshot (base64) is stripped from JSONs older than
-    #     `screenshot_retention_hours` — it's 77% of the bytes and nothing
+    #   * screenshot payloads are stripped from JSONs older than
+    #     `screenshot_retention_hours` — they dominate file size and nothing
     #     downstream currently consumes it
     #   * `buffer_max_mb` is a hard ceiling; when exceeded the oldest
     #     already-absorbed files are deleted first (0 disables the cap)
@@ -53,6 +53,7 @@ class CaptureConfig:
     screenshot_retention_hours: int = 24
     buffer_max_mb: int = 2000
     include_screenshot: bool = True
+    screenshot_monitor: str = "primary"  # "primary" | "all" | "separate"
     screenshot_max_width: int = 1920
     screenshot_jpeg_quality: int = 80
     ax_depth: int = 100
@@ -66,6 +67,8 @@ class CaptureConfig:
     deny_text_patterns: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        mode = str(self.screenshot_monitor or "primary").strip().lower()
+        self.screenshot_monitor = mode if mode in {"primary", "all", "separate"} else "primary"
         self.deny_app_names = _str_list(self.deny_app_names)
         self.deny_bundle_ids = _str_list(self.deny_bundle_ids)
         self.deny_window_title_patterns = _str_list(self.deny_window_title_patterns)
@@ -259,9 +262,10 @@ min_capture_gap_seconds = 2.0 # minimum gap between consecutive captures
 dedup_interval_seconds = 1.0  # per-event-type dedup window
 same_window_dedup_seconds = 5.0  # don't re-capture the same bundle+window unless 5s have passed (or it's a focus change)
 buffer_retention_hours = 168           # 7 days; stale absorbed captures past this are deleted
-screenshot_retention_hours = 24        # after 24h, strip screenshot (77% of bytes) but keep AX+text
+screenshot_retention_hours = 24        # after 24h, strip screenshot payloads but keep AX+text
 buffer_max_mb = 2000                   # hard ceiling; oldest absorbed files evicted first (0 to disable)
 include_screenshot = true
+screenshot_monitor = "primary"          # "primary" (legacy single monitor), "all" (one virtual desktop image), or "separate" (screenshots[] per monitor)
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                # Electron apps (Claude Desktop, VS Code, Slack) have deep DOM; 8 only reaches the chrome

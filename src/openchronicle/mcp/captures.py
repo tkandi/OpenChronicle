@@ -89,6 +89,7 @@ def _format_response(
     meta = data.get("window_meta") or {}
     focused = data.get("focused_element") or {}
     shot = data.get("screenshot") or {}
+    shots = data.get("screenshots") if isinstance(data.get("screenshots"), list) else []
     out: dict[str, Any] = {
         "timestamp": data.get("timestamp"),
         "file": path.name,
@@ -109,6 +110,18 @@ def _format_response(
     if include_screenshot and shot.get("image_base64"):
         out["screenshot_b64"] = shot["image_base64"]
         out["screenshot_mime"] = shot.get("mime_type") or "image/jpeg"
+    if include_screenshot and shots:
+        out["screenshots"] = [
+            {
+                "image_base64": item.get("image_base64") or "",
+                "mime_type": item.get("mime_type") or "image/jpeg",
+                "width": int(item.get("width") or 0),
+                "height": int(item.get("height") or 0),
+                "monitor": item.get("monitor") or {},
+            }
+            for item in shots
+            if isinstance(item, dict) and item.get("image_base64")
+        ]
     return out
 
 

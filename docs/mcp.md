@@ -164,14 +164,14 @@ Use whenever the user's question depends on what's on their screen this moment, 
 
 *"Uncompressed screen content from the raw capture buffer. Use when a compressed memory entry is not specific enough (e.g. an event-daily entry says 'edited main.py at 14:30' but you need the actual code/text)."*
 
-Reads straight out of `~/.openchronicle/capture-buffer/*.json`. The buffer is retained per `[capture]` (7 days by default); captures older than `screenshot_retention_hours` have their `screenshot` field stripped but keep `visible_text` + `focused_element` + `url`.
+Reads straight out of `~/.openchronicle/capture-buffer/*.json`. The buffer is retained per `[capture]` (7 days by default); captures older than `screenshot_retention_hours` have their `screenshot` / `screenshots` fields stripped but keep `visible_text` + `focused_element` + `url`.
 
 Arguments:
 
 - `at` — ISO timestamp (`"2026-04-22T14:30"`) or bare `"HH:MM[:SS]"` (today, local). Omit for the newest matching capture.
 - `app_name` — case-insensitive substring of `window_meta.app_name`.
 - `window_title_substring` — case-insensitive substring of the window title.
-- `include_screenshot` — include the base64 JPEG. Default false — screenshots are large.
+- `include_screenshot` — include base64 JPEG payloads. Default false — screenshots are large. In `screenshot_monitor = "separate"` captures, this includes both legacy `screenshot_b64` and a `screenshots[]` array.
 - `max_age_minutes` — when `at` is given, only return captures within this many minutes of `at`. Default 15.
 
 Returns `null` if nothing matches. Otherwise:
