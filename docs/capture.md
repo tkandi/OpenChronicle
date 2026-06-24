@@ -13,14 +13,19 @@ Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 1. `window_meta.active_window()` — app name, title, bundle_id via `NSRunningApplication`.
 2. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers.
 3. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from the AX tree (see [S1 fields](#s1-fields) below).
-4. `screenshot.grab_many()` — unless `include_screenshot = false`.
-5. Write `{iso8601_safe}.json` to the buffer.
+4. `privacy.sensitive_window_regions()` — enumerate visible window metadata and locate denied windows when the screenshot privacy guard is enabled.
+5. `screenshot.grab_many()` — unless `include_screenshot = false`; targets intersecting denied windows are omitted.
+6. Write `{iso8601_safe}.json` to the buffer.
 
 Privacy denylist checks can short-circuit this flow:
 
 - `deny_app_names`, `deny_bundle_ids`, and `deny_window_title_patterns` run immediately after window metadata is available, before AX and screenshots.
 - `deny_url_patterns` and `deny_text_patterns` run after S1 parsing, before screenshots and disk writes.
 - Denied captures are not written to JSON, not inserted into `captures_fts`, not absorbed into timeline blocks, and not sent to any model stage.
+
+With `screenshot_privacy_mode = "skip-monitor"`, the bundled `mac-window-list` helper uses CoreGraphics to inspect every on-screen window's owner, bundle ID, title, and bounds immediately before `mss` captures pixels. Because CoreGraphics can omit background browser titles, the helper falls back to top-level AX window title, position, and size metadata. This includes floating panels, but it never traverses background AX trees or reads their controls and contents. In `separate` mode, only monitors intersecting a denied window are skipped. In `all` mode, any denied window skips the full virtual-desktop screenshot. If Screen Recording permission is unavailable, or enumeration otherwise fails, `screenshot_privacy_fail_closed = true` suppresses that tick's screenshots while allowing the non-sensitive foreground AX/text record to be written.
+
+This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
 
 The filename is ISO-8601 with `:` → `-` and `+` → `p` / `-` → `m` for the TZ offset. Example: `2026-04-21T17-07-32p08-00.json`.
 

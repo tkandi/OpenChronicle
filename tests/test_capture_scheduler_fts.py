@@ -234,6 +234,61 @@ def test_all_screenshot_mode_writes_single_virtual_desktop_field(
     assert out["screenshot"]["monitor"]["is_all"] is True
 
 
+def test_screenshot_privacy_guard_passes_sensitive_regions(
+    ac_root: Path, monkeypatch,
+) -> None:
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        deny_window_title_patterns=["InPrivate"],
+    )
+    provider = _FakeProvider(raw_json=None)
+    region = scheduler_mod.privacy.ScreenRegion(left=100, top=0, width=100, height=80)
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id=""),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.privacy, "sensitive_window_regions", lambda _cfg: [region]
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: calls.append(kwargs) or [],
+    )
+
+    out = scheduler_mod._build_capture(cfg, provider, {"event_type": "manual"})
+
+    assert out is not None
+    assert calls[0]["blocked_regions"] == [region]
+
+
+def test_screenshot_privacy_guard_fails_closed(
+    ac_root: Path, monkeypatch,
+) -> None:
+    cfg = CaptureConfig(deny_app_names=["Passwords"])
+    provider = _FakeProvider(raw_json=None)
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id=""),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.privacy, "sensitive_window_regions", lambda _cfg: None
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(AssertionError("screenshot should be skipped")),
+    )
+
+    out = scheduler_mod._build_capture(cfg, provider, {"event_type": "manual"})
+
+    assert out is not None
+    assert "screenshot" not in out
+
+
 def test_write_capture_indexes_into_fts(ac_root: Path) -> None:
     out = _capture_dict(
         ts="2026-04-22T14:00:00+08:00",

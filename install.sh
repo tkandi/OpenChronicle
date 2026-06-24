@@ -31,7 +31,7 @@ usage() {
   cat <<'EOF'
 Usage: bash install.sh [options]
 
-Installs OpenChronicle into a dedicated virtualenv, compiles the macOS AX
+Installs OpenChronicle into a dedicated virtualenv, compiles the macOS native
 helpers, creates an `openchronicle` shim, and optionally injects MCP config
 into detected clients.
 
@@ -123,7 +123,7 @@ ensure_xcode_clt() {
     return
   fi
 
-  warn "Xcode Command Line Tools are required to compile the AX binaries."
+  warn "Xcode Command Line Tools are required to compile the macOS helpers."
   if command -v xcode-select >/dev/null 2>&1; then
     xcode-select --install >/dev/null 2>&1 || true
   fi
@@ -202,19 +202,24 @@ install_package() {
 }
 
 compile_bundled_binaries() {
-  log "compiling bundled AX helper binaries"
-  "${VENV_DIR}/bin/python" - <<'PY' || die "failed to compile bundled AX binaries"
+  log "compiling bundled macOS helper binaries"
+  "${VENV_DIR}/bin/python" - <<'PY' || die "failed to compile bundled macOS binaries"
 from openchronicle.capture.ax_capture import _resolve_helper_path
+from openchronicle.capture.privacy import _resolve_window_list_path
 from openchronicle.capture.watcher import _resolve_watcher_path
 
 helper = _resolve_helper_path()
 watcher = _resolve_watcher_path()
+window_list = _resolve_window_list_path()
 if helper is None:
     raise SystemExit("mac-ax-helper not available after install")
 if watcher is None:
     raise SystemExit("mac-ax-watcher not available after install")
+if window_list is None:
+    raise SystemExit("mac-window-list not available after install")
 print(f"helper={helper}")
 print(f"watcher={watcher}")
+print(f"window_list={window_list}")
 PY
 }
 
@@ -332,9 +337,11 @@ CLI shim     : ${INSTALL_BIN_DIR}/openchronicle
 Next steps:
   1. Grant Accessibility permission to your terminal:
      System Settings -> Privacy & Security -> Accessibility
-  2. Start the daemon:
+  2. Grant Screen Recording permission to your terminal:
+     System Settings -> Privacy & Security -> Screen Recording
+  3. Start the daemon:
      openchronicle start
-  3. Check status:
+  4. Check status:
      openchronicle status
 EOF
 

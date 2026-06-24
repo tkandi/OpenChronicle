@@ -75,6 +75,29 @@ screenshot_monitor = "unknown"
     assert cfg.capture.screenshot_monitor == "primary"
 
 
+def test_capture_screenshot_privacy_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text(
+        """
+[capture]
+screenshot_privacy_mode = "OFF"
+screenshot_privacy_fail_closed = false
+"""
+    )
+    cfg = config.load(path)
+    assert cfg.capture.screenshot_privacy_mode == "off"
+    assert cfg.capture.screenshot_privacy_fail_closed is False
+
+    path.write_text(
+        """
+[capture]
+screenshot_privacy_mode = "unknown"
+"""
+    )
+    cfg = config.load(path)
+    assert cfg.capture.screenshot_privacy_mode == "skip-monitor"
+
+
 def test_write_default_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
     assert config.write_default_if_missing(p)

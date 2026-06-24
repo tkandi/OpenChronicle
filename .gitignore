@@ -21,6 +21,7 @@ build/
 # Compiled Swift helpers (rebuilt on first run)
 resources/mac-ax-helper
 resources/mac-ax-watcher
+resources/mac-window-list
 
 # Local OpenChronicle data (only if symlinked into the repo for dev)
 .openchronicle/

@@ -54,6 +54,8 @@ class CaptureConfig:
     buffer_max_mb: int = 2000
     include_screenshot: bool = True
     screenshot_monitor: str = "primary"  # "primary" | "all" | "separate"
+    screenshot_privacy_mode: str = "skip-monitor"  # "off" | "skip-monitor"
+    screenshot_privacy_fail_closed: bool = True
     screenshot_max_width: int = 1920
     screenshot_jpeg_quality: int = 80
     ax_depth: int = 100
@@ -69,6 +71,10 @@ class CaptureConfig:
     def __post_init__(self) -> None:
         mode = str(self.screenshot_monitor or "primary").strip().lower()
         self.screenshot_monitor = mode if mode in {"primary", "all", "separate"} else "primary"
+        privacy_mode = str(self.screenshot_privacy_mode or "skip-monitor").strip().lower()
+        self.screenshot_privacy_mode = (
+            privacy_mode if privacy_mode in {"off", "skip-monitor"} else "skip-monitor"
+        )
         self.deny_app_names = _str_list(self.deny_app_names)
         self.deny_bundle_ids = _str_list(self.deny_bundle_ids)
         self.deny_window_title_patterns = _str_list(self.deny_window_title_patterns)
@@ -266,6 +272,8 @@ screenshot_retention_hours = 24        # after 24h, strip screenshot payloads bu
 buffer_max_mb = 2000                   # hard ceiling; oldest absorbed files evicted first (0 to disable)
 include_screenshot = true
 screenshot_monitor = "primary"          # "primary" (legacy single monitor), "all" (one virtual desktop image), or "separate" (screenshots[] per monitor)
+screenshot_privacy_mode = "skip-monitor" # skip monitors containing any visible app/bundle/title denylist match
+screenshot_privacy_fail_closed = true    # if visible-window enumeration fails, do not take screenshots
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                # Electron apps (Claude Desktop, VS Code, Slack) have deep DOM; 8 only reaches the chrome

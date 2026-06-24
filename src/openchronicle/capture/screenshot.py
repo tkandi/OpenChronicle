@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..logger import get
+from .privacy import ScreenRegion
 
 logger = get("openchronicle.capture")
 
@@ -27,7 +28,10 @@ class Screenshot:
 
 
 def grab(
-    max_width: int = 1920, jpeg_quality: int = 80, monitor_mode: str = "primary"
+    max_width: int = 1920,
+    jpeg_quality: int = 80,
+    monitor_mode: str = "primary",
+    blocked_regions: list[ScreenRegion] | None = None,
 ) -> Screenshot | None:
     """Capture one monitor target and return a base64-encoded JPEG.
 
@@ -36,13 +40,19 @@ def grab(
     handled by :func:`grab_many`.
     """
     shots = grab_many(
-        monitor_mode=monitor_mode, max_width=max_width, jpeg_quality=jpeg_quality
+        monitor_mode=monitor_mode,
+        max_width=max_width,
+        jpeg_quality=jpeg_quality,
+        blocked_regions=blocked_regions,
     )
     return shots[0] if shots else None
 
 
 def grab_many(
-    monitor_mode: str = "primary", max_width: int = 1920, jpeg_quality: int = 80
+    monitor_mode: str = "primary",
+    max_width: int = 1920,
+    jpeg_quality: int = 80,
+    blocked_regions: list[ScreenRegion] | None = None,
 ) -> list[Screenshot]:
     """Capture according to ``monitor_mode``.
 
@@ -72,6 +82,14 @@ def grab_many(
             targets = _targets_for_mode(sct, monitors, mode)
             shots: list[Screenshot] = []
             for index, mon, is_all in targets:
+                if blocked_regions and any(
+                    _monitor_intersects_region(mon, region) for region in blocked_regions
+                ):
+                    logger.info(
+                        "screenshot skipped for monitor %d (visible-window privacy guard)",
+                        index,
+                    )
+                    continue
                 shot = _grab_monitor(
                     sct,
                     Image,
@@ -176,3 +194,18 @@ def _int_or_none(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _monitor_intersects_region(mon: dict[str, Any], region: ScreenRegion) -> bool:
+    left = float(mon.get("left", 0))
+    top = float(mon.get("top", 0))
+    right = left + float(mon.get("width", 0))
+    bottom = top + float(mon.get("height", 0))
+    region_right = region.left + region.width
+    region_bottom = region.top + region.height
+    return (
+        left < region_right
+        and right > region.left
+        and top < region_bottom
+        and bottom > region.top
+    )
