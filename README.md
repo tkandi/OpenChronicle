@@ -145,6 +145,22 @@ bash install.sh
 
 ## Run
 
+### Native macOS menu bar app
+
+For the recommended permission and lifecycle experience, install the menu bar app:
+
+```bash
+bash scripts/install-macos-app.sh
+```
+
+Grant Accessibility, Screen Recording, and Input Monitoring to **OpenChronicle**
+when prompted. If the CLI daemon is already running, choose **Take Over in App**
+once; the app will restart it as a direct child without moving any data.
+
+See [docs/macos-app.md](docs/macos-app.md) for build, signing, and permission details.
+
+### CLI
+
 ```bash
 openchronicle start
 openchronicle start --foreground
