@@ -153,9 +153,17 @@ For the recommended permission and lifecycle experience, install the menu bar ap
 bash scripts/install-macos-app.sh
 ```
 
-Grant Accessibility, Screen Recording, and Input Monitoring to **OpenChronicle**
-when prompted. If the CLI daemon is already running, choose **Take Over in App**
-once; the app will restart it as a direct child without moving any data.
+Grant Accessibility and Screen Recording to **OpenChronicle** when prompted.
+Input Monitoring is optional and improves click/text-input timing. If the CLI
+daemon is already running, choose **Take Over in App** once; the app will
+restart it as a direct child without moving any data.
+
+**Open OpenChronicle…** opens one unified window and returns to the last selected
+page. Its sidebar combines permissions, runtime status, model, capture,
+processing, MCP, and guarded Advanced TOML pages. Capture privacy denylists are
+editable there too: the page shows only rule counts until their contents are
+explicitly opened. Saves are validated, backed up, and written atomically;
+**Apply & Restart** reloads them immediately.
 
 See [docs/macos-app.md](docs/macos-app.md) for build, signing, and permission details.
 

@@ -250,7 +250,7 @@ EOF
 }
 
 verify_install() {
-  "${INSTALL_BIN_DIR}/openchronicle" status >/dev/null \
+  "${INSTALL_BIN_DIR}/openchronicle" status --json --no-model-checks >/dev/null \
     || die "installation verification failed ('openchronicle status' did not succeed)"
 }
 

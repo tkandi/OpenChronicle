@@ -107,6 +107,20 @@ final class RuntimeProbeTests: XCTestCase {
 
     XCTAssertTrue(controller.snapshot.isRunning)
     XCTAssertEqual(controller.snapshot.owner, .app)
+    let firstPID = try XCTUnwrap(controller.snapshot.pid)
+
+    controller.restartBackend()
+    for _ in 0..<50 {
+      try await Task.sleep(nanoseconds: 100_000_000)
+      controller.refresh()
+      if controller.snapshot.isRunning, controller.snapshot.pid != firstPID {
+        break
+      }
+    }
+
+    XCTAssertTrue(controller.snapshot.isRunning)
+    XCTAssertEqual(controller.snapshot.owner, .app)
+    XCTAssertNotEqual(controller.snapshot.pid, firstPID)
 
     controller.stopBackend()
     for _ in 0..<40 where controller.snapshot.isRunning {

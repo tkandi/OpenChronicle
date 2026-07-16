@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import contextlib
+import io
 import json
+import logging
 import os
 import shutil
 import signal
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -29,10 +32,10 @@ app = typer.Typer(
 console = Console()
 
 
-def _init() -> config_mod.Config:
+def _init(*, announce: bool = True) -> config_mod.Config:
     paths.ensure_dirs()
     created = config_mod.write_default_if_missing()
-    if created:
+    if created and announce:
         console.print(f"[green]Created default config at {paths.config_file()}[/green]")
     logger_mod.setup(console=False)
     return config_mod.load()
@@ -86,20 +89,8 @@ def _last_capture_info() -> tuple[str | None, str | None]:
 
     Returns ``(None, None)`` when the buffer directory is empty or missing.
     """
-    buf = paths.capture_buffer_dir()
-    if not buf.exists():
-        return None, None
-    json_files = sorted(p for p in buf.iterdir() if p.suffix == ".json")
-    if not json_files:
-        return None, None
-    try:
-        data = json.loads(json_files[-1].read_bytes())
-        ts = data.get("timestamp")
-        meta = data.get("window_meta") or {}
-        app = meta.get("app_name")
-        return ts, app
-    except (OSError, ValueError):
-        return json_files[-1].stem, None
+    capture = _capture_buffer_status()
+    return capture["timestamp"], capture["app"]
 
 
 def _health_status(pid: int | None, last_ts: str | None) -> tuple[str, str]:
@@ -119,6 +110,227 @@ def _health_status(pid: int | None, last_ts: str | None) -> tuple[str, str]:
     if age < 300:  # 5 minutes
         return "healthy", "green"
     return "stale (no captures in >5m)", "yellow"
+
+
+def _capture_buffer_status() -> dict:
+    """Return one snapshot of the capture buffer and its newest record.
+
+    ``status`` used to enumerate and sort the buffer twice. Keeping the file
+    list in one helper matters on long-running installations with tens of
+    thousands of capture records.
+    """
+    buf = paths.capture_buffer_dir()
+    if not buf.exists():
+        return {
+            "count": 0,
+            "last_file": None,
+            "timestamp": None,
+            "app": None,
+        }
+
+    json_files = sorted(p for p in buf.iterdir() if p.suffix == ".json")
+    if not json_files:
+        return {
+            "count": 0,
+            "last_file": None,
+            "timestamp": None,
+            "app": None,
+        }
+
+    latest = json_files[-1]
+    try:
+        data = json.loads(latest.read_bytes())
+        meta = data.get("window_meta") or {}
+        timestamp = data.get("timestamp")
+        app_name = meta.get("app_name")
+    except (OSError, ValueError, AttributeError):
+        timestamp = latest.stem
+        app_name = None
+
+    return {
+        "count": len(json_files),
+        "last_file": latest.name,
+        "timestamp": timestamp,
+        "app": app_name,
+    }
+
+
+def _relative_capture_time(last_ts: str | None) -> str:
+    if not last_ts:
+        return "(none)"
+    try:
+        last_dt = datetime.fromisoformat(last_ts)
+        age = max(0.0, (datetime.now(last_dt.tzinfo) - last_dt).total_seconds())
+    except (ValueError, TypeError):
+        return last_ts
+    if age < 60:
+        return "just now"
+    if age < 3600:
+        return f"{int(age // 60)}m ago"
+    return f"{int(age // 3600)}h ago"
+
+
+@contextlib.contextmanager
+def _silence_model_console_output():
+    """Keep machine-readable status JSON free of third-party log output."""
+    previous_log_level = os.environ.get("LITELLM_LOG")
+    os.environ["LITELLM_LOG"] = "ERROR"
+    logger_names = ("LiteLLM", "LiteLLM Proxy", "LiteLLM Router", "httpx")
+    logger_states: list[tuple[logging.Logger, bool, int]] = []
+    litellm_module = None
+    previous_suppress_debug_info = None
+
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        try:
+            try:
+                import litellm as litellm_module
+
+                previous_suppress_debug_info = litellm_module.suppress_debug_info
+                litellm_module.suppress_debug_info = True
+            except ImportError:
+                pass
+            for name in logger_names:
+                model_logger = logging.getLogger(name)
+                logger_states.append((model_logger, model_logger.disabled, model_logger.level))
+                model_logger.disabled = True
+                model_logger.setLevel(logging.CRITICAL)
+            yield
+        finally:
+            for model_logger, disabled, level in logger_states:
+                model_logger.disabled = disabled
+                model_logger.setLevel(level)
+            if litellm_module is not None:
+                litellm_module.suppress_debug_info = previous_suppress_debug_info
+            if previous_log_level is None:
+                os.environ.pop("LITELLM_LOG", None)
+            else:
+                os.environ["LITELLM_LOG"] = previous_log_level
+
+
+def _status_payload(
+    cfg: config_mod.Config,
+    *,
+    model_checks: bool,
+    quiet_model_output: bool = False,
+) -> dict:
+    """Collect the status table's data in a stable machine-readable shape."""
+    pid = _read_pid()
+    paused = paths.paused_flag().exists()
+    capture_buffer = _capture_buffer_status()
+    last_ts = capture_buffer["timestamp"]
+    last_app = capture_buffer["app"]
+    health_label, health_style = _health_status(pid, last_ts)
+
+    sessions = {"total": 0, "reduced": 0, "ended": 0, "failed": 0}
+    memory = {"active_files": 0, "dormant_files": 0, "entries": 0}
+    timeline = {"blocks": 0, "last_end": None}
+    with fts.cursor() as conn:
+        sess_row = conn.execute(
+            "SELECT COUNT(*), SUM(status='reduced'), SUM(status='ended'), SUM(status='failed')"
+            " FROM sessions"
+        ).fetchone()
+        if sess_row:
+            sessions = {
+                "total": int(sess_row[0] or 0),
+                "reduced": int(sess_row[1] or 0),
+                "ended": int(sess_row[2] or 0),
+                "failed": int(sess_row[3] or 0),
+            }
+
+        file_counts = {
+            str(row[0]): int(row[1])
+            for row in conn.execute(
+                "SELECT status, COUNT(*) FROM files"
+                " WHERE status IN ('active', 'dormant') GROUP BY status"
+            ).fetchall()
+        }
+        total_entries = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        memory = {
+            "active_files": file_counts.get("active", 0),
+            "dormant_files": file_counts.get("dormant", 0),
+            "entries": int(total_entries or 0),
+        }
+
+        tlb_row = conn.execute(
+            "SELECT COUNT(*), MAX(end_time) FROM timeline_blocks"
+        ).fetchone()
+        if tlb_row:
+            timeline = {
+                "blocks": int(tlb_row[0] or 0),
+                "last_end": tlb_row[1],
+            }
+
+    stages = ("timeline", "reducer", "classifier", "compact")
+    ping_results: dict = {}
+    if model_checks:
+        output_context = (
+            _silence_model_console_output()
+            if quiet_model_output
+            else contextlib.nullcontext()
+        )
+        with output_context:
+            ping_results = _ping_stages(cfg, stages)
+
+    models: dict[str, dict] = {}
+    for stage in stages:
+        model = cfg.model_for(stage)
+        result = ping_results.get(stage)
+        models[stage] = {
+            "model": model.model,
+            "checked": model_checks,
+            "ok": result.ok if result is not None else None,
+            "latency_ms": result.latency_ms if result is not None else None,
+            "error": result.error if result is not None else None,
+            "mocked": result.mocked if result is not None else False,
+        }
+
+    return {
+        "schema_version": 1,
+        "generated_at": datetime.now().astimezone().isoformat(),
+        "version": __version__,
+        "root": str(paths.root()),
+        "daemon": {
+            "running": pid is not None,
+            "pid": pid,
+            "uptime": _daemon_uptime(),
+        },
+        "health": {
+            "label": health_label,
+            "state": {"green": "healthy", "yellow": "warning", "red": "error"}[
+                health_style
+            ],
+        },
+        "capture": {
+            "state": "paused" if paused else ("active" if pid else "stopped"),
+            "paused": paused,
+        },
+        "last_capture": {
+            "timestamp": last_ts,
+            "relative": _relative_capture_time(last_ts),
+            "app": last_app,
+            "file": capture_buffer["last_file"],
+        },
+        "buffer": {
+            "count": capture_buffer["count"],
+            "last_file": capture_buffer["last_file"],
+        },
+        "sessions": sessions,
+        "memory": memory,
+        "timeline": timeline,
+        "models": models,
+    }
+
+
+def _format_model_payload(model_status: dict) -> str:
+    if not model_status["checked"]:
+        return "[dim]not checked[/dim]"
+    if model_status["mocked"]:
+        return "[dim]✓ mocked[/dim]"
+    if model_status["ok"]:
+        latency = model_status["latency_ms"]
+        return f"[green]✓[/green] {latency} ms" if latency is not None else "[green]✓[/green] ok"
+    error = model_status["error"] or "failed"
+    return f"[red]✗[/red] {error}"
 
 
 # ─── commands ─────────────────────────────────────────────────────────────
@@ -190,82 +402,84 @@ def resume() -> None:
 
 
 @app.command()
-def status() -> None:
+def status(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit one machine-readable JSON object.",
+    ),
+    model_checks: bool = typer.Option(
+        True,
+        "--model-checks/--no-model-checks",
+        help="Probe configured models (disable for fast local-only status).",
+    ),
+) -> None:
     """Show daemon status + memory stats."""
-    cfg = _init()
-    pid = _read_pid()
-    paused = paths.paused_flag().exists()
+    cfg = _init(announce=not json_output)
+    payload = _status_payload(
+        cfg,
+        model_checks=model_checks,
+        quiet_model_output=json_output,
+    )
 
-    uptime = _daemon_uptime()
-    last_ts, last_app = _last_capture_info()
-    health_label, health_style = _health_status(pid, last_ts)
+    if json_output:
+        sys.stdout.write(json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        return
 
     table = Table(show_header=False, box=None, padding=(0, 2))
-    table.add_row("Version", __version__)
-    table.add_row("Root", str(paths.root()))
-    table.add_row("Daemon", f"[green]running pid {pid}[/green]" if pid else "[red]stopped[/red]")
-    table.add_row("Uptime", uptime)
-    table.add_row("Health", f"[{health_style}]{health_label}[/{health_style}]")
-    table.add_row("Capture", "[yellow]paused[/yellow]" if paused else "active")
+    table.add_row("Version", payload["version"])
+    table.add_row("Root", payload["root"])
+    daemon = payload["daemon"]
+    table.add_row(
+        "Daemon",
+        f"[green]running pid {daemon['pid']}[/green]" if daemon["running"] else "[red]stopped[/red]",
+    )
+    table.add_row("Uptime", daemon["uptime"])
+    health = payload["health"]
+    health_style = {"healthy": "green", "warning": "yellow", "error": "red"}[
+        health["state"]
+    ]
+    table.add_row("Health", f"[{health_style}]{health['label']}[/{health_style}]")
+    capture_state = payload["capture"]["state"]
+    table.add_row(
+        "Capture",
+        f"[yellow]{capture_state}[/yellow]" if capture_state == "paused" else capture_state,
+    )
 
-    if last_ts:
-        try:
-            last_dt = datetime.fromisoformat(last_ts)
-            age = (datetime.now(last_dt.tzinfo) - last_dt).total_seconds()
-            if age < 60:
-                ago = "just now"
-            elif age < 3600:
-                ago = f"{int(age // 60)}m ago"
-            else:
-                ago = f"{int(age // 3600)}h ago"
-            table.add_row("Last Capture", f"{ago} ({last_app})" if last_app else ago)
-        except (ValueError, TypeError):
-            table.add_row("Last Capture", last_ts)
-    else:
-        table.add_row("Last Capture", "(none)")
+    last_capture = payload["last_capture"]
+    last_capture_text = last_capture["relative"]
+    if last_capture["app"]:
+        last_capture_text += f" ({last_capture['app']})"
+    table.add_row("Last Capture", last_capture_text)
 
-    buf = paths.capture_buffer_dir()
-    if buf.exists():
-        bufs = sorted(p for p in buf.iterdir() if p.suffix == ".json")
-        last = bufs[-1].name if bufs else "(none)"
-        table.add_row("Buffer", f"{len(bufs)} files, last: {last}")
+    buffer = payload["buffer"]
+    last_file = buffer["last_file"] or "(none)"
+    table.add_row("Buffer", f"{buffer['count']} files, last: {last_file}")
 
-    with fts.cursor() as conn:
-        sess_row = conn.execute(
-            "SELECT COUNT(*), SUM(status='reduced'), SUM(status='ended'), SUM(status='failed')"
-            " FROM sessions"
-        ).fetchone()
-        if sess_row and sess_row[0]:
-            total, reduced, ended, failed = sess_row
-            table.add_row(
-                "Sessions",
-                f"{total} total ({reduced or 0} reduced, {ended or 0} ended, "
-                f"{failed or 0} failed)",
-            )
-        else:
-            table.add_row("Sessions", "(none)")
-        active = fts.list_files(conn, include_dormant=False)
-        dormant = [
-            f for f in fts.list_files(conn, include_dormant=True) if f.status == "dormant"
-        ]
-        total_entries = conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+    sessions = payload["sessions"]
+    table.add_row(
+        "Sessions",
+        f"{sessions['total']} total ({sessions['reduced']} reduced, "
+        f"{sessions['ended']} ended, {sessions['failed']} failed)",
+    )
+    memory = payload["memory"]
+    table.add_row(
+        "Memory",
+        f"{memory['active_files']} active files, {memory['dormant_files']} dormant, "
+        f"{memory['entries']} entries",
+    )
+    timeline = payload["timeline"]
+    table.add_row(
+        "Timeline",
+        f"{timeline['blocks']} blocks, last end: {timeline['last_end'] or '(none)'}",
+    )
+
+    for stage in ("timeline", "reducer", "classifier", "compact"):
+        model = payload["models"][stage]
         table.add_row(
-            "Memory",
-            f"{len(active)} active files, {len(dormant)} dormant, {total_entries} entries",
+            f"Model ({stage})",
+            f"{model['model']}   {_format_model_payload(model)}",
         )
-        tlb_row = conn.execute(
-            "SELECT COUNT(*), MAX(end_time) FROM timeline_blocks"
-        ).fetchone()
-        tlb_count = tlb_row[0] if tlb_row else 0
-        tlb_last = tlb_row[1] if tlb_row and tlb_row[1] else "(none)"
-        table.add_row("Timeline", f"{tlb_count} blocks, last end: {tlb_last}")
-
-    stages = ("timeline", "reducer", "classifier", "compact")
-    ping_results = _ping_stages(cfg, stages)
-    for stage in stages:
-        m = cfg.model_for(stage)
-        ping = _format_ping(ping_results.get(stage))
-        table.add_row(f"Model ({stage})", f"{m.model}   {ping}")
 
     console.print(table)
 
@@ -971,12 +1185,123 @@ def rebuild_captures_index() -> None:
 
 
 @app.command()
-def config() -> None:
-    """Print the resolved config path and contents."""
-    _init()
+def config(
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Emit an API-key-redacted configuration snapshot for local UI clients.",
+    ),
+    privacy_json: bool = typer.Option(
+        False,
+        "--privacy-json",
+        help="Explicitly emit privacy denylist values for the local Settings editor.",
+    ),
+    validate_json: bool = typer.Option(
+        False,
+        "--validate-json",
+        help="Validate TOML supplied as a JSON request on stdin.",
+    ),
+    write_json: bool = typer.Option(
+        False,
+        "--write-json",
+        help="Validate, back up, and atomically write TOML from JSON stdin.",
+    ),
+    patch_json: bool = typer.Option(
+        False,
+        "--patch-json",
+        help="Patch common non-secret settings from JSON stdin.",
+    ),
+) -> None:
+    """Print, inspect, validate, or safely update config.toml."""
+    modes = sum((json_output, privacy_json, validate_json, write_json, patch_json))
+    if modes > 1:
+        console.print("[red]Choose only one config operation.[/red]")
+        raise typer.Exit(2)
+
+    if modes == 0:
+        _init()
+        p = paths.config_file()
+        console.print(f"[bold]{p}[/bold]")
+        console.print(p.read_text())
+        return
+
+    from . import config_editor
+
+    paths.ensure_dirs()
+    config_mod.write_default_if_missing()
     p = paths.config_file()
-    console.print(f"[bold]{p}[/bold]")
-    console.print(p.read_text())
+    if json_output:
+        sys.stdout.write(
+            json.dumps(
+                config_editor.snapshot_payload(p),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        return
+    if privacy_json:
+        sys.stdout.write(
+            json.dumps(
+                config_editor.privacy_snapshot_payload(p),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        return
+
+    try:
+        request = json.loads(sys.stdin.read())
+        if not isinstance(request, dict):
+            raise config_editor.ConfigEditorError("request must be a JSON object")
+
+        if validate_json:
+            content = request.get("content")
+            if not isinstance(content, str):
+                raise config_editor.ConfigEditorError("content must be a string")
+            config_editor.validate_text(content)
+            result = {
+                "ok": True,
+                "valid": True,
+                "sha256": config_editor.sha256_text(content),
+            }
+        elif write_json:
+            content = request.get("content")
+            if not isinstance(content, str):
+                raise config_editor.ConfigEditorError("content must be a string")
+            expected = request.get("expected_sha256")
+            if expected is not None and not isinstance(expected, str):
+                raise config_editor.ConfigEditorError("expected_sha256 must be a string")
+            result = config_editor.write_text_atomic(
+                p,
+                content,
+                expected_sha256=expected,
+            )
+        else:
+            updates = request.get("updates")
+            if not isinstance(updates, dict):
+                raise config_editor.ConfigEditorError("updates must be a JSON object")
+            expected = request.get("expected_sha256")
+            if expected is not None and not isinstance(expected, str):
+                raise config_editor.ConfigEditorError("expected_sha256 must be a string")
+            result = config_editor.apply_updates(
+                p,
+                updates,
+                expected_sha256=expected,
+            )
+    except (json.JSONDecodeError, config_editor.ConfigEditorError, OSError) as exc:
+        sys.stdout.write(
+            json.dumps(
+                {"ok": False, "error": str(exc)},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        )
+        raise typer.Exit(2) from None
+
+    sys.stdout.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
 
 
 clean_app = typer.Typer(help="Delete past data. Destructive — use with care.")

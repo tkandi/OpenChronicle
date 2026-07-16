@@ -43,9 +43,9 @@ struct MenuContentView: View {
       Divider()
 
       Button {
-        AppDelegate.showControlCenter()
+        AppDelegate.showMainWindow()
       } label: {
-        Label("Control Center…", systemImage: "gearshape")
+        Label("Open OpenChronicle…", systemImage: "macwindow")
       }
 
       Button {

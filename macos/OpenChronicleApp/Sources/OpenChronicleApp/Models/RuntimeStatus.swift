@@ -41,6 +41,7 @@ struct RuntimePaths {
 
   var pidFile: URL { root.appendingPathComponent(".pid") }
   var pausedFlag: URL { root.appendingPathComponent(".paused") }
+  var configFile: URL { root.appendingPathComponent("config.toml") }
   var captureBuffer: URL { root.appendingPathComponent("capture-buffer", isDirectory: true) }
   var logsDirectory: URL { root.appendingPathComponent("logs", isDirectory: true) }
   var captureLog: URL { logsDirectory.appendingPathComponent("capture.log") }

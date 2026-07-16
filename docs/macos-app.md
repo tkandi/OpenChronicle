@@ -8,10 +8,13 @@ double-forking away from the terminal.
 
 ## What the app provides
 
-- Accessibility, Screen Recording, and Input Monitoring onboarding and live status
+- Accessibility, Screen Recording, and optional Input Monitoring onboarding and live status
 - start, stop, pause, resume, and safe takeover of an already-running CLI daemon
 - launch at login through `SMAppService.mainApp`
-- current PID, ownership, last-capture time, logs, and data-folder shortcuts
+- current PID, ownership, health, uptime, last-capture app, storage/memory
+  statistics, model diagnostics, logs, and data-folder shortcuts
+- validated configuration editing with automatic backups and backend restart
+- one unified sidebar window for controls, permissions, status, and settings
 - a stable bundle identifier: `com.openchronicle.desktop`
 
 The app reuses `~/.openchronicle/` in place. It does not migrate, rewrite, or
@@ -52,7 +55,8 @@ Grant these permissions to **OpenChronicle** in System Settings:
 
 1. Accessibility — AX Tree capture and AX event observation
 2. Screen Recording — screenshots and visible-window privacy checks
-3. Input Monitoring — interaction timing for click and text-input events
+3. Input Monitoring (optional) — more precise interaction timing for click and
+   text-input events
 
 OpenChronicle does not store raw key presses. The watcher uses key events only
 as a debounce signal, then reads the final focused-element value through AX;
@@ -66,6 +70,79 @@ foreground child. Existing data and active configuration are retained.
 After takeover, quitting OpenChronicle also stops its managed backend. This is
 intentional: leaving the child orphaned would defeat the app-owned permission
 and lifecycle model.
+
+## Detailed status
+
+The unified window's **Runtime & Storage** page loads local runtime and storage
+details through the same status collector used by the CLI. Normal refreshes
+skip model calls:
+
+```bash
+openchronicle status --json --no-model-checks
+```
+
+This reports version, root, PID, uptime, health, last capture and application,
+buffer size, session counts, memory counts, timeline progress, and configured
+model names. While a control page is visible, it refreshes once per minute; it
+also refreshes after lifecycle state changes or when **Refresh Status** is
+clicked.
+
+Model availability is checked only after clicking **Run Model Diagnostics**.
+Each distinct model configuration receives one small real request, matching the
+deduplicated checks performed by the regular `openchronicle status` command.
+
+## Configuration settings
+
+Choose **Open OpenChronicle…** from the menu bar to open the unified window. It
+returns to the last selected page; the first open defaults to **Overview**, and
+permission onboarding opens **Permissions** directly. Sidebar navigation keeps
+configuration drafts alive while moving between these pages:
+
+- default and per-stage model names, provider base URL, and API-key environment
+  variable name
+- capture timing, screenshot mode, privacy behavior, retention, and quality
+- privacy denylists for app names, bundle IDs, window titles, URLs, and text
+- timeline/session processing, reducer/classifier cadence, memory, and search
+- embedded MCP transport, host, port, and automatic startup
+
+The common form never receives, displays, or writes the value of a direct
+`api_key`. If the TOML already contains one, the configuration service returns
+only a boolean warning; environment variables remain the recommended secret
+mechanism. The Advanced editor is hidden behind an explicit button because it
+displays the complete file and may therefore reveal a direct key during
+screenshots or screen sharing.
+
+The Capture page loads only denylist counts during its normal configuration
+refresh. Choose **Manage Privacy Denylists…** to make a separate, explicit local
+request for the actual rule values. App names and bundle IDs are exact,
+case-insensitive matches; window-title, URL, and text rules use Python regular
+expressions with case-insensitive matching. Empty rules are rejected in the UI,
+and Python validates every expression before any file is written.
+
+Every save is strictly validated, checks that the file has not changed since it
+was loaded, creates a timestamped `config.toml.backup-*`, and atomically replaces
+the original. Unknown keys and comments survive common-form updates. **Save**
+leaves the running backend unchanged; **Apply & Restart** restarts an app-managed
+backend so the new settings take effect. An externally started backend must be
+taken over before the app can restart it.
+
+Changing a denylist replaces only that TOML array. Comments before and after
+the field remain intact, while comments embedded inside the changed array are
+replaced along with the array. Unchanged denylist fields retain their original
+formatting.
+
+The same local interface is available for diagnostics and automation:
+
+```bash
+openchronicle config --json
+openchronicle config --privacy-json   # explicitly includes private rule values
+openchronicle config --validate-json  # JSON request on stdin
+openchronicle config --patch-json     # JSON request on stdin
+openchronicle config --write-json     # JSON request on stdin
+```
+
+Treat `--privacy-json` output as sensitive: it omits API keys, but its rule
+values can identify private applications, sites, and text.
 
 ## Signing and permission stability
 

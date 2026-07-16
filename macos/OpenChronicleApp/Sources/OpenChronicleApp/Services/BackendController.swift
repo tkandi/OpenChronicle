@@ -146,6 +146,29 @@ final class BackendController: ObservableObject {
     pollForStop(startAfter: true)
   }
 
+  func restartBackend() {
+    refresh()
+    guard !isTransitioning else { return }
+    if snapshot.owner == .external {
+      lastError = "Take over the backend in OpenChronicle.app before restarting it."
+      return
+    }
+    guard let pid = snapshot.pid else {
+      startBackend()
+      return
+    }
+
+    isTransitioning = true
+    autoStartSuppressed = false
+    lastError = nil
+    if Darwin.kill(pid, SIGTERM) != 0 {
+      lastError = "Could not restart backend: \(String(cString: strerror(errno)))."
+      isTransitioning = false
+      return
+    }
+    pollForStop(startAfter: true)
+  }
+
   func setPaused(_ paused: Bool) {
     do {
       try FileManager.default.createDirectory(

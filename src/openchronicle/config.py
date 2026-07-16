@@ -211,13 +211,8 @@ def _build_dataclass(cls, raw: dict):
     return cls(**allowed)
 
 
-def load(path: Path | None = None) -> Config:
-    path = path or paths.config_file()
-    raw: dict = {}
-    if path.exists():
-        with open(path, "rb") as f:
-            raw = tomllib.load(f)
-
+def from_mapping(raw: dict) -> Config:
+    """Build a resolved Config from an already-parsed TOML mapping."""
     return Config(
         models=_build_models(_as_dict(raw.get("models"))),
         capture=_build_dataclass(CaptureConfig, _as_dict(raw.get("capture"))),
@@ -230,6 +225,15 @@ def load(path: Path | None = None) -> Config:
         search=_build_dataclass(SearchConfig, _as_dict(raw.get("search"))),
         mcp=_build_dataclass(MCPConfig, _as_dict(raw.get("mcp"))),
     )
+
+
+def load(path: Path | None = None) -> Config:
+    path = path or paths.config_file()
+    raw: dict = {}
+    if path.exists():
+        with open(path, "rb") as f:
+            raw = tomllib.load(f)
+    return from_mapping(raw)
 
 
 DEFAULT_CONFIG_TEMPLATE = """# OpenChronicle configuration

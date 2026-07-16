@@ -206,3 +206,54 @@ def test_status_shows_version(ac_root: Path) -> None:
     result = runner.invoke(cli.app, ["status"])
     assert result.exit_code == 0
     assert __version__ in result.output
+
+
+def test_status_json_without_model_checks_is_machine_readable(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The app-facing status path is pure JSON and never probes a model."""
+    buf = paths.capture_buffer_dir()
+    buf.mkdir(parents=True, exist_ok=True)
+    (buf / "capture.json").write_text(json.dumps({
+        "timestamp": datetime.now().astimezone().isoformat(),
+        "window_meta": {"app_name": "Test App"},
+    }))
+
+    def unexpected_ping(*args, **kwargs):  # noqa: ARG001
+        raise AssertionError("model checks must stay disabled")
+
+    monkeypatch.setattr(cli, "_ping_stages", unexpected_ping)
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["status", "--json", "--no-model-checks"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == 1
+    assert payload["version"] == __version__
+    assert payload["root"] == str(ac_root)
+    assert payload["last_capture"]["app"] == "Test App"
+    assert payload["buffer"]["count"] == 1
+    assert payload["sessions"] == {
+        "total": 0,
+        "reduced": 0,
+        "ended": 0,
+        "failed": 0,
+    }
+    assert all(not model["checked"] for model in payload["models"].values())
+
+
+def test_status_json_can_include_model_diagnostics(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Explicit JSON diagnostics report one result for every configured stage."""
+    monkeypatch.setenv("OPENCHRONICLE_LLM_MOCK", "1")
+    runner = CliRunner()
+    result = runner.invoke(cli.app, ["status", "--json", "--model-checks"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert set(payload["models"]) == {"timeline", "reducer", "classifier", "compact"}
+    for model in payload["models"].values():
+        assert model["checked"] is True
+        assert model["ok"] is True
+        assert model["mocked"] is True
