@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuContentView: View {
   @ObservedObject var backend: BackendController
   @ObservedObject var permissions: PermissionController
+  @ObservedObject var capturePause: CapturePauseController
 
   var body: some View {
     Group {
@@ -29,14 +30,27 @@ struct MenuContentView: View {
         .disabled(backend.isTransitioning || !permissions.accessibilityGranted)
       }
 
-      if backend.snapshot.isRunning {
+      if capturePause.isPaused {
         Button {
-          backend.setPaused(!backend.snapshot.isPaused)
+          capturePause.resume()
         } label: {
-          Label(
-            backend.snapshot.isPaused ? "Resume Capture" : "Pause Capture",
-            systemImage: backend.snapshot.isPaused ? "play.fill" : "pause.fill"
-          )
+          Label("Resume Capture", systemImage: "play.fill")
+        }
+
+        Menu {
+          pauseDurationButtons
+        } label: {
+          Label("Change Pause…", systemImage: "clock.arrow.circlepath")
+        }
+
+        if let error = capturePause.lastError {
+          Label(error, systemImage: "exclamationmark.triangle.fill")
+        }
+      } else if backend.snapshot.isRunning {
+        Menu {
+          pauseDurationButtons
+        } label: {
+          Label("Pause Capture…", systemImage: "pause.fill")
         }
       }
 
@@ -79,16 +93,30 @@ struct MenuContentView: View {
 
   private var statusText: String {
     if backend.isTransitioning { return "Changing backend state…" }
+    if capturePause.isPaused { return capturePause.statusText }
     if !backend.snapshot.isRunning { return "Stopped" }
-    if backend.snapshot.isPaused { return "Capture paused" }
     if backend.snapshot.owner == .external { return "Running outside the app" }
     return "Capturing"
   }
 
   private var statusColor: Color {
     if backend.isTransitioning { return .orange }
+    if capturePause.isPaused { return .orange }
     if !backend.snapshot.isRunning { return .red }
-    if backend.snapshot.isPaused { return .orange }
     return .green
+  }
+
+  @ViewBuilder
+  private var pauseDurationButtons: some View {
+    Button("30 Minutes") {
+      capturePause.pause(for: 30 * 60)
+    }
+    Button("1 Hour") {
+      capturePause.pause(for: 60 * 60)
+    }
+    Divider()
+    Button("Until I Resume") {
+      capturePause.pause(for: nil)
+    }
   }
 }

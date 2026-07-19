@@ -184,6 +184,12 @@ openchronicle pause
 
 Drops a `~/.openchronicle/.paused` sentinel. The watcher keeps streaming but `capture_once` short-circuits on sentinel presence. `resume` removes the sentinel.
 
+CLI-created timestamp-only sentinels are indefinite and require an explicit
+`openchronicle resume`. The native macOS app can instead store a structured
+timed pause in the same file. A timed pause resumes only after the app has
+successfully posted its one-minute warning and maintained a recent heartbeat;
+otherwise the scheduler fails closed and continues skipping capture.
+
 ## Smoke test
 
 ```bash

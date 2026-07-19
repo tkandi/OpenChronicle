@@ -10,6 +10,7 @@ from typing import Any
 
 from ..config import Config, resolve_api_key
 from ..logger import get
+from ..model_failures import record_model_failure
 
 logger = get("openchronicle.writer")
 
@@ -39,8 +40,6 @@ def call_llm(
     if os.environ.get("OPENCHRONICLE_LLM_MOCK") == "1":
         return _mock_response(stage, messages, tools, json_mode)
 
-    import litellm  # imported lazily to keep CLI startup fast
-
     model_cfg = cfg.model_for(stage)
     kwargs: dict[str, Any] = {
         "model": model_cfg.model,
@@ -60,7 +59,21 @@ def call_llm(
         kwargs["max_tokens"] = model_cfg.max_tokens
 
     logger.debug("llm call stage=%s model=%s", stage, model_cfg.model)
-    return litellm.completion(**kwargs)
+    try:
+        import litellm  # imported lazily to keep CLI startup fast
+
+        return litellm.completion(**kwargs)
+    except Exception as exc:  # noqa: BLE001
+        # LiteLLM raises only after its provider-level retry policy is
+        # exhausted.  Persist a compact event before the stage-specific caller
+        # applies its normal fallback or scheduled retry.
+        record_model_failure(
+            stage=stage,
+            model=model_cfg.model,
+            error=exc,
+            api_key=api_key,
+        )
+        raise
 
 
 def _mock_response(stage: str, messages, tools, json_mode):

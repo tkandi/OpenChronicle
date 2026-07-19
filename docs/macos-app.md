@@ -9,10 +9,13 @@ double-forking away from the terminal.
 ## What the app provides
 
 - Accessibility, Screen Recording, and optional Input Monitoring onboarding and live status
-- start, stop, pause, resume, and safe takeover of an already-running CLI daemon
+- start, stop, timed or indefinite privacy pauses, resume, and safe takeover of
+  an already-running CLI daemon
 - launch at login through `SMAppService.mainApp`
 - current PID, ownership, health, uptime, last-capture app, storage/memory
   statistics, model diagnostics, logs, and data-folder shortcuts
+- native macOS alerts when a background model call ultimately fails, with a
+  15-minute per-stage cooldown and a test button under Runtime & Storage
 - validated configuration editing with automatic backups and backend restart
 - one unified sidebar window for controls, permissions, status, and settings
 - a stable bundle identifier: `com.openchronicle.desktop`
@@ -71,6 +74,25 @@ After takeover, quitting OpenChronicle also stops its managed backend. This is
 intentional: leaving the child orphaned would defeat the app-owned permission
 and lifecycle model.
 
+## Privacy pause reminders
+
+The menu bar offers three explicit pause choices: **30 Minutes**, **1 Hour**,
+and **Until I Resume**. While paused, the menu-bar status shows the remaining
+time and provides **Resume Capture** plus a duration-change menu.
+
+One minute before a timed pause can end, the app posts a native notification
+with **Resume Now**, **Extend 30 Minutes**, and **Keep Paused** actions. Automatic
+resume is fail-closed: the backend requires both a successfully submitted
+warning and a recent app heartbeat. If notification permission is denied, the
+app is sleeping, or the app stops responding, capture remains paused. Waking
+after a missed deadline produces a fresh one-minute warning instead of silently
+resuming.
+
+An indefinite pause sends its first reminder after one hour and repeats every
+two hours. Relaunching the app or waking the Mac immediately delivers any
+overdue reminder. Existing timestamp-only `.paused` files are treated as
+indefinite pauses for backward-compatible privacy.
+
 ## Detailed status
 
 The unified window's **Runtime & Storage** page loads local runtime and storage
@@ -90,6 +112,26 @@ clicked.
 Model availability is checked only after clicking **Run Model Diagnostics**.
 Each distinct model configuration receives one small real request, matching the
 deduplicated checks performed by the regular `openchronicle status` command.
+
+## Model failure notifications
+
+The Python backend appends a compact event to
+`~/.openchronicle/events/model-failures.jsonl` only when a normal background
+LiteLLM request raises after provider retries are exhausted. The event contains
+the stage, configured model, exception class, and a short sanitized first line;
+prompts, responses, and API keys are never included. `OpenChronicle.app` reads
+new events and posts native notifications. Matching failures are limited to one
+notification per stage and model every 15 minutes.
+
+After macOS accepts a notification request, the app stores only its event ID
+and delivery timestamp in the app's local preferences. This powers the **Last
+alert** status and provides a diagnostic acknowledgement without retaining any
+additional error text.
+
+Notifications are enabled by default and require the standard macOS notification
+permission. They can be disabled or tested from **Runtime & Storage → Model
+Failure Notifications**. Manual **Run Model Diagnostics** failures remain in the
+diagnostics UI and do not create background failure alerts.
 
 ## Configuration settings
 

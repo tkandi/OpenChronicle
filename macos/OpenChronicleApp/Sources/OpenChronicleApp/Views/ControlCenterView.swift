@@ -12,6 +12,8 @@ struct ControlCenterView: View {
   @ObservedObject var permissions: PermissionController
   @ObservedObject var loginItem: LoginItemController
   @ObservedObject var statusDetails: StatusDetailsController
+  @ObservedObject var modelFailureNotifications: ModelFailureNotificationController
+  @ObservedObject var capturePause: CapturePauseController
   let page: ControlCenterPage
   @State private var controlCenterVisible = false
 
@@ -64,9 +66,16 @@ struct ControlCenterView: View {
               .disabled(!permissions.accessibilityGranted)
             }
 
-            if backend.snapshot.isRunning {
-              Button(backend.snapshot.isPaused ? "Resume Capture" : "Pause Capture") {
-                backend.setPaused(!backend.snapshot.isPaused)
+            if capturePause.isPaused {
+              Button("Resume Capture") {
+                capturePause.resume()
+              }
+              Menu("Change Pause…") {
+                pauseDurationButtons
+              }
+            } else if backend.snapshot.isRunning {
+              Menu("Pause Capture…") {
+                pauseDurationButtons
               }
             }
 
@@ -179,6 +188,47 @@ struct ControlCenterView: View {
             .disabled(statusDetails.isRefreshing || statusDetails.isCheckingModels)
           }
         }
+
+        Section("Model Failure Notifications") {
+          Toggle(
+            "Notify when background model calls fail",
+            isOn: Binding(
+              get: { modelFailureNotifications.isEnabled },
+              set: { modelFailureNotifications.setEnabled($0) }
+            )
+          )
+          LabeledContent(
+            "Notification permission",
+            value: modelFailureNotifications.authorizationText
+          )
+          if let date = modelFailureNotifications.lastNotificationDate {
+            LabeledContent("Last alert", value: relativeText(for: date))
+          }
+
+          HStack {
+            Text(
+              "Alerts contain only the stage, model, and sanitized error. Repeated matching failures are limited to one alert per stage every 15 minutes."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Spacer()
+            if modelFailureNotifications.canOpenNotificationSettings {
+              Button("Open Notification Settings") {
+                modelFailureNotifications.openNotificationSettings()
+              }
+            }
+            Button("Send Test Notification") {
+              modelFailureNotifications.sendTestNotification()
+            }
+            .disabled(!modelFailureNotifications.isEnabled)
+          }
+
+          if let error = modelFailureNotifications.lastError {
+            Text(error)
+              .font(.caption)
+              .foregroundStyle(.red)
+          }
+        }
       }
 
       if page == .permissions {
@@ -266,6 +316,13 @@ struct ControlCenterView: View {
         }
       }
 
+      if page == .overview, let pauseError = capturePause.lastError {
+        Section("Pause Reminder Error") {
+          Text(pauseError)
+            .foregroundStyle(.red)
+        }
+      }
+
       if page == .runtime, let statusError = statusDetails.lastError {
         Section("Status Error") {
           Text(statusError)
@@ -307,7 +364,7 @@ struct ControlCenterView: View {
         await statusDetails.refresh()
       }
     }
-    .onChange(of: backend.snapshot.isPaused) { _ in
+    .onChange(of: capturePause.isPaused) { _ in
       Task {
         await statusDetails.refresh()
       }
@@ -322,19 +379,33 @@ struct ControlCenterView: View {
 
   private var runtimeStatus: String {
     if backend.isTransitioning { return "Changing state…" }
+    if capturePause.isPaused { return capturePause.statusText }
     if !backend.snapshot.isRunning { return "Stopped" }
-    if backend.snapshot.isPaused { return "Paused" }
     return "Active"
   }
 
   private var runtimeColor: Color {
     if backend.isTransitioning { return .orange }
+    if capturePause.isPaused { return .orange }
     if !backend.snapshot.isRunning { return .red }
-    if backend.snapshot.isPaused { return .orange }
     if let state = matchingDetails?.health.state {
       return healthColor(state)
     }
     return .green
+  }
+
+  @ViewBuilder
+  private var pauseDurationButtons: some View {
+    Button("30 Minutes") {
+      capturePause.pause(for: 30 * 60)
+    }
+    Button("1 Hour") {
+      capturePause.pause(for: 60 * 60)
+    }
+    Divider()
+    Button("Until I Resume") {
+      capturePause.pause(for: nil)
+    }
   }
 
   private var lastCaptureText: String {

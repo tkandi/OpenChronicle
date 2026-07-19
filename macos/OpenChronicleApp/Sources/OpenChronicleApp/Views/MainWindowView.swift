@@ -7,6 +7,8 @@ struct MainWindowView: View {
   @ObservedObject var statusDetails: StatusDetailsController
   @ObservedObject var configuration: ConfigurationController
   @ObservedObject var navigator: MainWindowNavigator
+  @ObservedObject var modelFailureNotifications: ModelFailureNotificationController
+  @ObservedObject var capturePause: CapturePauseController
 
   var body: some View {
     NavigationSplitView {
@@ -92,6 +94,8 @@ struct MainWindowView: View {
         permissions: permissions,
         loginItem: loginItem,
         statusDetails: statusDetails,
+        modelFailureNotifications: modelFailureNotifications,
+        capturePause: capturePause,
         page: .overview
       )
     case .permissions:
@@ -100,6 +104,8 @@ struct MainWindowView: View {
         permissions: permissions,
         loginItem: loginItem,
         statusDetails: statusDetails,
+        modelFailureNotifications: modelFailureNotifications,
+        capturePause: capturePause,
         page: .permissions
       )
     case .runtime:
@@ -108,6 +114,8 @@ struct MainWindowView: View {
         permissions: permissions,
         loginItem: loginItem,
         statusDetails: statusDetails,
+        modelFailureNotifications: modelFailureNotifications,
+        capturePause: capturePause,
         page: .runtime
       )
     case .models:

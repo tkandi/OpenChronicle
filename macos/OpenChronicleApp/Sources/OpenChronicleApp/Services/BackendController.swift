@@ -41,6 +41,7 @@ final class BackendController: ObservableObject {
     refresh()
     guard accessibilityGranted,
       !snapshot.isRunning,
+      managedProcess?.isRunning != true,
       !autoStartSuppressed,
       !isTransitioning
     else {
@@ -51,7 +52,10 @@ final class BackendController: ObservableObject {
 
   func startBackend() {
     refresh()
-    guard !snapshot.isRunning, !isTransitioning else { return }
+    guard !snapshot.isRunning,
+      managedProcess?.isRunning != true,
+      !isTransitioning
+    else { return }
     guard let command = locator.locate() else {
       lastError = "OpenChronicle backend not found. Run bash install.sh first."
       return
@@ -167,25 +171,6 @@ final class BackendController: ObservableObject {
       return
     }
     pollForStop(startAfter: true)
-  }
-
-  func setPaused(_ paused: Bool) {
-    do {
-      try FileManager.default.createDirectory(
-        at: paths.root,
-        withIntermediateDirectories: true
-      )
-      if paused {
-        let stamp = ISO8601DateFormatter().string(from: Date())
-        try Data(stamp.utf8).write(to: paths.pausedFlag, options: .atomic)
-      } else if FileManager.default.fileExists(atPath: paths.pausedFlag.path) {
-        try FileManager.default.removeItem(at: paths.pausedFlag)
-      }
-      lastError = nil
-      refresh()
-    } catch {
-      lastError = "Could not change capture state: \(error.localizedDescription)"
-    }
   }
 
   func revealLogs() {

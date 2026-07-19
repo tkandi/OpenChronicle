@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import paths
+from ..capture_pause import capture_is_paused
 from ..config import CaptureConfig
 from ..logger import get
 from ..store import fts as fts_store
@@ -39,7 +40,7 @@ def _build_capture(
     """Build an enriched capture dict in memory. Returns None if capturing is paused."""
     paths.ensure_dirs()
 
-    if paths.paused_flag().exists():
+    if capture_is_paused():
         logger.info("capture skipped (paused)")
         return None
 

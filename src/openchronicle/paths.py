@@ -25,6 +25,15 @@ def logs_dir() -> Path:
     return root() / "logs"
 
 
+def events_dir() -> Path:
+    return root() / "events"
+
+
+def model_failure_events_file() -> Path:
+    """Append-only handoff from the backend to the native notification host."""
+    return events_dir() / "model-failures.jsonl"
+
+
 def config_file() -> Path:
     return root() / "config.toml"
 
@@ -47,5 +56,5 @@ def writer_state() -> Path:
 
 
 def ensure_dirs() -> None:
-    for d in (root(), memory_dir(), capture_buffer_dir(), logs_dir()):
+    for d in (root(), memory_dir(), capture_buffer_dir(), logs_dir(), events_dir()):
         d.mkdir(parents=True, exist_ok=True)

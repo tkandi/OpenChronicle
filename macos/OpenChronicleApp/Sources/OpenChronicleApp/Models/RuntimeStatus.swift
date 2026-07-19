@@ -44,8 +44,12 @@ struct RuntimePaths {
   var configFile: URL { root.appendingPathComponent("config.toml") }
   var captureBuffer: URL { root.appendingPathComponent("capture-buffer", isDirectory: true) }
   var logsDirectory: URL { root.appendingPathComponent("logs", isDirectory: true) }
+  var eventsDirectory: URL { root.appendingPathComponent("events", isDirectory: true) }
   var captureLog: URL { logsDirectory.appendingPathComponent("capture.log") }
   var appHostLog: URL { logsDirectory.appendingPathComponent("app-host.log") }
+  var modelFailureEvents: URL {
+    eventsDirectory.appendingPathComponent("model-failures.jsonl")
+  }
 
   static func live(fileManager: FileManager = .default) -> RuntimePaths {
     if let override = ProcessInfo.processInfo.environment["OPENCHRONICLE_ROOT"],

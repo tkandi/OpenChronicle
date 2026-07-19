@@ -131,4 +131,51 @@ final class RuntimeProbeTests: XCTestCase {
     XCTAssertFalse(controller.snapshot.isRunning)
     controller.shutdownManagedBackend()
   }
+
+  @MainActor
+  func testBackendStartIsDeduplicatedBeforePIDFileAppears() async throws {
+    let executable = root.appendingPathComponent("slow-openchronicle")
+    let launches = root.appendingPathComponent("launches")
+    let script = """
+      #!/bin/sh
+      echo launch >> "$OPENCHRONICLE_ROOT/launches"
+      sleep 0.4
+      echo $$ > "$OPENCHRONICLE_ROOT/.pid"
+      trap 'rm -f "$OPENCHRONICLE_ROOT/.pid"; exit 0' TERM INT
+      while true; do sleep 0.1; done
+      """
+    try Data(script.utf8).write(to: executable)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o755],
+      ofItemAtPath: executable.path
+    )
+    let locator = BackendLocator(
+      environment: ["OPENCHRONICLE_BIN": executable.path],
+      homeDirectory: root,
+      bundleResources: nil
+    )
+    let controller = BackendController(paths: paths, locator: locator)
+    defer { controller.shutdownManagedBackend() }
+
+    controller.startBackend()
+    controller.startBackend()
+    for _ in 0..<20 where !FileManager.default.fileExists(atPath: launches.path) {
+      try await Task.sleep(nanoseconds: 50_000_000)
+    }
+
+    let launchText = try String(contentsOf: launches, encoding: .utf8)
+    XCTAssertEqual(launchText.split(separator: "\n").count, 1)
+
+    for _ in 0..<20 where !controller.snapshot.isRunning {
+      try await Task.sleep(nanoseconds: 100_000_000)
+      controller.refresh()
+    }
+    XCTAssertTrue(controller.snapshot.isRunning)
+
+    controller.stopBackend()
+    for _ in 0..<30 where controller.snapshot.isRunning {
+      try await Task.sleep(nanoseconds: 100_000_000)
+      controller.refresh()
+    }
+  }
 }
