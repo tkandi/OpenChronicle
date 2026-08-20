@@ -42,6 +42,33 @@ deny_text_patterns = ["private phrase that should stay in TOML"]
     assert payload["values"]["capture"]["privacy_counts"]["deny_text_patterns"] == 1
 
 
+def test_config_indicator_style_is_editable_and_validated(ac_root: Path) -> None:
+    path = ac_root / "config.toml"
+    path.write_text('[capture]\nprivacy_indicator_style = "pill"\n')
+    runner = CliRunner()
+    _, snapshot = _invoke_json(runner, ["config", "--json"])
+    assert snapshot["values"]["capture"]["privacy_indicator_style"] == "pill"
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--patch-json"],
+        {
+            "expected_sha256": snapshot["sha256"],
+            "updates": {"capture.privacy_indicator_style": "border"},
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert tomllib.loads(path.read_text())["capture"]["privacy_indicator_style"] == "border"
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--validate-json"],
+        {"content": '[capture]\nprivacy_indicator_style = "invalid"\n'},
+    )
+    assert result.exit_code == 2
+    assert "privacy_indicator_style" in payload["error"]
+
+
 def test_config_privacy_json_is_explicit_and_still_omits_api_keys(ac_root: Path) -> None:
     secret = "sk-local-secret-that-must-not-leak"
     private_rule = "private.example.com"

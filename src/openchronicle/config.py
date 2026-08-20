@@ -11,6 +11,11 @@ from typing import Any
 from . import paths
 
 
+PRIVACY_INDICATOR_STYLES = frozenset(
+    {"off", "border", "shield", "pill", "quiet-shield", "banner"}
+)
+
+
 def _str_list(value: Any) -> list[str]:
     if value is None:
         return []
@@ -32,6 +37,7 @@ class ModelConfig:
 
 @dataclass
 class CaptureConfig:
+    privacy_indicator_style: str = "pill"
     # Event-driven capture knobs
     event_driven: bool = True  # consume mac-ax-watcher events
     heartbeat_minutes: int = 10  # periodic capture even without events
@@ -69,6 +75,12 @@ class CaptureConfig:
     deny_text_patterns: list[str] = field(default_factory=list)
 
     def __post_init__(self) -> None:
+        indicator_style = str(self.privacy_indicator_style or "pill").strip().lower()
+        self.privacy_indicator_style = (
+            indicator_style
+            if indicator_style in PRIVACY_INDICATOR_STYLES
+            else "pill"
+        )
         mode = str(self.screenshot_monitor or "primary").strip().lower()
         self.screenshot_monitor = mode if mode in {"primary", "all", "separate"} else "primary"
         privacy_mode = str(self.screenshot_privacy_mode or "skip-monitor").strip().lower()
@@ -278,6 +290,7 @@ include_screenshot = true
 screenshot_monitor = "primary"          # "primary" (legacy single monitor), "all" (one virtual desktop image), or "separate" (screenshots[] per monitor)
 screenshot_privacy_mode = "skip-monitor" # skip monitors containing any visible app/bundle/title denylist match
 screenshot_privacy_fail_closed = true    # if visible-window enumeration fails, do not take screenshots
+privacy_indicator_style = "pill"       # off, border, shield, pill, quiet-shield, or banner
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                # Electron apps (Claude Desktop, VS Code, Slack) have deep DOM; 8 only reaches the chrome

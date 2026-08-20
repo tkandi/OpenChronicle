@@ -98,6 +98,16 @@ screenshot_privacy_mode = "unknown"
     assert cfg.capture.screenshot_privacy_mode == "skip-monitor"
 
 
+def test_capture_privacy_indicator_style_config(tmp_path: Path) -> None:
+    path = tmp_path / "config.toml"
+    path.write_text('[capture]\nprivacy_indicator_style = "SHIELD"\n')
+    assert config.load(path).capture.privacy_indicator_style == "shield"
+
+    path.write_text('[capture]\nprivacy_indicator_style = "unknown"\n')
+    assert config.load(path).capture.privacy_indicator_style == "pill"
+    assert config.load(tmp_path / "missing.toml").capture.privacy_indicator_style == "pill"
+
+
 def test_write_default_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
     assert config.write_default_if_missing(p)

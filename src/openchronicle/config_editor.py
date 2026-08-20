@@ -56,6 +56,7 @@ EDITABLE_PATHS = {
     "capture.screenshot_monitor",
     "capture.screenshot_privacy_mode",
     "capture.screenshot_privacy_fail_closed",
+    "capture.privacy_indicator_style",
     "capture.buffer_retention_hours",
     "capture.screenshot_retention_hours",
     "capture.buffer_max_mb",
@@ -205,6 +206,20 @@ def validate_mapping(raw: dict[str, Any]) -> None:
     )
     if privacy_mode is not None and privacy_mode.lower() not in {"off", "skip-monitor"}:
         raise ConfigEditorError("capture.screenshot_privacy_mode must be off or skip-monitor")
+    indicator_style = _require_type(
+        capture,
+        "privacy_indicator_style",
+        str,
+        "capture.privacy_indicator_style",
+    )
+    if (
+        indicator_style is not None
+        and indicator_style.lower() not in config_mod.PRIVACY_INDICATOR_STYLES
+    ):
+        raise ConfigEditorError(
+            "capture.privacy_indicator_style must be off, border, shield, pill, "
+            "quiet-shield, or banner"
+        )
     for key in (
         "deny_app_names",
         "deny_bundle_ids",
@@ -362,6 +377,7 @@ def snapshot_payload(path: Path) -> dict[str, Any]:
                     "screenshot_privacy_fail_closed": (
                         cfg.capture.screenshot_privacy_fail_closed
                     ),
+                    "privacy_indicator_style": cfg.capture.privacy_indicator_style,
                     "screenshot_jpeg_quality": cfg.capture.screenshot_jpeg_quality,
                     "privacy_counts": {
                         field: len(getattr(cfg.capture, field))
