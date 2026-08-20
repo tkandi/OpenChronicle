@@ -42,10 +42,20 @@ The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
   it cannot display the yellow failure state and screenshot capture remains
   stopped until the helper is confirmed again.
 
-Protection detection reads only local visible-window titles and geometry
-metadata. A display excluded by that decision produces no capture JSON, no FTS
-index entry, no memory/timeline input, and no model request for that protected
-content.
+Protection detection locally inspects top-level visible-window metadata: owner
+or app name, bundle identifier, window title, position, size, and active state;
+on-screen/minimized state is handled where the platform exposes it. It does not
+traverse background window controls or contents. The detection inventory is used
+only for the protection decision and is not copied into capture JSON, FTS,
+timeline, memory, or model requests.
+
+In `separate` and `primary` modes, a capture JSON for a safe display may still
+be written. The protected window's content and derived AX/S1 fields are not
+captured when the protection gate marks the active display as protected; the
+same decision suppresses the protected screenshot region. A foreground window
+that directly matches the denylist can instead skip the entire capture before
+it is written, indexed, sent to timeline or memory processing, or sent to a
+model.
 
 The filename is ISO-8601 with `:` → `-` and `+` → `p` / `-` → `m` for the TZ offset. Example: `2026-04-21T17-07-32p08-00.json`.
 

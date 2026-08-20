@@ -183,9 +183,14 @@ capture is fail-closed. The overlay helper is a separate process, so no visible
 indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
-The decision inspects only local window-title and geometry metadata. It does
-not write protected content to a capture, create an index entry, feed timeline
-or memory processing, or send that content to a model.
+The decision locally inspects top-level owner/app name, bundle identifier,
+window title, position, size, and active state; on-screen/minimized state is
+handled where the platform exposes it. This detection inventory is not copied
+into capture JSON, FTS, timeline, memory, or model requests. In `separate` and
+`primary` modes, a safe-display capture JSON may still be written. When the
+gate protects the active display, the protected window's content and derived
+AX/S1 fields are suppressed; a foreground denylist match can instead skip the
+entire capture before it is written or processed.
 
 Before relying on the setting in daily use, perform this manual acceptance on
 empty privacy windows after an explicit reinstall: verify `separate` and `all`
