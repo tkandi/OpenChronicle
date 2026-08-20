@@ -113,6 +113,10 @@ def _helper_script(tmp_path: Path, body: str) -> Path:
     return helper
 
 
+def _python_helper_transport(helper: Path) -> _SubprocessOverlayTransport:
+    return _SubprocessOverlayTransport(helper, interpreter=sys.executable)
+
+
 def test_overlay_command_contains_only_geometry_and_state(
     snapshot: ProtectionSnapshot, fake_transport: FakeTransport
 ) -> None:
@@ -307,7 +311,7 @@ def test_malformed_then_valid_acknowledgements_fail_closed(snapshot, tmp_path: P
         "    print('{bad-json', flush=True)\n"
         "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
     )
-    client = PrivacyOverlayClient(transport_factory=lambda: _SubprocessOverlayTransport(helper))
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
     assert client.render(snapshot, timeout=0.2) is False
 
@@ -321,7 +325,7 @@ def test_wrong_generation_then_valid_acknowledgements_fail_closed(snapshot, tmp_
         "    print(json.dumps({'generation': command['generation'] + 1, 'rendered': True}), flush=True)\n"
         "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
     )
-    client = PrivacyOverlayClient(transport_factory=lambda: _SubprocessOverlayTransport(helper))
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
     assert client.render(snapshot, timeout=0.2) is False
 
@@ -334,7 +338,7 @@ def test_repeated_generation_acknowledgement_fails_closed(snapshot, tmp_path: Pa
         "    command = json.loads(line)\n"
         "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
     )
-    transport = _SubprocessOverlayTransport(helper)
+    transport = _python_helper_transport(helper)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
 
     assert client.render(snapshot, timeout=0.2) is True, (
@@ -359,7 +363,7 @@ def test_duplicate_prior_acknowledgement_fails_next_command_closed(snapshot, tmp
         "        print(json.dumps({'generation': first_generation, 'rendered': True}), flush=True)\n"
         "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
     )
-    client = PrivacyOverlayClient(transport_factory=lambda: _SubprocessOverlayTransport(helper))
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
     assert client.render(snapshot, timeout=0.2) is True
     assert client.render(replace(snapshot, generation=snapshot.generation + 1), timeout=0.2) is False
@@ -372,7 +376,7 @@ def test_preexisting_acknowledgement_fails_closed(snapshot, tmp_path: Path) -> N
         "print('{\"generation\": 12, \"rendered\": true}', flush=True)\n"
         "time.sleep(30)",
     )
-    transport = _SubprocessOverlayTransport(helper)
+    transport = _python_helper_transport(helper)
     with transport._condition:
         assert transport._condition.wait_for(lambda: transport._protocol_failed, timeout=0.5)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
@@ -390,7 +394,7 @@ def test_malformed_acknowledgement_is_not_confirmed(
         "time.sleep(30)",
     )
     client = PrivacyOverlayClient(
-        transport_factory=lambda: _SubprocessOverlayTransport(helper)
+        transport_factory=lambda: _python_helper_transport(helper)
     )
 
     assert client.render(snapshot, timeout=0.2) is False
@@ -399,10 +403,30 @@ def test_malformed_acknowledgement_is_not_confirmed(
 def test_exited_child_is_not_confirmed(snapshot: ProtectionSnapshot, tmp_path: Path) -> None:
     helper = _helper_script(tmp_path, "")
     client = PrivacyOverlayClient(
-        transport_factory=lambda: _SubprocessOverlayTransport(helper)
+        transport_factory=lambda: _python_helper_transport(helper)
     )
 
     assert client.render(snapshot, timeout=0.2) is False
+
+
+def test_subprocess_transport_can_launch_helper_through_existing_interpreter(
+    snapshot: ProtectionSnapshot, tmp_path: Path
+) -> None:
+    helper = _helper_script(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+    )
+    helper.chmod(stat.S_IRUSR | stat.S_IWUSR)
+    transport = _SubprocessOverlayTransport(helper, interpreter=sys.executable)
+    client = PrivacyOverlayClient(transport_factory=lambda: transport)
+
+    try:
+        assert client.render(snapshot, timeout=0.2) is True
+    finally:
+        client.close()
 
 
 def test_close_stops_subprocess_reader_thread(snapshot: ProtectionSnapshot, tmp_path: Path) -> None:
@@ -413,7 +437,7 @@ def test_close_stops_subprocess_reader_thread(snapshot: ProtectionSnapshot, tmp_
         "    command = json.loads(line)\n"
         "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
     )
-    transport = _SubprocessOverlayTransport(helper)
+    transport = _python_helper_transport(helper)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
 
     assert client.render(snapshot) is True

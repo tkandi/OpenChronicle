@@ -155,7 +155,7 @@ def _resolve_overlay_path() -> Path | None:
 class _SubprocessOverlayTransport:
     """NDJSON transport backed by one helper process and one reader thread."""
 
-    def __init__(self, helper_path: Path) -> None:
+    def __init__(self, helper_path: Path, *, interpreter: str | None = None) -> None:
         self._condition = threading.Condition()
         self._command_lock = threading.Lock()
         self._closed = False
@@ -164,8 +164,9 @@ class _SubprocessOverlayTransport:
         self._pending_generation: int | None = None
         self._pending_result: bool | None = None
         self._completed_generations: set[int] = set()
+        command = [str(helper_path)] if interpreter is None else [interpreter, str(helper_path)]
         self._process: subprocess.Popen[str] | None = subprocess.Popen(
-            [str(helper_path)],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
