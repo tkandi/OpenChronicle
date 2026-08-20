@@ -613,35 +613,44 @@ private struct PrivacyIndicatorStyleButton: View {
 private struct PrivacyIndicatorPreview: View {
   let option: PrivacyIndicatorStyleOption
 
+  private var descriptor: PrivacyIndicatorPreviewDescriptor {
+    option.previewDescriptor
+  }
+
+  private var overlayAlignment: Alignment {
+    switch descriptor.placement {
+    case .none: return .center
+    case .lowerTrailing: return .bottomTrailing
+    case .top: return .top
+    }
+  }
+
   var body: some View {
-    ZStack {
+    ZStack(alignment: overlayAlignment) {
       RoundedRectangle(cornerRadius: 4)
         .fill(Color.black.opacity(0.78))
 
-      switch option {
-      case .off:
-        Image(systemName: option.systemImage)
-          .foregroundStyle(.secondary)
-      case .border:
+      switch descriptor.composition {
+      case .none:
+        EmptyView()
+      case .borderAndBadge:
         RoundedRectangle(cornerRadius: 3)
-          .stroke(Color.green, lineWidth: 3)
+          .stroke(Color.green.opacity(0.9), lineWidth: 1)
+          .padding(1)
+        RuntimePreviewBadge(text: descriptor.text)
           .padding(4)
-      case .shield, .quietShield:
-        Image(systemName: option.systemImage)
-          .font(.system(size: option == .shield ? 22 : 16, weight: .medium))
-          .foregroundStyle(option == .shield ? Color.green : Color.green.opacity(0.72))
+      case .solidShield:
+        RuntimePreviewBadge(text: nil)
+          .padding(4)
       case .pill:
-        Text(option.sampleText ?? "")
-          .font(.system(size: 9, weight: .semibold))
-          .foregroundStyle(.white)
-          .padding(.horizontal, 8)
-          .padding(.vertical, 4)
-          .background(Capsule().fill(Color.green))
+        RuntimePreviewBadge(text: descriptor.text)
+          .padding(4)
+      case .quietShield:
+        RuntimeQuietShield()
+          .padding(4)
       case .banner:
         VStack(spacing: 0) {
-          Rectangle()
-            .fill(Color.green)
-            .frame(height: 9)
+          RuntimePreviewBanner(text: descriptor.text ?? "")
           Spacer()
         }
         .clipShape(RoundedRectangle(cornerRadius: 4))
@@ -649,6 +658,58 @@ private struct PrivacyIndicatorPreview: View {
     }
     .frame(width: 96, height: 44)
     .accessibilityHidden(true)
+  }
+}
+
+private struct RuntimePreviewBadge: View {
+  let text: String?
+
+  var body: some View {
+    HStack(spacing: 2) {
+      Image(systemName: "checkmark.shield.fill")
+        .font(.system(size: 10, weight: .medium))
+      if let text {
+        Text(text)
+          .font(.system(size: 7, weight: .medium))
+      }
+    }
+    .foregroundStyle(.white)
+    .padding(.horizontal, text == nil ? 4 : 5)
+    .frame(height: 20)
+    .background(RoundedRectangle(cornerRadius: 4).fill(Color.green.opacity(0.92)))
+  }
+}
+
+private struct RuntimeQuietShield: View {
+  var body: some View {
+    Image(systemName: "checkmark.shield.fill")
+      .font(.system(size: 10, weight: .medium))
+      .foregroundStyle(Color.green.opacity(0.8))
+      .frame(width: 20, height: 20)
+      .background(Color.green.opacity(0.18))
+      .overlay(
+        RoundedRectangle(cornerRadius: 4)
+          .stroke(Color.green.opacity(0.8), lineWidth: 1)
+      )
+      .clipShape(RoundedRectangle(cornerRadius: 4))
+  }
+}
+
+private struct RuntimePreviewBanner: View {
+  let text: String
+
+  var body: some View {
+    HStack(spacing: 3) {
+      Image(systemName: "checkmark.shield.fill")
+        .font(.system(size: 8, weight: .medium))
+      Text(text)
+        .font(.system(size: 7, weight: .medium))
+      Spacer(minLength: 0)
+    }
+    .foregroundStyle(.white)
+    .padding(.horizontal, 5)
+    .frame(maxWidth: .infinity, minHeight: 12, maxHeight: 12)
+    .background(Color.green.opacity(0.92))
   }
 }
 

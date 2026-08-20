@@ -32,7 +32,57 @@ enum PrivacyIndicatorStyleOption: String, CaseIterable, Identifiable {
     }
   }
 
-  var sampleText: String? {
-    self == .pill ? "已保护" : nil
+  var previewDescriptor: PrivacyIndicatorPreviewDescriptor {
+    switch self {
+    case .off:
+      return PrivacyIndicatorPreviewDescriptor(composition: .none, placement: .none, text: nil)
+    case .border:
+      return PrivacyIndicatorPreviewDescriptor(
+        composition: .borderAndBadge,
+        placement: .lowerTrailing,
+        text: "已保护"
+      )
+    case .shield:
+      return PrivacyIndicatorPreviewDescriptor(
+        composition: .solidShield,
+        placement: .lowerTrailing,
+        text: nil
+      )
+    case .pill:
+      return PrivacyIndicatorPreviewDescriptor(
+        composition: .pill,
+        placement: .lowerTrailing,
+        text: "已保护"
+      )
+    case .quietShield:
+      return PrivacyIndicatorPreviewDescriptor(
+        composition: .quietShield,
+        placement: .lowerTrailing,
+        text: nil
+      )
+    case .banner:
+      return PrivacyIndicatorPreviewDescriptor(composition: .banner, placement: .top, text: "已保护")
+    }
   }
+}
+
+struct PrivacyIndicatorPreviewDescriptor: Equatable {
+  enum Composition: Equatable {
+    case none
+    case borderAndBadge
+    case solidShield
+    case pill
+    case quietShield
+    case banner
+  }
+
+  enum Placement: Equatable {
+    case none
+    case lowerTrailing
+    case top
+  }
+
+  let composition: Composition
+  let placement: Placement
+  let text: String?
 }
