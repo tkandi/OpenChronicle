@@ -505,6 +505,46 @@ def test_post_ax_validation_that_newly_blocks_ax_discards_whole_capture(
     assert monitor.force_calls == [True, False]
 
 
+@pytest.mark.parametrize("provider_available", [True, False], ids=["no-result", "unavailable"])
+def test_post_ax_validation_discards_newly_blocked_capture_without_ax_tree(
+    ac_root: Path, monkeypatch, provider_available: bool,
+) -> None:
+    provider = (
+        _FakeProvider(raw_json=None)
+        if provider_available
+        else scheduler_mod.ax_capture.UnavailableAXProvider("test unavailable")
+    )
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(
+            generation=60,
+            active_display_id=1,
+            protected_ids={2},
+            confirmed=True,
+        ),
+        _protection_decision(
+            generation=61,
+            active_display_id=1,
+            protected_ids={1},
+            confirmed=True,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(include_screenshot=False),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert monitor.force_calls == [True, False]
+
+
 @pytest.mark.parametrize("latest_state", [ProtectionState.PROTECTED, ProtectionState.FAILED])
 def test_post_ax_validation_blocks_write_without_screenshot(
     ac_root: Path, monkeypatch, latest_state: ProtectionState,

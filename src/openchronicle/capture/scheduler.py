@@ -97,11 +97,8 @@ def _build_capture(
         if (
             latest.snapshot.generation != decision.snapshot.generation
             and latest.snapshot.ax_blocked
-            and "ax_tree" in out
         ):
-            logger.warning(
-                "capture skipped: latest privacy protection invalidated AX data"
-            )
+            logger.warning("capture skipped: latest privacy protection invalidated capture")
             return None
         decision = latest
 
