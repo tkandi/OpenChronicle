@@ -58,6 +58,33 @@ class BlockingTransport(FakeTransport):
         super().close()
 
 
+class AttemptObservingLock:
+    """Test-only lock that proves a second caller reached the contention point."""
+
+    def __init__(self, *, bypass: bool = False) -> None:
+        self._lock = threading.Lock()
+        self._attempt_guard = threading.Lock()
+        self._attempts = 0
+        self.second_attempted = threading.Event()
+        self._bypass = bypass
+
+    def __enter__(self) -> "AttemptObservingLock":
+        with self._attempt_guard:
+            self._attempts += 1
+            if self._attempts >= 2:
+                self.second_attempted.set()
+        if not self._bypass:
+            self._lock.acquire()
+        return self
+
+    def __exit__(self, *_args) -> None:
+        if not self._bypass:
+            self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+
 @pytest.fixture
 def snapshot() -> ProtectionSnapshot:
     right = DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False)
@@ -348,6 +375,8 @@ def test_concurrent_renders_share_one_transport_and_serialize_commands(snapshot)
         return transport
 
     client = PrivacyOverlayClient(transport_factory=factory)
+    send_lock = AttemptObservingLock()
+    client._send_lock = send_lock
     results: list[bool] = []
     first = threading.Thread(target=lambda: results.append(client.render(snapshot, timeout=1.0)))
     second_snapshot = replace(snapshot, generation=snapshot.generation + 1)
@@ -356,10 +385,14 @@ def test_concurrent_renders_share_one_transport_and_serialize_commands(snapshot)
     first.start()
     assert transport.started.wait(timeout=0.5)
     second.start()
-    assert len(transport.writes) == 1
-    transport.release.set()
-    first.join(timeout=1.0)
-    second.join(timeout=1.0)
+    try:
+        assert send_lock.second_attempted.wait(timeout=0.5)
+        assert send_lock.locked()
+        assert len(transport.writes) == 1
+    finally:
+        transport.release.set()
+        first.join(timeout=1.0)
+        second.join(timeout=1.0)
 
     assert not first.is_alive()
     assert not second.is_alive()
@@ -371,6 +404,8 @@ def test_concurrent_renders_share_one_transport_and_serialize_commands(snapshot)
 def test_close_waits_for_active_render_before_closing_transport(snapshot) -> None:
     transport = BlockingTransport(True)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
+    send_lock = AttemptObservingLock()
+    client._send_lock = send_lock
     render_result: list[bool] = []
     render_thread = threading.Thread(
         target=lambda: render_result.append(client.render(snapshot, timeout=1.0))
@@ -380,10 +415,14 @@ def test_close_waits_for_active_render_before_closing_transport(snapshot) -> Non
     render_thread.start()
     assert transport.started.wait(timeout=0.5)
     close_thread.start()
-    assert not transport.closed
-    transport.release.set()
-    render_thread.join(timeout=1.0)
-    close_thread.join(timeout=1.0)
+    try:
+        assert send_lock.second_attempted.wait(timeout=0.5)
+        assert send_lock.locked()
+        assert not transport.closed
+    finally:
+        transport.release.set()
+        render_thread.join(timeout=1.0)
+        close_thread.join(timeout=1.0)
 
     assert render_result == [True]
     assert transport.closed is True
