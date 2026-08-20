@@ -76,22 +76,21 @@ class PrivacyProtectionMonitor:
             self._stopped = True
             self._stop.set()
             self._wake.set()
-            thread = self._thread
-
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=2.0)
-
-        with self._refresh_lock:
-            with self._lifecycle_lock:
-                if self._overlay_closed:
-                    return
-                self._overlay_closed = True
-            self._overlay.close()
+            if self._overlay_closed:
+                return
+            self._overlay_closed = True
+        threading.Thread(
+            target=self._overlay.close,
+            daemon=True,
+            name="privacy-protection-overlay-close",
+        ).start()
 
     def request_refresh(self) -> None:
-        self._wake.set()
+        if not self._is_stopped():
+            self._wake.set()
 
     def decision_for_capture(self, *, force: bool = True) -> ProtectionDecision:
+        self._raise_if_stopped()
         with self._state_lock:
             current = self._decision
         if not force and current is not None and current.snapshot.fresh_until >= time.monotonic():
@@ -99,24 +98,26 @@ class PrivacyProtectionMonitor:
         return self._refresh()
 
     def _run(self) -> None:
-        self._refresh()
+        try:
+            self._refresh()
+        except RuntimeError:
+            return
         while not self._stop.is_set():
             self._wake.wait(self._watchdog_seconds)
             self._wake.clear()
             if not self._stop.is_set():
-                self._refresh()
+                try:
+                    self._refresh()
+                except RuntimeError:
+                    return
 
     def _refresh(self) -> ProtectionDecision:
         with self._refresh_lock:
-            with self._lifecycle_lock:
-                stopped = self._stopped
-            with self._state_lock:
-                current = self._decision
-            if stopped and current is not None:
-                return current
+            self._raise_if_stopped()
 
             self._reload_indicator_style()
             paused, inventory = self._read_protection_inputs()
+            self._raise_if_stopped()
             now = time.monotonic()
             generation = self._generation + 1
             snapshot = build_protection_snapshot(
@@ -126,9 +127,12 @@ class PrivacyProtectionMonitor:
                 generation=generation,
                 now=now,
             )
+            self._raise_if_stopped()
             indicator_confirmed = self._render(snapshot)
+            self._raise_if_stopped()
             decision = ProtectionDecision(snapshot, indicator_confirmed)
             with self._state_lock:
+                self._raise_if_stopped()
                 self._generation = generation
                 self._decision = decision
             logger.debug(
@@ -148,11 +152,13 @@ class PrivacyProtectionMonitor:
             return
         if self._config_mtime_ns == mtime_ns:
             return
-        self._config_mtime_ns = mtime_ns
         try:
-            self._indicator_style = config.load(self._config_path).capture.privacy_indicator_style
+            indicator_style = config.load(self._config_path).capture.privacy_indicator_style
         except (OSError, TypeError, ValueError) as exc:
             logger.warning("privacy protection style reload failed: %s", type(exc).__name__)
+        else:
+            self._indicator_style = indicator_style
+            self._config_mtime_ns = mtime_ns
 
     def _read_protection_inputs(self) -> tuple[bool, WindowInventory | None]:
         try:
@@ -167,6 +173,8 @@ class PrivacyProtectionMonitor:
             return paused, None
 
     def _render(self, snapshot: ProtectionSnapshot) -> bool:
+        if self._is_stopped():
+            return False
         try:
             if snapshot.indicator_style != "off" and snapshot.state is ProtectionState.INACTIVE:
                 return self._overlay.clear(snapshot.generation)
@@ -174,3 +182,11 @@ class PrivacyProtectionMonitor:
         except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
             logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
             return False
+
+    def _is_stopped(self) -> bool:
+        with self._lifecycle_lock:
+            return self._stopped
+
+    def _raise_if_stopped(self) -> None:
+        if self._is_stopped():
+            raise RuntimeError("privacy protection monitor is stopped")

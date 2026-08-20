@@ -304,10 +304,13 @@ class PrivacyOverlayClient:
         self._next_restart_at = 0.0
         self._lifecycle_lock = threading.RLock()
         self._send_lock = threading.Lock()
+        self._closed = False
 
     def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
         if snapshot.indicator_style == "off":
             with self._send_lock:
+                if self._closed:
+                    return False
                 self._discard_transport(schedule_restart=False)
             return True
         return self._send(self._render_command(snapshot), snapshot.generation, timeout)
@@ -326,11 +329,17 @@ class PrivacyOverlayClient:
         )
 
     def close(self) -> None:
+        with self._lifecycle_lock:
+            if self._closed:
+                return
+            self._closed = True
         with self._send_lock:
             self._discard_transport(schedule_restart=False)
 
     def _send(self, command: dict[str, Any], generation: int, timeout: float) -> bool:
         with self._send_lock:
+            if self._closed:
+                return False
             transport = self._ensure_transport()
             if transport is None:
                 return False
@@ -351,19 +360,30 @@ class PrivacyOverlayClient:
 
     def _ensure_transport(self) -> OverlayTransport | None:
         with self._lifecycle_lock:
+            if self._closed:
+                return None
             if self._transport is not None:
                 return self._transport
             if time.monotonic() < self._next_restart_at:
                 return None
-            try:
-                transport = self._transport_factory() if self._transport_factory else self._start_default_transport()
-            except OSError:
-                transport = None
-            if transport is None:
-                self._schedule_restart()
-                return None
-            self._transport = transport
-            return transport
+        try:
+            transport = self._transport_factory() if self._transport_factory else self._start_default_transport()
+        except OSError:
+            transport = None
+        if transport is None:
+            with self._lifecycle_lock:
+                if not self._closed:
+                    self._schedule_restart()
+            return None
+        with self._lifecycle_lock:
+            if self._closed:
+                closed_transport = transport
+            else:
+                self._transport = transport
+                return transport
+        with contextlib.suppress(OSError, RuntimeError, ValueError):
+            closed_transport.close()
+        return None
 
     def _start_default_transport(self) -> OverlayTransport | None:
         helper_path = _resolve_overlay_path()

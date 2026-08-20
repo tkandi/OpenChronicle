@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -21,6 +22,7 @@ class FakeOverlay:
         self.snapshots: list[ProtectionSnapshot] = []
         self.clear_generations: list[int] = []
         self.close_calls = 0
+        self.closed = threading.Event()
 
     def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
         self.snapshots.append(snapshot)
@@ -32,6 +34,7 @@ class FakeOverlay:
 
     def close(self) -> None:
         self.close_calls += 1
+        self.closed.set()
 
 
 @pytest.fixture
@@ -121,6 +124,42 @@ def test_style_hot_reload_changes_only_indicator_style(tmp_path, inventory, fake
     assert second.snapshot.generation > first.snapshot.generation
 
 
+def test_style_reload_retries_a_recovered_config_with_unchanged_mtime(tmp_path, inventory, fake_overlay) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[capture\n")
+    monitor = make_monitor(
+        config_path=config_path,
+        inventory=inventory,
+        overlay=fake_overlay,
+        style="border",
+    )
+
+    first = monitor.decision_for_capture(force=True)
+    broken_mtime = config_path.stat().st_mtime_ns
+    config_path.write_text('[capture]\nprivacy_indicator_style = "shield"\n')
+    os.utime(config_path, ns=(broken_mtime, broken_mtime))
+    second = monitor.decision_for_capture(force=True)
+
+    assert first.snapshot.indicator_style == "border"
+    assert second.snapshot.indicator_style == "shield"
+
+
+def test_style_reload_normalizes_invalid_value_without_reloading_capture_policy(
+    tmp_path, inventory, fake_overlay
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[capture]\nprivacy_indicator_style = "invalid"\nscreenshot_monitor = "all"\n'
+    )
+    monitor = make_monitor(config_path=config_path, inventory=inventory, overlay=fake_overlay)
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.indicator_style == "pill"
+    assert decision.snapshot.capture_mode == "separate"
+    assert decision.snapshot.protected_display_ids == frozenset({2})
+
+
 def test_inactive_state_clears_indicator_and_reuses_fresh_decision(fake_overlay) -> None:
     safe_inventory = WindowInventory(
         windows=(),
@@ -157,6 +196,97 @@ def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory,
     assert marker not in caplog.text
 
 
+def test_monitor_sanitizes_invalid_window_regex_logs(inventory, fake_overlay, caplog) -> None:
+    marker = "[private-monitor-regex"
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        privacy_indicator_style="pill",
+        deny_window_title_patterns=[marker],
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+        decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.INACTIVE
+    assert marker not in caplog.text
+
+
+def test_stop_before_first_decision_is_terminal(inventory, fake_overlay) -> None:
+    monitor = make_monitor(inventory=inventory, overlay=fake_overlay)
+
+    monitor.stop()
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        monitor.decision_for_capture(force=True)
+    assert fake_overlay.snapshots == []
+    assert fake_overlay.clear_generations == []
+    assert fake_overlay.closed.wait(timeout=0.5)
+    assert fake_overlay.close_calls == 1
+
+
+def test_stopped_monitor_rejects_cached_and_forced_decisions(inventory, fake_overlay) -> None:
+    monitor = make_monitor(inventory=inventory, overlay=fake_overlay)
+    monitor.decision_for_capture(force=True)
+
+    monitor.stop()
+
+    with pytest.raises(RuntimeError, match="stopped"):
+        monitor.decision_for_capture(force=False)
+    with pytest.raises(RuntimeError, match="stopped"):
+        monitor.decision_for_capture(force=True)
+    assert fake_overlay.closed.wait(timeout=0.5)
+
+
+def test_stop_during_blocked_force_refresh_is_bounded_and_prevents_late_render(
+    inventory, fake_overlay
+) -> None:
+    inventory_started = threading.Event()
+    release_inventory = threading.Event()
+    refresh_errors: list[Exception] = []
+
+    def block_inventory() -> WindowInventory:
+        inventory_started.set()
+        assert release_inventory.wait(timeout=5.0)
+        return inventory
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        inventory_reader=block_inventory,
+    )
+
+    def force_refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except RuntimeError as exc:
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=force_refresh)
+    refresh_thread.start()
+    assert inventory_started.wait(timeout=0.5)
+    try:
+        started_at = time.monotonic()
+        monitor.stop()
+        assert time.monotonic() - started_at < 0.5
+    finally:
+        release_inventory.set()
+        refresh_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
+    assert fake_overlay.snapshots == []
+    assert fake_overlay.clear_generations == []
+    assert fake_overlay.closed.wait(timeout=0.5)
+    assert fake_overlay.close_calls == 1
+
+
 def test_request_refresh_wakes_daemon_and_stop_closes_overlay_once(inventory, fake_overlay) -> None:
     calls = 0
     second_refresh = threading.Event()
@@ -185,4 +315,5 @@ def test_request_refresh_wakes_daemon_and_stop_closes_overlay_once(inventory, fa
         monitor.stop()
         monitor.stop()
 
+    assert fake_overlay.closed.wait(timeout=0.5)
     assert fake_overlay.close_calls == 1

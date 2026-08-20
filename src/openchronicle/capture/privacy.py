@@ -66,13 +66,9 @@ def regex_match(value: str | None, patterns: list[str]) -> bool:
         try:
             if re.search(pattern, value, flags=re.IGNORECASE):
                 return True
-        except re.error as exc:
+        except re.error:
             if pattern not in _WARNED_BAD_PATTERNS:
-                logger.warning(
-                    "invalid capture denylist regex %r: %s; falling back to substring match",
-                    pattern,
-                    exc,
-                )
+                logger.warning("invalid capture denylist regex; falling back to substring match")
                 _WARNED_BAD_PATTERNS.add(pattern)
             if pattern.casefold() in value.casefold():
                 return True
