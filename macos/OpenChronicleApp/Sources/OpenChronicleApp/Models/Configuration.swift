@@ -61,6 +61,7 @@ struct CaptureConfigurationValue: Decodable, Equatable {
   let screenshotPrivacyMode: String
   let screenshotPrivacyFailClosed: Bool
   let screenshotJPEGQuality: Int
+  let privacyIndicatorStyle: String?
   let privacyCounts: [String: Int]?
 
   enum CodingKeys: String, CodingKey {
@@ -74,6 +75,7 @@ struct CaptureConfigurationValue: Decodable, Equatable {
     case screenshotPrivacyMode = "screenshot_privacy_mode"
     case screenshotPrivacyFailClosed = "screenshot_privacy_fail_closed"
     case screenshotJPEGQuality = "screenshot_jpeg_quality"
+    case privacyIndicatorStyle = "privacy_indicator_style"
     case privacyCounts = "privacy_counts"
   }
 
@@ -157,6 +159,7 @@ struct ConfigurationDraft: Equatable {
   var screenshotMonitor: String
   var screenshotPrivacyMode: String
   var screenshotPrivacyFailClosed: Bool
+  var privacyIndicatorStyle: String
   var bufferRetentionHours: Int
   var screenshotRetentionHours: Int
   var bufferMaxMB: Int
@@ -196,6 +199,9 @@ struct ConfigurationDraft: Equatable {
     screenshotMonitor = values.capture.screenshotMonitor
     screenshotPrivacyMode = values.capture.screenshotPrivacyMode
     screenshotPrivacyFailClosed = values.capture.screenshotPrivacyFailClosed
+    privacyIndicatorStyle = PrivacyIndicatorStyleOption(
+      rawValue: values.capture.privacyIndicatorStyle ?? ""
+    )?.rawValue ?? PrivacyIndicatorStyleOption.defaultStyle.rawValue
     bufferRetentionHours = values.capture.bufferRetentionHours
     screenshotRetentionHours = values.capture.screenshotRetentionHours
     bufferMaxMB = values.capture.bufferMaxMB
@@ -290,6 +296,12 @@ struct ConfigurationDraft: Equatable {
       "capture.screenshot_privacy_fail_closed",
       screenshotPrivacyFailClosed,
       original.screenshotPrivacyFailClosed
+    )
+    add(
+      &updates,
+      "capture.privacy_indicator_style",
+      privacyIndicatorStyle,
+      original.privacyIndicatorStyle
     )
     add(
       &updates,

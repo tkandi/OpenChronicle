@@ -42,6 +42,7 @@ final class ConfigurationTests: XCTestCase {
           "buffer_max_mb": 2000, "include_screenshot": true,
           "screenshot_monitor": "separate", "screenshot_privacy_mode": "skip-monitor",
           "screenshot_privacy_fail_closed": true, "screenshot_jpeg_quality": 80,
+          "privacy_indicator_style": "pill",
           "privacy_counts": {
             "deny_app_names": 1, "deny_bundle_ids": 0,
             "deny_window_title_patterns": 1, "deny_url_patterns": 0,
@@ -89,15 +90,18 @@ final class ConfigurationTests: XCTestCase {
       from: Data(payload.utf8)
     )
     let original = try XCTUnwrap(ConfigurationDraft(snapshot: snapshot))
+    XCTAssertEqual(original.privacyIndicatorStyle, "pill")
     var edited = original
     edited.heartbeatMinutes = 15
     edited.timelineModelOverride = nil
+    edited.privacyIndicatorStyle = "border"
 
     let updates = edited.updates(comparedTo: original)
 
-    XCTAssertEqual(updates.count, 2)
+    XCTAssertEqual(updates.count, 3)
     XCTAssertEqual(updates["capture.heartbeat_minutes"] as? Int, 15)
     XCTAssertTrue(updates["models.timeline.model"] is NSNull)
+    XCTAssertEqual(updates["capture.privacy_indicator_style"] as? String, "border")
   }
 
   func testPrivacyDraftEmitsArrayChangesAndRejectsBlankRules() throws {

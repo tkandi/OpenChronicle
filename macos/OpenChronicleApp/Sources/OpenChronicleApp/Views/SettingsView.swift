@@ -155,6 +155,9 @@ struct SettingsView: View {
               "Fail closed when visible windows cannot be checked",
               isOn: binding(\.screenshotPrivacyFailClosed, fallback: true)
             )
+            PrivacyIndicatorStylePicker(
+              selection: binding(\.privacyIndicatorStyle, fallback: "pill")
+            )
             integerField("JPEG quality (1–100)", \.screenshotJPEGQuality, fallback: 80)
           }
 
@@ -545,6 +548,107 @@ struct SettingsView: View {
         .multilineTextAlignment(.trailing)
         .frame(width: 100)
     }
+  }
+}
+
+private struct PrivacyIndicatorStylePicker: View {
+  @Binding var selection: String
+
+  private let columns = [
+    GridItem(.flexible(minimum: 180), spacing: 12),
+    GridItem(.flexible(minimum: 180), spacing: 12),
+  ]
+
+  var body: some View {
+    LabeledContent("Privacy indicator") {
+      LazyVGrid(columns: columns, alignment: .leading, spacing: 8) {
+        ForEach(PrivacyIndicatorStyleOption.allCases) { option in
+          PrivacyIndicatorStyleButton(
+            option: option,
+            isSelected: selection == option.rawValue
+          ) {
+            selection = option.rawValue
+          }
+        }
+      }
+    }
+  }
+}
+
+private struct PrivacyIndicatorStyleButton: View {
+  let option: PrivacyIndicatorStyleOption
+  let isSelected: Bool
+  let action: () -> Void
+
+  var body: some View {
+    Button(action: action) {
+      HStack(spacing: 8) {
+        PrivacyIndicatorPreview(option: option)
+        Text(option.title)
+          .font(.subheadline)
+          .multilineTextAlignment(.leading)
+          .lineLimit(2)
+          .frame(maxWidth: .infinity, alignment: .leading)
+        Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+          .foregroundStyle(isSelected ? Color.green : Color.secondary)
+          .accessibilityHidden(true)
+      }
+      .frame(maxWidth: .infinity, minHeight: 52, alignment: .leading)
+      .padding(6)
+      .background(isSelected ? Color.green.opacity(0.12) : Color.clear)
+      .overlay(
+        RoundedRectangle(cornerRadius: 6)
+          .stroke(isSelected ? Color.green : Color.secondary.opacity(0.35), lineWidth: isSelected ? 2 : 1)
+      )
+      .contentShape(RoundedRectangle(cornerRadius: 6))
+    }
+    .buttonStyle(.plain)
+    .help(option.title)
+    .accessibilityLabel("Privacy indicator style: \(option.title)")
+    .accessibilityValue(isSelected ? "Selected" : "Not selected")
+    .accessibilityAddTraits(isSelected ? .isSelected : [])
+  }
+}
+
+private struct PrivacyIndicatorPreview: View {
+  let option: PrivacyIndicatorStyleOption
+
+  var body: some View {
+    ZStack {
+      RoundedRectangle(cornerRadius: 4)
+        .fill(Color.black.opacity(0.78))
+
+      switch option {
+      case .off:
+        Image(systemName: option.systemImage)
+          .foregroundStyle(.secondary)
+      case .border:
+        RoundedRectangle(cornerRadius: 3)
+          .stroke(Color.green, lineWidth: 3)
+          .padding(4)
+      case .shield, .quietShield:
+        Image(systemName: option.systemImage)
+          .font(.system(size: option == .shield ? 22 : 16, weight: .medium))
+          .foregroundStyle(option == .shield ? Color.green : Color.green.opacity(0.72))
+      case .pill:
+        Text(option.sampleText ?? "")
+          .font(.system(size: 9, weight: .semibold))
+          .foregroundStyle(.white)
+          .padding(.horizontal, 8)
+          .padding(.vertical, 4)
+          .background(Capsule().fill(Color.green))
+      case .banner:
+        VStack(spacing: 0) {
+          Rectangle()
+            .fill(Color.green)
+            .frame(height: 9)
+          Spacer()
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 4))
+      }
+    }
+    .frame(width: 96, height: 44)
+    .accessibilityHidden(true)
   }
 }
 
