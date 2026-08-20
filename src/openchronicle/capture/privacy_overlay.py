@@ -305,6 +305,7 @@ class PrivacyOverlayClient:
         self._lifecycle_lock = threading.RLock()
         self._send_lock = threading.Lock()
         self._closed = False
+        self._close_started = False
 
     def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
         if snapshot.indicator_style == "off":
@@ -329,12 +330,18 @@ class PrivacyOverlayClient:
         )
 
     def close(self) -> None:
+        self.mark_terminal()
         with self._lifecycle_lock:
-            if self._closed:
+            if self._close_started:
                 return
-            self._closed = True
+            self._close_started = True
         with self._send_lock:
             self._discard_transport(schedule_restart=False)
+
+    def mark_terminal(self) -> None:
+        """Prevent later render or clear calls without waiting for transport cleanup."""
+        with self._lifecycle_lock:
+            self._closed = True
 
     def _send(self, command: dict[str, Any], generation: int, timeout: float) -> bool:
         with self._send_lock:

@@ -19,18 +19,30 @@ class FakeOverlay:
     def __init__(self) -> None:
         self.render_result = True
         self.clear_result = True
+        self.render_calls = 0
+        self.clear_calls = 0
         self.snapshots: list[ProtectionSnapshot] = []
         self.clear_generations: list[int] = []
         self.close_calls = 0
         self.closed = threading.Event()
+        self.terminal_marked = threading.Event()
 
     def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+        self.render_calls += 1
+        if self.terminal_marked.is_set():
+            return False
         self.snapshots.append(snapshot)
         return self.render_result
 
     def clear(self, generation: int, timeout: float = 0.5) -> bool:
+        self.clear_calls += 1
+        if self.terminal_marked.is_set():
+            return False
         self.clear_generations.append(generation)
         return self.clear_result
+
+    def mark_terminal(self) -> None:
+        self.terminal_marked.set()
 
     def close(self) -> None:
         self.close_calls += 1
@@ -281,10 +293,60 @@ def test_stop_during_blocked_force_refresh_is_bounded_and_prevents_late_render(
 
     assert not refresh_thread.is_alive()
     assert refresh_errors and "stopped" in str(refresh_errors[0])
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_calls == 0
     assert fake_overlay.snapshots == []
     assert fake_overlay.clear_generations == []
     assert fake_overlay.closed.wait(timeout=0.5)
     assert fake_overlay.close_calls == 1
+
+
+def test_stop_marks_overlay_terminal_before_a_pre_overlay_barrier_releases(inventory, fake_overlay) -> None:
+    reached_barrier = threading.Event()
+    release_barrier = threading.Event()
+    refresh_errors: list[Exception] = []
+
+    def before_overlay_call() -> None:
+        reached_barrier.set()
+        assert release_barrier.wait(timeout=1.0)
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="pill",
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        before_overlay_call=before_overlay_call,
+    )
+
+    def force_refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except RuntimeError as exc:
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=force_refresh)
+    refresh_thread.start()
+    assert reached_barrier.wait(timeout=0.5)
+    try:
+        started_at = time.monotonic()
+        monitor.stop()
+        assert time.monotonic() - started_at < 0.5
+        assert fake_overlay.terminal_marked.is_set()
+    finally:
+        release_barrier.set()
+        refresh_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_calls == 0
+    assert fake_overlay.snapshots == []
+    assert fake_overlay.clear_generations == []
 
 
 def test_request_refresh_wakes_daemon_and_stop_closes_overlay_once(inventory, fake_overlay) -> None:

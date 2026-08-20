@@ -37,6 +37,7 @@ class PrivacyProtectionMonitor:
         inventory_reader: Callable[[], WindowInventory | None] = read_window_inventory,
         pause_reader: Callable[[], bool] = capture_is_paused,
         watchdog_seconds: float = 1.0,
+        before_overlay_call: Callable[[], None] | None = None,
     ) -> None:
         self._cfg = cfg
         self._config_path = config_path
@@ -44,6 +45,7 @@ class PrivacyProtectionMonitor:
         self._inventory_reader = inventory_reader
         self._pause_reader = pause_reader
         self._watchdog_seconds = max(0.0, watchdog_seconds)
+        self._before_overlay_call = before_overlay_call or (lambda: None)
         self._indicator_style = cfg.privacy_indicator_style
         self._config_mtime_ns: int | None = None
         self._generation = 0
@@ -79,6 +81,7 @@ class PrivacyProtectionMonitor:
             if self._overlay_closed:
                 return
             self._overlay_closed = True
+        self._overlay.mark_terminal()
         threading.Thread(
             target=self._overlay.close,
             daemon=True,
@@ -173,6 +176,9 @@ class PrivacyProtectionMonitor:
             return paused, None
 
     def _render(self, snapshot: ProtectionSnapshot) -> bool:
+        if self._is_stopped():
+            return False
+        self._before_overlay_call()
         if self._is_stopped():
             return False
         try:

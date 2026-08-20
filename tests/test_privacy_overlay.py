@@ -227,6 +227,22 @@ def test_closed_client_never_restarts_a_transport(snapshot: ProtectionSnapshot) 
     assert starts == 0
 
 
+def test_terminal_mark_prevents_a_later_transport_start(snapshot: ProtectionSnapshot) -> None:
+    starts = 0
+
+    def factory() -> FakeTransport:
+        nonlocal starts
+        starts += 1
+        return FakeTransport(True)
+
+    client = PrivacyOverlayClient(transport_factory=factory)
+    client.mark_terminal()
+
+    assert client.render(snapshot) is False
+    assert client.clear(snapshot.generation + 1) is False
+    assert starts == 0
+
+
 def test_restart_backoff_escalates_to_cap_and_resets_after_recovery(snapshot, monkeypatch) -> None:
     transports = [FailingTransport() for _ in range(7)] + [FakeTransport(True)]
     starts = 0
