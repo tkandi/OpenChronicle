@@ -31,12 +31,12 @@ enum MacPrivacyOverlay {
                 do {
                     let command = try JSONDecoder().decode(OverlayCommand.self, from: Data(line.utf8))
                     DispatchQueue.main.async {
-                        controller.apply(command) {
+                        controller.apply(command) { rendered in
                             writeAcknowledgement(
                                 OverlayAcknowledgement(
                                     generation: command.generation,
-                                    rendered: true,
-                                    error: nil
+                                    rendered: rendered,
+                                    error: rendered ? nil : "unresolved-display"
                                 )
                             )
                         }

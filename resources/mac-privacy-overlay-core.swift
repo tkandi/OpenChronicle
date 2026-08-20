@@ -48,6 +48,12 @@ struct OverlayAcknowledgement: Codable {
     let error: String?
 }
 
+struct OverlayScreenGeometry {
+    let id: UInt32
+    let frame: NSRect
+    let visibleFrame: NSRect
+}
+
 struct IndicatorPresentation {
     let text: String?
     let symbolName: String
@@ -81,7 +87,7 @@ struct IndicatorPresentation {
     }
 }
 
-final class PrivacyOverlayPanel: NSPanel {
+class PrivacyOverlayPanel: NSPanel {
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
@@ -234,17 +240,32 @@ private final class IndicatorView: NSView {
 
 final class PrivacyOverlayController {
     private var panels: [UInt32: PrivacyOverlayPanel] = [:]
+    private let screenProvider: () -> [OverlayScreenGeometry]
+    private let panelFactory: () -> PrivacyOverlayPanel
 
-    func apply(_ command: OverlayCommand, completion: @escaping () -> Void) {
+    init(
+        screenProvider: @escaping () -> [OverlayScreenGeometry] = PrivacyOverlayController.systemScreenGeometry,
+        panelFactory: @escaping () -> PrivacyOverlayPanel = { PrivacyOverlayPanel(contentRect: .zero) }
+    ) {
+        self.screenProvider = screenProvider
+        self.panelFactory = panelFactory
+    }
+
+    func apply(_ command: OverlayCommand, completion: @escaping (Bool) -> Void) {
         dispatchPrecondition(condition: .onQueue(.main))
 
         guard command.state != .inactive, command.style != .off else {
             removeAllPanels()
-            completion()
+            completion(true)
             return
         }
 
-        let displays = targetDisplays(for: command)
+        guard let displays = resolvedDisplays(for: command) else {
+            removeAllPanels()
+            completion(false)
+            return
+        }
+
         let displayIDs = Set(displays.map(\.id))
         let obsoleteIDs = panels.keys.filter { !displayIDs.contains($0) }
         for id in obsoleteIDs {
@@ -255,7 +276,7 @@ final class PrivacyOverlayController {
 
         let presentation = IndicatorPresentation.make(state: command.state, style: command.style)
         for display in displays {
-            let panel = panels[display.id] ?? PrivacyOverlayPanel(contentRect: .zero)
+            let panel = panels[display.id] ?? panelFactory()
             let frame = panelFrame(for: display, style: command.style, presentation: presentation)
             panel.setFrame(frame, display: true)
             let view: IndicatorView
@@ -268,59 +289,68 @@ final class PrivacyOverlayController {
             }
             view.frame = panel.contentView?.bounds ?? .zero
             panel.orderFrontRegardless()
+            view.displayIfNeeded()
+            panel.displayIfNeeded()
             panels[display.id] = panel
         }
 
-        completion()
+        completion(true)
     }
 
-    private func targetDisplays(for command: OverlayCommand) -> [OverlayDisplay] {
+    private func resolvedDisplays(for command: OverlayCommand) -> [OverlayScreenGeometry]? {
+        let screens = screenProvider()
+        var screensByID: [UInt32: OverlayScreenGeometry] = [:]
+        for screen in screens {
+            guard screensByID[screen.id] == nil else { return nil }
+            screensByID[screen.id] = screen
+        }
+
         if !command.displays.isEmpty {
-            return command.displays
+            var resolved: [OverlayScreenGeometry] = []
+            var requestedIDs = Set<UInt32>()
+            for display in command.displays {
+                guard requestedIDs.insert(display.id).inserted, let screen = screensByID[display.id] else {
+                    return nil
+                }
+                resolved.append(screen)
+            }
+            return resolved
         }
-        guard command.allDisplays else { return [] }
-        return NSScreen.screens.compactMap { screen in
-            guard let id = Self.displayID(for: screen) else { return nil }
-            let frame = screen.frame
-            return OverlayDisplay(
-                id: id,
-                left: frame.minX,
-                top: frame.minY,
-                width: frame.width,
-                height: frame.height
-            )
-        }
+
+        guard command.allDisplays, !screens.isEmpty else { return nil }
+        return screens
     }
 
     private func panelFrame(
-        for display: OverlayDisplay,
+        for display: OverlayScreenGeometry,
         style: IndicatorStyle,
         presentation: IndicatorPresentation
     ) -> NSRect {
         switch style {
         case .shield, .pill, .quietShield:
-            let visibleFrame = screen(for: display)?.visibleFrame ?? display.frame
             let size = IndicatorView.panelSize(for: presentation, style: style)
             return NSRect(
-                x: visibleFrame.maxX - size.width - 12,
-                y: visibleFrame.minY + 12,
+                x: display.visibleFrame.maxX - size.width - 12,
+                y: display.visibleFrame.minY + 12,
                 width: size.width,
                 height: size.height
             )
         case .border, .banner, .off:
-            return screen(for: display)?.frame ?? display.frame
+            return display.frame
         }
     }
 
-    private func screen(for display: OverlayDisplay) -> NSScreen? {
-        NSScreen.screens.first { Self.displayID(for: $0) == display.id }
-    }
-
-    private static func displayID(for screen: NSScreen) -> UInt32? {
-        guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
-            return nil
+    private static func systemScreenGeometry() -> [OverlayScreenGeometry] {
+        NSScreen.screens.compactMap { screen in
+            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+                return nil
+            }
+            return OverlayScreenGeometry(
+                id: number.uint32Value,
+                frame: screen.frame,
+                visibleFrame: screen.visibleFrame
+            )
         }
-        return number.uint32Value
     }
 
     private func removeAllPanels() {
