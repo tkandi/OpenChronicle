@@ -73,12 +73,7 @@ def _build_capture(
 
     reason = privacy.capture_denylist_reason(cfg, out)
     if reason is not None:
-        logger.info(
-            "capture skipped (denylist: %s): trigger=%s app=%r",
-            reason,
-            (out.get("trigger") or {}).get("event_type"),
-            meta.app_name,
-        )
+        logger.info("capture skipped (denylist: %s)", reason)
         return None
 
     if decision is not None and decision.snapshot.ax_blocked:
@@ -94,34 +89,30 @@ def _build_capture(
 
         s1_parser.enrich(out)
 
+    if decision is not None:
+        latest = protection_monitor.decision_for_capture(force=False)
+        if latest.snapshot.state is ProtectionState.FAILED:
+            logger.warning("capture skipped: privacy protection failed closed")
+            return None
+        if (
+            latest.snapshot.generation != decision.snapshot.generation
+            and latest.snapshot.ax_blocked
+            and "ax_tree" in out
+        ):
+            logger.warning(
+                "capture skipped: latest privacy protection invalidated AX data"
+            )
+            return None
+        decision = latest
+
     reason = privacy.capture_denylist_reason(cfg, out)
     if reason is not None:
-        logger.info(
-            "capture skipped (denylist: %s): trigger=%s app=%r",
-            reason,
-            (out.get("trigger") or {}).get("event_type"),
-            meta.app_name,
-        )
+        logger.info("capture skipped (denylist: %s)", reason)
         return None
 
     if cfg.include_screenshot:
         blocked_regions: list[privacy.ScreenRegion] | None = []
         if decision is not None:
-            if decision.snapshot.fresh_until <= time.monotonic():
-                refreshed = protection_monitor.decision_for_capture(force=True)
-                if refreshed.snapshot.state is ProtectionState.FAILED:
-                    logger.warning("capture skipped: privacy protection failed closed")
-                    return None
-                if (
-                    refreshed.snapshot.generation != decision.snapshot.generation
-                    and refreshed.snapshot.ax_blocked
-                    and "ax_tree" in out
-                ):
-                    logger.warning(
-                        "capture skipped: refreshed privacy protection invalidated AX data"
-                    )
-                    return None
-                decision = refreshed
             if (
                 decision.snapshot.indicator_style != "off"
                 and not decision.indicator_confirmed

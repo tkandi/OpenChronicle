@@ -62,11 +62,12 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
     paths.ensure_dirs()
     paths.pid_file().write_text(str(os.getpid()))
 
-    protection_monitor = _build_protection_monitor(cfg)
+    protection_monitor: PrivacyProtectionMonitor | None = None
     session_manager = None
     tasks: list[asyncio.Task] = []
     done_task: asyncio.Task | None = None
     try:
+        protection_monitor = _build_protection_monitor(cfg)
         protection_monitor.start()
 
         # SessionManager observes every capture-worthy event and fires the
@@ -74,7 +75,7 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
         # capture_only is true so session rows still land on disk.
         session_manager = session_tick.build_manager(cfg)
 
-        tasks = [
+        tasks.append(
             asyncio.create_task(
                 capture_scheduler.run_forever(
                     cfg.capture,
@@ -82,15 +83,19 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
                     protection_monitor=protection_monitor,
                 ),
                 name="capture",
-            ),
+            )
+        )
+        tasks.append(
             asyncio.create_task(
                 session_tick.run_check_cuts(cfg, session_manager), name="session",
-            ),
+            )
+        )
+        tasks.append(
             asyncio.create_task(
                 session_tick.run_daily_safety_net(cfg, session_manager),
                 name="daily-safety-net",
-            ),
-        ]
+            )
+        )
         if not capture_only:
             tasks.append(
                 asyncio.create_task(timeline_tick.run_forever(cfg), name="timeline")
@@ -142,8 +147,9 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
             with suppress(Exception):
                 session_manager.force_end(reason="daemon-shutdown")
 
-        with suppress(Exception):
-            protection_monitor.stop()
+        if protection_monitor is not None:
+            with suppress(Exception):
+                protection_monitor.stop()
         with suppress(FileNotFoundError):
             paths.pid_file().unlink()
         logger.info("daemon stopped")

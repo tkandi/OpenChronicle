@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import time
 from pathlib import Path
@@ -201,6 +202,32 @@ def test_denylist_url_skips_before_screenshot(ac_root: Path, monkeypatch) -> Non
 
     assert out is None
     assert provider.calls == 1
+
+
+@pytest.mark.parametrize("deny_before_ax", [True, False])
+def test_denylist_logs_do_not_expose_private_window_metadata(
+    ac_root: Path, monkeypatch, caplog, deny_before_ax: bool,
+) -> None:
+    marker = "private-app-marker"
+    cfg = (
+        CaptureConfig(deny_app_names=[marker])
+        if deny_before_ax
+        else CaptureConfig(deny_url_patterns=["private\\.example"])
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example/account"))
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name=marker, title="private-title", bundle_id="private"),
+    )
+
+    with caplog.at_level(logging.INFO, logger="openchronicle.capture"):
+        out = scheduler_mod._build_capture(cfg, provider, {"event_type": "manual"})
+
+    assert out is None
+    assert provider.calls == (0 if deny_before_ax else 1)
+    assert marker not in caplog.text
+    assert "private-title" not in caplog.text
 
 
 def test_separate_screenshot_mode_writes_array_and_legacy_field(
@@ -437,7 +464,7 @@ def test_failed_protection_snapshot_writes_nothing(
     assert provider.calls == 0
 
 
-def test_stale_refresh_that_newly_blocks_ax_discards_whole_capture(
+def test_post_ax_validation_that_newly_blocks_ax_discards_whole_capture(
     ac_root: Path, monkeypatch,
 ) -> None:
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example"))
@@ -447,7 +474,6 @@ def test_stale_refresh_that_newly_blocks_ax_discards_whole_capture(
             active_display_id=1,
             protected_ids={2},
             confirmed=True,
-            fresh=False,
         ),
         _protection_decision(
             generation=31,
@@ -476,10 +502,52 @@ def test_stale_refresh_that_newly_blocks_ax_discards_whole_capture(
 
     assert out is None
     assert provider.calls == 1
-    assert monitor.force_calls == [True, True]
+    assert monitor.force_calls == [True, False]
 
 
-def test_stale_refresh_uses_new_generation_confirmation_and_regions(
+@pytest.mark.parametrize("latest_state", [ProtectionState.PROTECTED, ProtectionState.FAILED])
+def test_post_ax_validation_blocks_write_without_screenshot(
+    ac_root: Path, monkeypatch, latest_state: ProtectionState,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example"))
+    latest = (
+        _failed_decision()
+        if latest_state is ProtectionState.FAILED
+        else _protection_decision(
+            generation=51,
+            active_display_id=1,
+            protected_ids={1},
+            confirmed=True,
+        )
+    )
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(
+            generation=50,
+            active_display_id=1,
+            protected_ids={2},
+            confirmed=True,
+        ),
+        latest,
+    )
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(include_screenshot=False),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert provider.calls == 1
+    assert monitor.force_calls == [True, False]
+
+
+def test_post_ax_validation_uses_latest_generation_confirmation_and_regions(
     ac_root: Path, monkeypatch,
 ) -> None:
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
@@ -489,7 +557,6 @@ def test_stale_refresh_uses_new_generation_confirmation_and_regions(
             active_display_id=1,
             protected_ids={2},
             confirmed=False,
-            fresh=False,
         ),
         _protection_decision(
             generation=41,
@@ -518,7 +585,7 @@ def test_stale_refresh_uses_new_generation_confirmation_and_regions(
     )
 
     assert out is not None
-    assert monitor.force_calls == [True, True]
+    assert monitor.force_calls == [True, False]
     assert screenshot_calls[0]["blocked_regions"] == [ScreenRegion(0, 0, 100, 100)]
 
 

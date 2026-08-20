@@ -38,6 +38,7 @@ def _configure_daemon(monkeypatch, monitor: FakeMonitor, session: FakeSessionMan
 
     monkeypatch.setattr(daemon_mod, "_build_protection_monitor", lambda _cfg: monitor)
     monkeypatch.setattr(daemon_mod.session_tick, "build_manager", lambda _cfg: session)
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", park_forever)
     monkeypatch.setattr(daemon_mod.session_tick, "run_check_cuts", park_forever)
     monkeypatch.setattr(daemon_mod.session_tick, "run_daily_safety_net", park_forever)
     cfg = Config()
@@ -66,6 +67,83 @@ async def test_daemon_owns_protection_monitor_lifecycle(
     assert seen_monitor is monitor
     assert monitor.stop_calls == 1
     assert session.force_end_calls == ["daemon-shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_daemon_removes_pid_when_monitor_factory_fails(
+    ac_root: Path, monkeypatch,
+) -> None:
+    cfg = Config()
+    monkeypatch.setattr(
+        daemon_mod,
+        "_build_protection_monitor",
+        lambda _cfg: (_ for _ in ()).throw(RuntimeError("factory failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="factory failed"):
+        await daemon_mod._run(cfg, capture_only=True)
+
+    assert not daemon_mod.paths.pid_file().exists()
+
+
+@pytest.mark.asyncio
+async def test_daemon_stops_monitor_and_removes_pid_when_start_fails(
+    ac_root: Path, monkeypatch,
+) -> None:
+    class StartFailingMonitor(FakeMonitor):
+        def start(self) -> None:
+            super().start()
+            raise RuntimeError("start failed")
+
+    monitor = StartFailingMonitor()
+    session = FakeSessionManager()
+    cfg = _configure_daemon(monkeypatch, monitor, session)
+
+    with pytest.raises(RuntimeError, match="start failed"):
+        await daemon_mod._run(cfg, capture_only=True)
+
+    assert monitor.start_calls == 1
+    assert monitor.stop_calls == 1
+    assert session.force_end_calls == []
+    assert not daemon_mod.paths.pid_file().exists()
+
+
+@pytest.mark.asyncio
+async def test_daemon_cleans_up_task_created_before_later_task_creation_fails(
+    ac_root: Path, monkeypatch,
+) -> None:
+    monitor = FakeMonitor()
+    session = FakeSessionManager()
+    cfg = _configure_daemon(monkeypatch, monitor, session)
+    real_create_task = asyncio.create_task
+    created_tasks: list[asyncio.Task] = []
+    create_calls = 0
+
+    def fail_second_create_task(coro, *args, **kwargs):
+        nonlocal create_calls
+        create_calls += 1
+        if create_calls == 2:
+            coro.close()
+            raise RuntimeError("task creation failed")
+        task = real_create_task(coro, *args, **kwargs)
+        created_tasks.append(task)
+        return task
+
+    monkeypatch.setattr(daemon_mod.asyncio, "create_task", fail_second_create_task)
+
+    with pytest.raises(RuntimeError, match="task creation failed"):
+        await daemon_mod._run(cfg, capture_only=True)
+
+    first_task_was_cleaned = created_tasks[0].done()
+    if not first_task_was_cleaned:
+        created_tasks[0].cancel()
+        await asyncio.gather(created_tasks[0], return_exceptions=True)
+
+    assert first_task_was_cleaned
+    assert monitor.start_calls == 1
+    assert monitor.stop_calls == 1
+    assert session.force_end_calls == ["daemon-shutdown"]
+    assert not daemon_mod.paths.pid_file().exists()
 
 
 @pytest.mark.asyncio
