@@ -5,6 +5,15 @@ import ApplicationServices
 import CoreGraphics
 import Foundation
 
+struct DisplayRecord: Codable {
+    let id: UInt32
+    let left: Double
+    let top: Double
+    let width: Double
+    let height: Double
+    let is_primary: Bool
+}
+
 struct WindowRecord: Codable {
     let app_name: String
     let bundle_id: String
@@ -13,10 +22,12 @@ struct WindowRecord: Codable {
     let top: Double
     let width: Double
     let height: Double
+    let is_active: Bool
 }
 
 struct Output: Codable {
     let windows: [WindowRecord]
+    let displays: [DisplayRecord]
 }
 
 func axAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
@@ -52,13 +63,16 @@ func axSize(_ element: AXUIElement, _ attribute: String) -> CGSize? {
 func axWindowRecords(
     pid: pid_t,
     appName: String,
-    bundleID: String
+    bundleID: String,
+    frontmostPID: pid_t?
 ) -> [WindowRecord] {
     let app = AXUIElementCreateApplication(pid)
     guard
         let rawWindows = axAttribute(app, kAXWindowsAttribute as String),
         let axWindows = rawWindows as? [AXUIElement]
     else { return [] }
+
+    let focusedWindow = axAttribute(app, kAXFocusedWindowAttribute as String)
 
     var records: [WindowRecord] = []
     for window in axWindows {
@@ -79,7 +93,8 @@ func axWindowRecords(
             left: position.x,
             top: position.y,
             width: size.width,
-            height: size.height
+            height: size.height,
+            is_active: pid == frontmostPID && focusedWindow.map { CFEqual(window, $0) } == true
         ))
     }
     return records
@@ -100,6 +115,7 @@ guard let windowInfo = CGWindowListCopyWindowInfo(
 
 var windows: [WindowRecord] = []
 var visibleApps: [pid_t: (name: String, bundleID: String)] = [:]
+let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
 for info in windowInfo {
     let alpha = info[kCGWindowAlpha as String] as? Double ?? 0
     guard alpha > 0 else { continue }
@@ -128,7 +144,8 @@ for info in windowInfo {
         left: left,
         top: top,
         width: width,
-        height: height
+        height: height,
+        is_active: false
     ))
 }
 
@@ -138,14 +155,37 @@ for (pid, metadata) in visibleApps {
     windows.append(contentsOf: axWindowRecords(
         pid: pid,
         appName: metadata.name,
-        bundleID: metadata.bundleID
+        bundleID: metadata.bundleID,
+        frontmostPID: frontmostPID
     ))
+}
+
+var displayCount: UInt32 = 0
+guard CGGetActiveDisplayList(0, nil, &displayCount) == .success else {
+    fputs("Could not enumerate active displays\n", stderr)
+    exit(1)
+}
+var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+guard CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount) == .success else {
+    fputs("Could not enumerate active displays\n", stderr)
+    exit(1)
+}
+let displays = displayIDs.prefix(Int(displayCount)).map { displayID in
+    let bounds = CGDisplayBounds(displayID)
+    return DisplayRecord(
+        id: displayID,
+        left: bounds.origin.x,
+        top: bounds.origin.y,
+        width: bounds.width,
+        height: bounds.height,
+        is_primary: CGDisplayIsMain(displayID) != 0
+    )
 }
 
 do {
     let encoder = JSONEncoder()
     encoder.outputFormatting = [.sortedKeys]
-    let data = try encoder.encode(Output(windows: windows))
+    let data = try encoder.encode(Output(windows: windows, displays: displays))
     FileHandle.standardOutput.write(data)
     FileHandle.standardOutput.write(Data("\n".utf8))
 } catch {

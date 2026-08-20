@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import logging
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from openchronicle.capture import privacy, screenshot
@@ -43,6 +45,59 @@ def test_sensitive_window_regions_propagates_enumeration_failure(monkeypatch) ->
     monkeypatch.setattr(privacy, "list_visible_windows", lambda: None)
 
     assert privacy.sensitive_window_regions(cfg) is None
+
+
+def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_run_window_list_helper",
+        lambda: {
+            "windows": [
+                {
+                    "app_name": "Cursor",
+                    "bundle_id": "com.cursor.Cursor",
+                    "title": "main.py",
+                    "left": 100,
+                    "top": 20,
+                    "width": 90,
+                    "height": 80,
+                    "is_active": True,
+                }
+            ],
+            "displays": [
+                {
+                    "id": 2,
+                    "left": 100,
+                    "top": 0,
+                    "width": 100,
+                    "height": 100,
+                    "is_primary": False,
+                }
+            ],
+        },
+    )
+
+    inventory = privacy.read_window_inventory()
+
+    assert inventory is not None
+    assert inventory.displays == (
+        privacy.DisplayInfo(2, privacy.ScreenRegion(100, 0, 100, 100), False),
+    )
+    assert inventory.windows[0].is_active is True
+
+
+def test_window_list_helper_failure_does_not_log_stderr_metadata(monkeypatch, caplog) -> None:
+    monkeypatch.setattr(privacy, "_resolve_window_list_path", lambda: Path("/helper"))
+    monkeypatch.setattr(
+        privacy.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stderr="InPrivate - secret-title"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+        assert privacy._run_window_list_helper() is None
+
+    assert "secret-title" not in caplog.text
 
 
 def test_sensitive_window_regions_avoids_helper_without_window_rules(monkeypatch) -> None:

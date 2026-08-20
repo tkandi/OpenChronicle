@@ -28,11 +28,25 @@ class ScreenRegion:
 
 
 @dataclass(frozen=True)
+class DisplayInfo:
+    id: int
+    region: ScreenRegion
+    is_primary: bool = False
+
+
+@dataclass(frozen=True)
 class VisibleWindow:
     app_name: str
     bundle_id: str
     title: str
     region: ScreenRegion
+    is_active: bool = False
+
+
+@dataclass(frozen=True)
+class WindowInventory:
+    windows: tuple[VisibleWindow, ...]
+    displays: tuple[DisplayInfo, ...]
 
 
 def exact_match(value: str | None, patterns: list[str]) -> bool:
@@ -136,7 +150,7 @@ def sensitive_window_regions(cfg: CaptureConfig) -> list[ScreenRegion] | None:
     return [region for region, _ in matches]
 
 
-def list_visible_windows() -> list[VisibleWindow] | None:
+def _run_window_list_helper() -> dict[str, Any] | None:
     helper = _resolve_window_list_path()
     if helper is None:
         logger.warning("screenshot privacy helper unavailable")
@@ -153,22 +167,35 @@ def list_visible_windows() -> list[VisibleWindow] | None:
         logger.warning("visible-window enumeration failed: %s", exc)
         return None
     if proc.returncode != 0:
-        logger.warning(
-            "visible-window helper exited %d: %s",
-            proc.returncode,
-            proc.stderr.strip()[:200],
-        )
+        logger.warning("visible-window helper exited %d", proc.returncode)
         return None
 
     try:
         raw = json.loads(proc.stdout)
-        rows = raw["windows"]
-        if not isinstance(rows, list):
-            raise TypeError("windows is not a list")
-        return [_parse_visible_window(row) for row in rows]
-    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        if not isinstance(raw, dict):
+            raise TypeError("helper output is not an object")
+        return raw
+    except (json.JSONDecodeError, TypeError) as exc:
         logger.warning("invalid visible-window helper output: %s", exc)
         return None
+
+
+def read_window_inventory() -> WindowInventory | None:
+    raw = _run_window_list_helper()
+    if raw is None:
+        return None
+    try:
+        windows = tuple(_parse_visible_window(row) for row in raw["windows"])
+        displays = tuple(_parse_display(row) for row in raw["displays"])
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.warning("invalid visible-window helper output: %s", exc)
+        return None
+    return WindowInventory(windows=windows, displays=displays)
+
+
+def list_visible_windows() -> list[VisibleWindow] | None:
+    inventory = read_window_inventory()
+    return list(inventory.windows) if inventory is not None else None
 
 
 def _parse_visible_window(row: Any) -> VisibleWindow:
@@ -187,6 +214,22 @@ def _parse_visible_window(row: Any) -> VisibleWindow:
         bundle_id=str(row.get("bundle_id") or ""),
         title=str(row.get("title") or ""),
         region=region,
+        is_active=bool(row.get("is_active")),
+    )
+
+
+def _parse_display(row: Any) -> DisplayInfo:
+    if not isinstance(row, dict):
+        raise TypeError("display is not an object")
+    return DisplayInfo(
+        id=int(row["id"]),
+        region=ScreenRegion(
+            left=float(row["left"]),
+            top=float(row["top"]),
+            width=float(row["width"]),
+            height=float(row["height"]),
+        ),
+        is_primary=bool(row.get("is_primary")),
     )
 
 
