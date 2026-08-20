@@ -56,3 +56,37 @@ def test_all_marks_every_display_and_unknown_active_display_blocks_ax() -> None:
     assert snapshot.protected_display_ids == frozenset({1, 2})
     assert snapshot.active_display_id is None
     assert snapshot.ax_blocked is True
+
+
+def test_empty_displays_fail_closed_for_sensitive_active_window() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge", "edge", "InPrivate", ScreenRegion(0, 0, 80, 90), True,
+            ),
+        ),
+        displays=(),
+    )
+
+    snapshot = build_protection_snapshot(cfg, inventory, paused=False, generation=9, now=12.0)
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.protected_display_ids == frozenset()
+    assert snapshot.active_display_id is None
+    assert snapshot.ax_blocked is True
+
+
+def test_multiple_active_windows_fail_closed() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "first", ScreenRegion(0, 0, 80, 90), True),
+            VisibleWindow("Cursor", "cursor", "second", ScreenRegion(110, 0, 80, 90), True),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(CaptureConfig(), inventory, paused=False, generation=10, now=13.0)
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.ax_blocked is True

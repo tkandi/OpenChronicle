@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -67,6 +68,21 @@ def _regions_intersect(left: ScreenRegion, right: ScreenRegion) -> bool:
     return _intersection_area(left, right) > 0
 
 
+def _display_is_usable(display: DisplayInfo) -> bool:
+    region = display.region
+    return (
+        all(math.isfinite(value) for value in (region.left, region.top, region.width, region.height))
+        and region.width > 0
+        and region.height > 0
+    )
+
+
+def _displays_are_usable(displays: tuple[DisplayInfo, ...]) -> bool:
+    return bool(displays) and len({display.id for display in displays}) == len(displays) and all(
+        _display_is_usable(display) for display in displays
+    )
+
+
 def _display_for_active_window(
     window: VisibleWindow | None,
     displays: tuple[DisplayInfo, ...],
@@ -88,25 +104,35 @@ def build_protection_snapshot(
 ) -> ProtectionSnapshot:
     displays = inventory.displays if inventory is not None else ()
     all_ids = frozenset(display.id for display in displays)
-    active_window = (
-        next((window for window in inventory.windows if window.is_active), None)
-        if inventory is not None
-        else None
-    )
+    active_windows = tuple(window for window in inventory.windows if window.is_active) if inventory else ()
+    active_window = active_windows[0] if len(active_windows) == 1 else None
     active_display_id = _display_for_active_window(active_window, displays)
-
-    if paused:
-        state = ProtectionState.PAUSED
-        protected_ids = all_ids
-    elif inventory is None:
-        state = ProtectionState.FAILED
-        protected_ids = frozenset()
-    else:
-        sensitive_regions = [
+    sensitive_regions = (
+        [
             window.region
             for window in inventory.windows
             if privacy.visible_window_denylist_reason(cfg, window) is not None
         ]
+        if inventory is not None
+        else []
+    )
+    has_unmapped_sensitive_window = any(
+        not any(_regions_intersect(display.region, region) for display in displays)
+        for region in sensitive_regions
+    )
+    mapping_failed = (
+        len(active_windows) > 1
+        or (active_window is not None and active_display_id is None)
+        or has_unmapped_sensitive_window
+    )
+
+    if paused:
+        state = ProtectionState.PAUSED
+        protected_ids = all_ids
+    elif inventory is None or not _displays_are_usable(displays) or mapping_failed:
+        state = ProtectionState.FAILED
+        protected_ids = frozenset()
+    else:
         matched_ids = frozenset(
             display.id
             for display in displays

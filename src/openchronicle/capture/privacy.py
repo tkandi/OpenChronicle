@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import platform
 import re
@@ -175,8 +176,8 @@ def _run_window_list_helper() -> dict[str, Any] | None:
         if not isinstance(raw, dict):
             raise TypeError("helper output is not an object")
         return raw
-    except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning("invalid visible-window helper output: %s", exc)
+    except (json.JSONDecodeError, TypeError):
+        logger.warning("invalid visible-window helper output")
         return None
 
 
@@ -187,8 +188,12 @@ def read_window_inventory() -> WindowInventory | None:
     try:
         windows = tuple(_parse_visible_window(row) for row in raw["windows"])
         displays = tuple(_parse_display(row) for row in raw["displays"])
-    except (KeyError, TypeError, ValueError) as exc:
-        logger.warning("invalid visible-window helper output: %s", exc)
+        if not displays:
+            raise ValueError("display list is empty")
+        if sum(window.is_active for window in windows) > 1:
+            raise ValueError("multiple active windows")
+    except (KeyError, TypeError, ValueError):
+        logger.warning("invalid visible-window helper output")
         return None
     return WindowInventory(windows=windows, displays=displays)
 
@@ -221,14 +226,21 @@ def _parse_visible_window(row: Any) -> VisibleWindow:
 def _parse_display(row: Any) -> DisplayInfo:
     if not isinstance(row, dict):
         raise TypeError("display is not an object")
+    region = ScreenRegion(
+        left=float(row["left"]),
+        top=float(row["top"]),
+        width=float(row["width"]),
+        height=float(row["height"]),
+    )
+    if (
+        not all(math.isfinite(value) for value in (region.left, region.top, region.width, region.height))
+        or region.width <= 0
+        or region.height <= 0
+    ):
+        raise ValueError("display has invalid bounds")
     return DisplayInfo(
         id=int(row["id"]),
-        region=ScreenRegion(
-            left=float(row["left"]),
-            top=float(row["top"]),
-            width=float(row["width"]),
-            height=float(row["height"]),
-        ),
+        region=region,
         is_primary=bool(row.get("is_primary")),
     )
 

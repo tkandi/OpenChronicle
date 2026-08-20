@@ -86,6 +86,53 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
     assert inventory.windows[0].is_active is True
 
 
+def test_read_window_inventory_rejects_empty_displays(monkeypatch) -> None:
+    monkeypatch.setattr(privacy, "_run_window_list_helper", lambda: {"windows": [], "displays": []})
+
+    assert privacy.read_window_inventory() is None
+
+
+def test_read_window_inventory_rejects_invalid_display_bounds(monkeypatch) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_run_window_list_helper",
+        lambda: {
+            "windows": [],
+            "displays": [
+                {"id": 1, "left": 0, "top": 0, "width": 0, "height": 100, "is_primary": True}
+            ],
+        },
+    )
+
+    assert privacy.read_window_inventory() is None
+
+
+def test_read_window_inventory_does_not_log_parser_private_marker(monkeypatch, caplog) -> None:
+    marker = "private-marker"
+    monkeypatch.setattr(
+        privacy,
+        "_run_window_list_helper",
+        lambda: {
+            "windows": [],
+            "displays": [
+                {
+                    "id": 1,
+                    "left": marker,
+                    "top": 0,
+                    "width": 100,
+                    "height": 100,
+                    "is_primary": True,
+                }
+            ],
+        },
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+        assert privacy.read_window_inventory() is None
+
+    assert marker not in caplog.text
+
+
 def test_window_list_helper_failure_does_not_log_stderr_metadata(monkeypatch, caplog) -> None:
     monkeypatch.setattr(privacy, "_resolve_window_list_path", lambda: Path("/helper"))
     monkeypatch.setattr(
