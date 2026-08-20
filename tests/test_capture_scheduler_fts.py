@@ -398,6 +398,11 @@ def test_protected_active_display_skips_ax_but_captures_safe_monitor(
         "grab_many",
         lambda **kwargs: screenshot_calls.append(kwargs) or [],
     )
+    monkeypatch.setattr(
+        scheduler_mod.s1_parser,
+        "enrich",
+        lambda _capture: (_ for _ in ()).throw(AssertionError("s1_parser.enrich must not run")),
+    )
 
     out = scheduler_mod._build_capture(
         CaptureConfig(screenshot_monitor="separate"),

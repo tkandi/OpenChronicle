@@ -27,6 +27,26 @@ With `screenshot_privacy_mode = "skip-monitor"`, the bundled `mac-window-list` h
 
 This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
 
+## Privacy protection indicators
+
+When `privacy_indicator_style` is not `off`, the local `mac-privacy-overlay`
+helper displays the protection state after the protection decision is confirmed.
+The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
+`banner`.
+
+- Green means that display has been excluded by the same-generation protection
+  decision used for capture.
+- Gray means capture is paused.
+- Yellow means detection failed and screenshot capture is fail-closed.
+- No indicator is not proof of protection: if the overlay helper itself fails,
+  it cannot display the yellow failure state and screenshot capture remains
+  stopped until the helper is confirmed again.
+
+Protection detection reads only local visible-window titles and geometry
+metadata. A display excluded by that decision produces no capture JSON, no FTS
+index entry, no memory/timeline input, and no model request for that protected
+content.
+
 The filename is ISO-8601 with `:` → `-` and `+` → `p` / `-` → `m` for the TZ offset. Example: `2026-04-21T17-07-32p08-00.json`.
 
 The same capture scheduler also invokes `SessionManager.on_event` (wired as a `pre_capture_hook` in `daemon.py`), so the session cutter sees every capture-worthy event without a separate subscription path.

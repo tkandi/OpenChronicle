@@ -173,6 +173,29 @@ the field remain intact, while comments embedded inside the changed array are
 replaced along with the array. Unchanged denylist fields retain their original
 formatting.
 
+## Privacy protection indicators
+
+The Capture settings page can select `off`, `border`, `shield`, `pill`,
+`quiet-shield`, or `banner` for `capture.privacy_indicator_style`. Green means a
+display is excluded by the same protection-decision generation used by capture;
+gray means capture is paused; yellow means detection failed and screenshot
+capture is fail-closed. The overlay helper is a separate process, so no visible
+indicator is not a protection confirmation: a failed helper cannot render the
+yellow state, and capture stays stopped until a later helper confirmation.
+
+The decision inspects only local window-title and geometry metadata. It does
+not write protected content to a capture, create an index entry, feed timeline
+or memory processing, or send that content to a model.
+
+Before relying on the setting in daily use, perform this manual acceptance on
+empty privacy windows after an explicit reinstall: verify `separate` and `all`
+across two displays; move a privacy window between displays; pause and resume;
+terminate and recover the overlay helper; quit the menu-bar app while the
+backend continues; and switch every style plus `off` without restarting the
+daemon. Confirm capture logs include only generation, state, style, and display
+IDs, never private window titles. This checklist is manual and remains pending
+until it is performed by the controller.
+
 The same local interface is available for diagnostics and automation:
 
 ```bash

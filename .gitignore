@@ -26,6 +26,7 @@ build/
 resources/mac-ax-helper
 resources/mac-ax-watcher
 resources/mac-window-list
+resources/mac-privacy-overlay
 
 # Local OpenChronicle data (only if symlinked into the repo for dev)
 .openchronicle/

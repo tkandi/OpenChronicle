@@ -104,6 +104,29 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(updates["capture.privacy_indicator_style"] as? String, "border")
   }
 
+  func testPrivacyIndicatorStyleDefaultsForMissingAndUnknownSnapshotValues() throws {
+    let payload = snapshotPayload(path: "/tmp/config.toml")
+    let missing = payload.replacingOccurrences(
+      of: "          \"privacy_indicator_style\": \"pill\",\n",
+      with: ""
+    )
+    let unknown = payload.replacingOccurrences(
+      of: "\"privacy_indicator_style\": \"pill\"",
+      with: "\"privacy_indicator_style\": \"future-style\""
+    )
+
+    for variant in [missing, unknown] {
+      let snapshot = try JSONDecoder().decode(
+        ConfigurationSnapshot.self,
+        from: Data(variant.utf8)
+      )
+      XCTAssertEqual(
+        try XCTUnwrap(ConfigurationDraft(snapshot: snapshot)).privacyIndicatorStyle,
+        "pill"
+      )
+    }
+  }
+
   func testPrivacyDraftEmitsArrayChangesAndRejectsBlankRules() throws {
     let payload = privacySnapshotPayload(path: "/tmp/config.toml")
     let snapshot = try JSONDecoder().decode(

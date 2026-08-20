@@ -206,20 +206,25 @@ compile_bundled_binaries() {
   "${VENV_DIR}/bin/python" - <<'PY' || die "failed to compile bundled macOS binaries"
 from openchronicle.capture.ax_capture import _resolve_helper_path
 from openchronicle.capture.privacy import _resolve_window_list_path
+from openchronicle.capture.privacy_overlay import _resolve_overlay_path
 from openchronicle.capture.watcher import _resolve_watcher_path
 
 helper = _resolve_helper_path()
 watcher = _resolve_watcher_path()
 window_list = _resolve_window_list_path()
+privacy_overlay = _resolve_overlay_path()
 if helper is None:
     raise SystemExit("mac-ax-helper not available after install")
 if watcher is None:
     raise SystemExit("mac-ax-watcher not available after install")
 if window_list is None:
     raise SystemExit("mac-window-list not available after install")
+if privacy_overlay is None:
+    raise SystemExit("mac-privacy-overlay not available after install")
 print(f"helper={helper}")
 print(f"watcher={watcher}")
 print(f"window_list={window_list}")
+print(f"privacy_overlay={privacy_overlay}")
 PY
 }
 

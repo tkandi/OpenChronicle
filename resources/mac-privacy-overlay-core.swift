@@ -231,9 +231,8 @@ private final class IndicatorView: NSView {
         guard let image = NSImage(
             systemSymbolName: presentation.symbolName,
             accessibilityDescription: nil
-        ) else { return }
-        image.isTemplate = true
-        color.set()
+        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) else { return }
+        image.isTemplate = false
         image.draw(in: rect)
     }
 }

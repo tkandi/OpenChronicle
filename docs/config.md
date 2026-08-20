@@ -96,6 +96,7 @@ include_screenshot = true
 screenshot_monitor = "primary"       # "primary", "all", or "separate"
 screenshot_privacy_mode = "skip-monitor" # "off" or "skip-monitor"
 screenshot_privacy_fail_closed = true # skip screenshots if visible-window enumeration fails
+privacy_indicator_style = "pill"     # off | border | shield | pill | quiet-shield | banner
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                       # Electron apps need deep trees; 8 only reaches chrome
@@ -118,6 +119,7 @@ Tuning notes:
 - **`screenshot_monitor`.** `primary` keeps the legacy single-monitor `screenshot` field. `all` stores one `screenshot` image for the full virtual desktop across all monitors. `separate` stores one image per physical monitor in `screenshots[]` and also keeps the first image in `screenshot` for compatibility.
 - **`screenshot_privacy_mode`.** With `skip-monitor`, OpenChronicle enumerates on-screen windows immediately before each screenshot and applies the app, bundle, and window-title denylists to every window, including floating panels. It uses CoreGraphics metadata plus a top-level AX title/bounds fallback for background windows; it does not traverse their AX trees. `separate` skips only intersecting monitors; `all` skips the whole virtual-desktop image if any visible denied window is present. Set `off` to retain the old foreground-only behavior.
 - **`screenshot_privacy_fail_closed`.** When true, a missing, timed-out, or malformed window-enumeration result disables that tick's screenshots. AX/text capture can still be written. This prevents an operational failure from silently bypassing the screenshot guard.
+- **`privacy_indicator_style`.** Chooses the local macOS indicator used when a same-generation protection decision excludes a display. `off` preserves the protection behavior without displaying an indicator. The available values are `off`, `border`, `shield`, `pill`, `quiet-shield`, and `banner`.
 - **macOS permissions.** The privacy helper requires Screen Recording permission, the same permission needed by screenshot capture. If macOS cannot expose window titles, the helper exits unsuccessfully so `screenshot_privacy_fail_closed = true` suppresses screenshots.
 - **`buffer_max_mb`.** Hard ceiling in MB. When exceeded, the cleanup pass evicts oldest absorbed files until under. Set to `0` to disable (pure time-based retention).
 - **Denylist fields.** App/bundle lists are exact case-insensitive matches. The `*_patterns` lists are case-insensitive Python regular expressions. A foreground match skips the capture before JSON write, FTS indexing, timeline ingestion, and model processing. Window-title matches run before AX and screenshot capture; URL/text matches run after AX parsing but still before screenshot capture. The screenshot privacy guard can also apply app/bundle/title rules to non-focused visible windows; URL/text rules remain foreground-only because it does not read background AX trees.
