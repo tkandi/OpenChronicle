@@ -340,7 +340,7 @@ class PrivacyOverlayClient:
 
     def mark_terminal(self) -> None:
         """Prevent later render or clear calls without waiting for transport cleanup."""
-        with self._lifecycle_lock:
+        with self._send_lock, self._lifecycle_lock:
             self._closed = True
 
     def _send(self, command: dict[str, Any], generation: int, timeout: float) -> bool:

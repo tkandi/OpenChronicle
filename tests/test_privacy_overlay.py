@@ -243,6 +243,32 @@ def test_terminal_mark_prevents_a_later_transport_start(snapshot: ProtectionSnap
     assert starts == 0
 
 
+def test_terminal_mark_waits_for_an_admitted_send_and_blocks_later_commands(snapshot) -> None:
+    transport = BlockingTransport(True)
+    client = PrivacyOverlayClient(transport_factory=lambda: transport)
+    render_result: list[bool] = []
+    mark_finished = threading.Event()
+
+    render_thread = threading.Thread(
+        target=lambda: render_result.append(client.render(snapshot, timeout=1.0))
+    )
+    render_thread.start()
+    assert transport.started.wait(timeout=0.5)
+    mark_thread = threading.Thread(target=lambda: (client.mark_terminal(), mark_finished.set()))
+    mark_thread.start()
+    try:
+        assert mark_finished.wait(timeout=0.1) is False
+    finally:
+        transport.release.set()
+        render_thread.join(timeout=1.0)
+        mark_thread.join(timeout=1.0)
+
+    assert render_result == [True]
+    assert mark_finished.is_set()
+    assert client.render(snapshot) is False
+    assert client.clear(snapshot.generation + 1) is False
+
+
 def test_restart_backoff_escalates_to_cap_and_resets_after_recovery(snapshot, monkeypatch) -> None:
     transports = [FailingTransport() for _ in range(7)] + [FakeTransport(True)]
     starts = 0

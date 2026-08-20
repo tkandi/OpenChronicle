@@ -81,7 +81,7 @@ class PrivacyProtectionMonitor:
             if self._overlay_closed:
                 return
             self._overlay_closed = True
-        self._overlay.mark_terminal()
+            self._overlay.mark_terminal()
         threading.Thread(
             target=self._overlay.close,
             daemon=True,
@@ -176,18 +176,17 @@ class PrivacyProtectionMonitor:
             return paused, None
 
     def _render(self, snapshot: ProtectionSnapshot) -> bool:
-        if self._is_stopped():
-            return False
-        self._before_overlay_call()
-        if self._is_stopped():
-            return False
-        try:
-            if snapshot.indicator_style != "off" and snapshot.state is ProtectionState.INACTIVE:
-                return self._overlay.clear(snapshot.generation)
-            return self._overlay.render(snapshot)
-        except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
-            logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
-            return False
+        with self._lifecycle_lock:
+            if self._stopped:
+                return False
+            self._before_overlay_call()
+            try:
+                if snapshot.indicator_style != "off" and snapshot.state is ProtectionState.INACTIVE:
+                    return self._overlay.clear(snapshot.generation)
+                return self._overlay.render(snapshot)
+            except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
+                logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
+                return False
 
     def _is_stopped(self) -> bool:
         with self._lifecycle_lock:

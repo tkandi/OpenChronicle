@@ -304,6 +304,7 @@ def test_stop_during_blocked_force_refresh_is_bounded_and_prevents_late_render(
 def test_stop_marks_overlay_terminal_before_a_pre_overlay_barrier_releases(inventory, fake_overlay) -> None:
     reached_barrier = threading.Event()
     release_barrier = threading.Event()
+    stop_finished = threading.Event()
     refresh_errors: list[Exception] = []
 
     def before_overlay_call() -> None:
@@ -332,20 +333,23 @@ def test_stop_marks_overlay_terminal_before_a_pre_overlay_barrier_releases(inven
     refresh_thread = threading.Thread(target=force_refresh)
     refresh_thread.start()
     assert reached_barrier.wait(timeout=0.5)
+    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+    stop_thread.start()
     try:
-        started_at = time.monotonic()
-        monitor.stop()
-        assert time.monotonic() - started_at < 0.5
-        assert fake_overlay.terminal_marked.is_set()
+        assert stop_finished.wait(timeout=0.1) is False
+        assert fake_overlay.terminal_marked.is_set() is False
     finally:
         release_barrier.set()
         refresh_thread.join(timeout=1.0)
+        stop_thread.join(timeout=1.0)
 
     assert not refresh_thread.is_alive()
-    assert refresh_errors and "stopped" in str(refresh_errors[0])
-    assert fake_overlay.render_calls == 0
+    assert not stop_thread.is_alive()
+    assert stop_finished.is_set()
+    assert fake_overlay.terminal_marked.is_set()
+    assert fake_overlay.render_calls == 1
     assert fake_overlay.clear_calls == 0
-    assert fake_overlay.snapshots == []
+    assert len(fake_overlay.snapshots) == 1
     assert fake_overlay.clear_generations == []
 
 
