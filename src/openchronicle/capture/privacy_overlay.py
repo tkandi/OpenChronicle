@@ -6,7 +6,9 @@ import contextlib
 import json
 import os
 import platform
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -23,35 +25,56 @@ _CLOSE_TIMEOUT = 1.0
 
 
 class OverlayTransport(Protocol):
-    def write_line(self, line: str) -> None: ...
-
-    def wait_for_generation(self, generation: int, timeout: float) -> bool: ...
+    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool: ...
 
     def close(self) -> None: ...
 
 
-def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) -> None:
-    """Build the two-source AppKit helper when its binary is missing or stale."""
-    if not core_path.is_file() or not main_path.is_file():
-        return
-    if binary_path.is_file() and binary_path.stat().st_mtime >= max(
-        core_path.stat().st_mtime, main_path.stat().st_mtime
-    ):
-        return
-
-    cache = Path("/tmp/clang-module-cache")
-    cache.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["CLANG_MODULE_CACHE_PATH"] = str(cache)
-    arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
+def _is_executable(path: Path) -> bool:
     try:
+        return path.is_file() and os.access(path, os.X_OK)
+    except OSError:
+        return False
+
+
+def _sources_are_fresh(core_path: Path, main_path: Path, binary_path: Path) -> bool:
+    try:
+        return (
+            _is_executable(binary_path)
+            and binary_path.stat().st_mtime >= core_path.stat().st_mtime
+            and binary_path.stat().st_mtime >= main_path.stat().st_mtime
+        )
+    except OSError:
+        return False
+
+
+def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) -> Path | None:
+    """Build the helper atomically and return only a confirmed-fresh executable."""
+    try:
+        if not core_path.is_file() or not main_path.is_file():
+            return None
+        if _sources_are_fresh(core_path, main_path, binary_path):
+            return binary_path
+
+        cache = Path(tempfile.gettempdir()) / "openchronicle-clang-cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        build_dir = Path(tempfile.mkdtemp(prefix=".privacy-overlay-", dir=binary_path.parent))
+    except OSError:
+        logger.warning("privacy overlay helper preparation unavailable")
+        return None
+
+    temporary_binary = build_dir / "mac-privacy-overlay"
+    try:
+        env = os.environ.copy()
+        env["CLANG_MODULE_CACHE_PATH"] = str(cache)
+        arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
         result = subprocess.run(
             [
                 "swiftc",
                 str(core_path),
                 str(main_path),
                 "-o",
-                str(binary_path),
+                str(temporary_binary),
                 "-O",
                 "-target",
                 f"{arch}-apple-macos12.0",
@@ -65,11 +88,30 @@ def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) 
             timeout=120,
             env=env,
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        if result.returncode != 0 or not _is_executable(temporary_binary):
+            logger.warning("privacy overlay helper compilation failed")
+            return None
+        os.replace(temporary_binary, binary_path)
+        return binary_path if _sources_are_fresh(core_path, main_path, binary_path) else None
+    except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning("privacy overlay helper compilation unavailable")
-        return
-    if result.returncode != 0:
-        logger.warning("privacy overlay helper compilation failed")
+        return None
+    finally:
+        shutil.rmtree(build_dir, ignore_errors=True)
+
+
+def _usable_overlay_binary(binary_path: Path) -> Path | None:
+    parent = binary_path.parent
+    core_path = parent / "mac-privacy-overlay-core.swift"
+    main_path = parent / "mac-privacy-overlay.swift"
+    try:
+        core_exists = core_path.is_file()
+        main_exists = main_path.is_file()
+    except OSError:
+        return None
+    if core_exists or main_exists:
+        return _maybe_compile_overlay(core_path, main_path, binary_path)
+    return binary_path if _is_executable(binary_path) else None
 
 
 def _resolve_overlay_path() -> Path | None:
@@ -79,8 +121,13 @@ def _resolve_overlay_path() -> Path | None:
 
     override = os.environ.get("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER")
     if override:
-        path = Path(override).expanduser().resolve()
-        if path.is_file() and os.access(path, os.X_OK):
+        try:
+            path = Path(override).expanduser().resolve()
+        except OSError:
+            logger.warning("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER is unavailable")
+            return None
+        usable = _usable_overlay_binary(path)
+        if usable is not None:
             return path
         logger.warning("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER is not executable")
 
@@ -90,20 +137,18 @@ def _resolve_overlay_path() -> Path | None:
 
         bundled_dir = Path(str(package_files("openchronicle").joinpath("_bundled")))
         candidates.append(bundled_dir / "mac-privacy-overlay")
-    except (ModuleNotFoundError, ValueError):
+    except (ModuleNotFoundError, OSError, ValueError):
         pass
 
-    dev_root = Path(__file__).resolve().parents[3]
+    try:
+        dev_root = Path(__file__).resolve().parents[3]
+    except OSError:
+        return None
     candidates.append(dev_root / "resources" / "mac-privacy-overlay")
     for binary_path in candidates:
-        parent = binary_path.parent
-        _maybe_compile_overlay(
-            parent / "mac-privacy-overlay-core.swift",
-            parent / "mac-privacy-overlay.swift",
-            binary_path,
-        )
-        if binary_path.is_file() and os.access(binary_path, os.X_OK):
-            return binary_path
+        usable = _usable_overlay_binary(binary_path)
+        if usable is not None:
+            return usable
     return None
 
 
@@ -112,9 +157,13 @@ class _SubprocessOverlayTransport:
 
     def __init__(self, helper_path: Path) -> None:
         self._condition = threading.Condition()
-        self._acknowledged: set[int] = set()
+        self._command_lock = threading.Lock()
         self._closed = False
         self._reader_finished = False
+        self._protocol_failed = False
+        self._pending_generation: int | None = None
+        self._pending_result: bool | None = None
+        self._completed_generations: set[int] = set()
         self._process: subprocess.Popen[str] | None = subprocess.Popen(
             [str(helper_path)],
             stdin=subprocess.PIPE,
@@ -130,70 +179,81 @@ class _SubprocessOverlayTransport:
         )
         self._reader_thread.start()
 
-    def write_line(self, line: str) -> None:
-        with self._condition:
-            process = self._process
-            if (
-                self._closed
-                or self._reader_finished
-                or process is None
-                or process.poll() is not None
-                or process.stdin is None
-            ):
-                raise BrokenPipeError("privacy overlay helper is not running")
+    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool:
+        with self._command_lock:
+            with self._condition:
+                process = self._process
+                if (
+                    self._closed
+                    or self._protocol_failed
+                    or self._reader_finished
+                    or generation in self._completed_generations
+                    or process is None
+                    or process.poll() is not None
+                    or process.stdin is None
+                ):
+                    return False
+                self._pending_generation = generation
+                self._pending_result = None
+
             try:
                 process.stdin.write(f"{line}\n")
                 process.stdin.flush()
             except (BrokenPipeError, OSError, ValueError) as exc:
+                with self._condition:
+                    self._pending_generation = None
+                    self._pending_result = None
+                    self._condition.notify_all()
                 raise BrokenPipeError("privacy overlay helper write failed") from exc
 
-    def wait_for_generation(self, generation: int, timeout: float) -> bool:
-        deadline = time.monotonic() + max(0.0, timeout)
-        with self._condition:
-            while generation not in self._acknowledged:
-                process = self._process
-                if (
-                    self._closed
-                    or self._reader_finished
-                    or process is None
-                    or process.poll() is not None
-                ):
-                    return False
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return False
-                self._condition.wait(remaining)
-            return True
+            deadline = time.monotonic() + max(0.0, timeout)
+            with self._condition:
+                while self._pending_result is None:
+                    if self._closed or self._protocol_failed or self._reader_finished:
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._condition.wait(remaining)
+                confirmed = self._pending_result is True and not self._protocol_failed
+                if confirmed:
+                    self._completed_generations.add(generation)
+                self._pending_generation = None
+                self._pending_result = None
+                return confirmed
 
     def close(self) -> None:
-        with self._condition:
-            if self._closed:
-                return
-            self._closed = True
-            process = self._process
-            self._condition.notify_all()
+        with self._command_lock:
+            with self._condition:
+                if self._closed:
+                    return
+                self._closed = True
+                self._pending_generation = None
+                self._pending_result = None
+                process = self._process
+                self._condition.notify_all()
 
-        if process is not None:
-            if process.stdin is not None:
-                with contextlib.suppress(OSError, ValueError):
-                    process.stdin.close()
-            if process.poll() is None:
-                process.terminate()
-                try:
-                    process.wait(timeout=_CLOSE_TIMEOUT)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    with contextlib.suppress(subprocess.TimeoutExpired):
+            if process is not None:
+                if process.stdin is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        process.stdin.close()
+                if process.poll() is None:
+                    process.terminate()
+                    try:
                         process.wait(timeout=_CLOSE_TIMEOUT)
-            if process.stdout is not None:
-                with contextlib.suppress(OSError, ValueError):
-                    process.stdout.close()
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        with contextlib.suppress(subprocess.TimeoutExpired):
+                            process.wait(timeout=_CLOSE_TIMEOUT)
+                if process.stdout is not None:
+                    with contextlib.suppress(OSError, ValueError):
+                        process.stdout.close()
 
-        reader = self._reader_thread
-        if reader is not None and reader.is_alive():
-            reader.join(timeout=_CLOSE_TIMEOUT)
-        self._reader_thread = None
-        self._process = None
+            reader = self._reader_thread
+            if reader is not None and reader.is_alive():
+                reader.join(timeout=_CLOSE_TIMEOUT)
+            self._reader_thread = None
+            self._process = None
 
     def _read_acknowledgements(self) -> None:
         process = self._process
@@ -214,17 +274,23 @@ class _SubprocessOverlayTransport:
             message: Any = json.loads(line)
             generation = message["generation"]
             rendered = message["rendered"]
-            if (
-                not isinstance(message, dict)
-                or isinstance(generation, bool)
-                or not isinstance(generation, int)
-                or rendered is not True
-            ):
-                return
         except (json.JSONDecodeError, KeyError, TypeError):
-            return
+            message = None
+            generation = None
+            rendered = None
         with self._condition:
-            self._acknowledged.add(generation)
+            exact = (
+                isinstance(message, dict)
+                and not isinstance(generation, bool)
+                and isinstance(generation, int)
+                and rendered is True
+                and generation == self._pending_generation
+                and self._pending_result is None
+            )
+            if self._pending_generation is None or self._pending_result is not None:
+                self._protocol_failed = True
+            else:
+                self._pending_result = exact
             self._condition.notify_all()
 
 
@@ -236,10 +302,13 @@ class PrivacyOverlayClient:
         self._transport: OverlayTransport | None = None
         self._restart_delay = _INITIAL_RESTART_DELAY
         self._next_restart_at = 0.0
+        self._lifecycle_lock = threading.RLock()
+        self._send_lock = threading.Lock()
 
     def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
         if snapshot.indicator_style == "off":
-            self._discard_transport(schedule_restart=False)
+            with self._send_lock:
+                self._discard_transport(schedule_restart=False)
             return True
         return self._send(self._render_command(snapshot), snapshot.generation, timeout)
 
@@ -257,48 +326,61 @@ class PrivacyOverlayClient:
         )
 
     def close(self) -> None:
-        self._discard_transport(schedule_restart=False)
+        with self._send_lock:
+            self._discard_transport(schedule_restart=False)
 
     def _send(self, command: dict[str, Any], generation: int, timeout: float) -> bool:
-        transport = self._ensure_transport()
-        if transport is None:
+        with self._send_lock:
+            transport = self._ensure_transport()
+            if transport is None:
+                return False
+            try:
+                confirmed = transport.send_and_wait(
+                    json.dumps(command, separators=(",", ":")), generation, timeout
+                )
+            except (OSError, RuntimeError, ValueError):
+                confirmed = False
+            if confirmed:
+                with self._lifecycle_lock:
+                    if self._transport is transport:
+                        self._restart_delay = _INITIAL_RESTART_DELAY
+                        self._next_restart_at = 0.0
+                return True
+            self._discard_transport(schedule_restart=True, expected=transport)
             return False
-        try:
-            transport.write_line(json.dumps(command, separators=(",", ":")))
-            confirmed = transport.wait_for_generation(generation, timeout)
-        except (OSError, RuntimeError, ValueError):
-            confirmed = False
-        if confirmed:
-            return True
-        self._discard_transport(schedule_restart=True)
-        return False
 
     def _ensure_transport(self) -> OverlayTransport | None:
-        if self._transport is not None:
-            return self._transport
-        if time.monotonic() < self._next_restart_at:
-            return None
-        try:
-            transport = self._transport_factory() if self._transport_factory else self._start_default_transport()
-        except OSError:
-            transport = None
-        if transport is None:
-            self._schedule_restart()
-            return None
-        self._transport = transport
-        return transport
+        with self._lifecycle_lock:
+            if self._transport is not None:
+                return self._transport
+            if time.monotonic() < self._next_restart_at:
+                return None
+            try:
+                transport = self._transport_factory() if self._transport_factory else self._start_default_transport()
+            except OSError:
+                transport = None
+            if transport is None:
+                self._schedule_restart()
+                return None
+            self._transport = transport
+            return transport
 
     def _start_default_transport(self) -> OverlayTransport | None:
         helper_path = _resolve_overlay_path()
         return _SubprocessOverlayTransport(helper_path) if helper_path is not None else None
 
-    def _discard_transport(self, *, schedule_restart: bool) -> None:
-        transport, self._transport = self._transport, None
+    def _discard_transport(
+        self, *, schedule_restart: bool, expected: OverlayTransport | None = None
+    ) -> None:
+        with self._lifecycle_lock:
+            if expected is not None and self._transport is not expected:
+                return
+            transport, self._transport = self._transport, None
+            if schedule_restart:
+                self._schedule_restart()
         if transport is not None:
             with contextlib.suppress(OSError, RuntimeError, ValueError):
                 transport.close()
-        if schedule_restart:
-            self._schedule_restart()
 
     def _schedule_restart(self) -> None:
         self._next_restart_at = time.monotonic() + self._restart_delay
