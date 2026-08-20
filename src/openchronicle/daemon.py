@@ -15,12 +15,22 @@ from contextlib import suppress
 
 from . import paths
 from .capture import scheduler as capture_scheduler
+from .capture.privacy_overlay import PrivacyOverlayClient
+from .capture.protection_monitor import PrivacyProtectionMonitor
 from .config import Config
 from .logger import get
 from .session import tick as session_tick
 from .timeline import tick as timeline_tick
 
 logger = get("openchronicle.daemon")
+
+
+def _build_protection_monitor(cfg: Config) -> PrivacyProtectionMonitor:
+    return PrivacyProtectionMonitor(
+        cfg.capture,
+        config_path=paths.config_file(),
+        overlay=PrivacyOverlayClient(),
+    )
 
 
 async def _mcp_loop(cfg: Config) -> None:
@@ -52,73 +62,91 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
     paths.ensure_dirs()
     paths.pid_file().write_text(str(os.getpid()))
 
-    # SessionManager observes every capture-worthy event and fires the
-    # reducer via its on_session_end callback. Built even when
-    # capture_only is true so session rows still land on disk.
-    session_manager = session_tick.build_manager(cfg)
+    protection_monitor = _build_protection_monitor(cfg)
+    session_manager = None
+    tasks: list[asyncio.Task] = []
+    done_task: asyncio.Task | None = None
+    try:
+        protection_monitor.start()
 
-    tasks: list[asyncio.Task] = [
-        asyncio.create_task(
-            capture_scheduler.run_forever(
-                cfg.capture, pre_capture_hook=session_manager.on_event,
+        # SessionManager observes every capture-worthy event and fires the
+        # reducer via its on_session_end callback. Built even when
+        # capture_only is true so session rows still land on disk.
+        session_manager = session_tick.build_manager(cfg)
+
+        tasks = [
+            asyncio.create_task(
+                capture_scheduler.run_forever(
+                    cfg.capture,
+                    pre_capture_hook=session_manager.on_event,
+                    protection_monitor=protection_monitor,
+                ),
+                name="capture",
             ),
-            name="capture",
-        ),
-        asyncio.create_task(
-            session_tick.run_check_cuts(cfg, session_manager), name="session",
-        ),
-        asyncio.create_task(
-            session_tick.run_daily_safety_net(cfg, session_manager),
-            name="daily-safety-net",
-        ),
-    ]
-    if not capture_only:
-        tasks.append(asyncio.create_task(timeline_tick.run_forever(cfg), name="timeline"))
-        tasks.append(
             asyncio.create_task(
-                session_tick.run_flush_tick(cfg, session_manager), name="flush",
-            )
-        )
-        tasks.append(
+                session_tick.run_check_cuts(cfg, session_manager), name="session",
+            ),
             asyncio.create_task(
-                session_tick.run_classifier_tick(cfg, session_manager),
-                name="classifier-tick",
+                session_tick.run_daily_safety_net(cfg, session_manager),
+                name="daily-safety-net",
+            ),
+        ]
+        if not capture_only:
+            tasks.append(
+                asyncio.create_task(timeline_tick.run_forever(cfg), name="timeline")
             )
+            tasks.append(
+                asyncio.create_task(
+                    session_tick.run_flush_tick(cfg, session_manager), name="flush",
+                )
+            )
+            tasks.append(
+                asyncio.create_task(
+                    session_tick.run_classifier_tick(cfg, session_manager),
+                    name="classifier-tick",
+                )
+            )
+        if cfg.mcp.auto_start and cfg.mcp.transport in ("sse", "streamable-http"):
+            tasks.append(asyncio.create_task(_mcp_loop(cfg), name="mcp"))
+
+        stop = asyncio.Event()
+
+        def _handle_stop() -> None:
+            logger.info("shutdown signal received")
+            stop.set()
+
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            with suppress(NotImplementedError):
+                loop.add_signal_handler(sig, _handle_stop)
+
+        done_task = asyncio.create_task(stop.wait())
+        await asyncio.wait(
+            [done_task, *tasks], return_when=asyncio.FIRST_COMPLETED
         )
-    if cfg.mcp.auto_start and cfg.mcp.transport in ("sse", "streamable-http"):
-        tasks.append(asyncio.create_task(_mcp_loop(cfg), name="mcp"))
+    finally:
+        if done_task is not None:
+            done_task.cancel()
+        for task in tasks:
+            task.cancel()
+        cleanup_tasks = [*tasks, *([done_task] if done_task is not None else [])]
+        if cleanup_tasks:
+            with suppress(asyncio.CancelledError):
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
 
-    stop = asyncio.Event()
+        # Flush the currently open session so its S2 reducer has a chance
+        # to run. The daemon-thread reducer spawned by the callback will be
+        # killed when the process exits, but a row with status='ended'
+        # survives and the next boot's safety-net picks it up.
+        if session_manager is not None:
+            with suppress(Exception):
+                session_manager.force_end(reason="daemon-shutdown")
 
-    def _handle_stop() -> None:
-        logger.info("shutdown signal received")
-        stop.set()
-
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGTERM, signal.SIGINT):
-        with suppress(NotImplementedError):
-            loop.add_signal_handler(sig, _handle_stop)
-
-    done_task = asyncio.create_task(stop.wait())
-    await asyncio.wait(
-        [done_task, *tasks], return_when=asyncio.FIRST_COMPLETED
-    )
-
-    for t in tasks:
-        t.cancel()
-    with suppress(asyncio.CancelledError):
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-    # Flush the currently open session so its S2 reducer has a chance
-    # to run. The daemon-thread reducer spawned by the callback will be
-    # killed when the process exits, but a row with status='ended'
-    # survives and the next boot's safety-net picks it up.
-    with suppress(Exception):
-        session_manager.force_end(reason="daemon-shutdown")
-
-    with suppress(FileNotFoundError):
-        paths.pid_file().unlink()
-    logger.info("daemon stopped")
+        with suppress(Exception):
+            protection_monitor.stop()
+        with suppress(FileNotFoundError):
+            paths.pid_file().unlink()
+        logger.info("daemon stopped")
 
 
 def run(cfg: Config, *, capture_only: bool = False) -> None:

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import time
 from pathlib import Path
 
+import pytest
+
 from openchronicle.capture import scheduler as scheduler_mod
 from openchronicle.capture import window_meta
 from openchronicle.capture.ax_models import AXCaptureResult
+from openchronicle.capture.privacy import DisplayInfo, ScreenRegion
+from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
+from openchronicle.capture.protection_monitor import ProtectionDecision
 from openchronicle.config import CaptureConfig
 from openchronicle.store import fts
 
@@ -40,6 +46,64 @@ class _FakeProvider:
         self, app_name: str, *, focused_window_only: bool = True
     ) -> AXCaptureResult | None:
         return self.capture_frontmost(focused_window_only=focused_window_only)
+
+
+class _FakeProtectionMonitor:
+    def __init__(self, *decisions: ProtectionDecision) -> None:
+        self.decisions = list(decisions)
+        self.force_calls: list[bool] = []
+        self.refresh_requests = 0
+
+    @property
+    def snapshot(self) -> ProtectionSnapshot:
+        return self.decisions[-1].snapshot
+
+    def decision_for_capture(self, *, force: bool = True) -> ProtectionDecision:
+        self.force_calls.append(force)
+        if len(self.decisions) > 1:
+            return self.decisions.pop(0)
+        return self.decisions[0]
+
+    def request_refresh(self) -> None:
+        self.refresh_requests += 1
+
+
+def _protection_decision(
+    *,
+    generation: int = 20,
+    state: ProtectionState = ProtectionState.PROTECTED,
+    active_display_id: int | None,
+    protected_ids: set[int],
+    confirmed: bool,
+    fresh: bool = True,
+) -> ProtectionDecision:
+    now = time.monotonic()
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    snapshot = ProtectionSnapshot(
+        generation=generation,
+        state=state,
+        capture_mode="separate",
+        indicator_style="pill",
+        displays=displays,
+        protected_display_ids=frozenset(protected_ids),
+        active_display_id=active_display_id,
+        created_monotonic=now,
+        fresh_until=now + 1.0 if fresh else now - 1.0,
+    )
+    return ProtectionDecision(snapshot=snapshot, indicator_confirmed=confirmed)
+
+
+def _failed_decision() -> ProtectionDecision:
+    return _protection_decision(
+        generation=21,
+        state=ProtectionState.FAILED,
+        active_display_id=None,
+        protected_ids=set(),
+        confirmed=True,
+    )
 
 
 def _capture_dict(
@@ -287,6 +351,240 @@ def test_screenshot_privacy_guard_fails_closed(
 
     assert out is not None
     assert "screenshot" not in out
+
+
+def test_protected_active_display_skips_ax_but_captures_safe_monitor(
+    ac_root: Path, monkeypatch,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(active_display_id=2, protected_ids={2}, confirmed=True)
+    )
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(screenshot_monitor="separate"),
+        provider,
+        {"event_type": "manual"},
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert provider.calls == 0
+    assert "ax_tree" not in out
+    assert "visible_text" not in out
+    assert out["ax_skipped"] == "protected_display"
+    assert screenshot_calls[0]["blocked_regions"] == monitor.snapshot.protected_regions
+
+
+def test_unconfirmed_indicator_fails_screenshot_closed(
+    ac_root: Path, monkeypatch,
+) -> None:
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(active_display_id=1, protected_ids={2}, confirmed=False)
+    )
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(AssertionError("screenshot must not run")),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert "screenshot" not in out
+
+
+def test_failed_protection_snapshot_writes_nothing(
+    ac_root: Path, monkeypatch,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example"))
+    monitor = _FakeProtectionMonitor(_failed_decision())
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert provider.calls == 0
+
+
+def test_stale_refresh_that_newly_blocks_ax_discards_whole_capture(
+    ac_root: Path, monkeypatch,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example"))
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(
+            generation=30,
+            active_display_id=1,
+            protected_ids={2},
+            confirmed=True,
+            fresh=False,
+        ),
+        _protection_decision(
+            generation=31,
+            active_display_id=1,
+            protected_ids={1},
+            confirmed=True,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(AssertionError("screenshot must not run")),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert provider.calls == 1
+    assert monitor.force_calls == [True, True]
+
+
+def test_stale_refresh_uses_new_generation_confirmation_and_regions(
+    ac_root: Path, monkeypatch,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(
+            generation=40,
+            active_display_id=1,
+            protected_ids={2},
+            confirmed=False,
+            fresh=False,
+        ),
+        _protection_decision(
+            generation=41,
+            active_display_id=2,
+            protected_ids={1},
+            confirmed=True,
+        ),
+    )
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(screenshot_monitor="separate"),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert monitor.force_calls == [True, True]
+    assert screenshot_calls[0]["blocked_regions"] == [ScreenRegion(0, 0, 100, 100)]
+
+
+@pytest.mark.asyncio
+async def test_watcher_requests_monitor_refresh_before_queueing_capture(monkeypatch) -> None:
+    order: list[str] = []
+    event_was_queued = asyncio.Event()
+
+    class FakeMonitor:
+        def request_refresh(self) -> None:
+            order.append("refresh")
+
+    class FakeRunner:
+        def __init__(self, *_args, **_kwargs) -> None:
+            return None
+
+        def start_worker(self) -> None:
+            return None
+
+        def run_threaded(self, trigger) -> None:
+            order.append("queue")
+            if trigger is not None:
+                event_was_queued.set()
+
+        def stop_worker(self) -> None:
+            return None
+
+    class FakeWatcher:
+        available = True
+
+        def on_event(self, callback) -> None:
+            self.callback = callback
+
+        def start(self) -> None:
+            self.callback({"event_type": "AXFocusedWindowChanged"})
+
+        def stop(self) -> None:
+            return None
+
+    class FakeDispatcher:
+        def __init__(self, callback, **_kwargs) -> None:
+            self.callback = callback
+
+        def on_event(self, event) -> None:
+            self.callback(event)
+
+        def shutdown(self) -> None:
+            return None
+
+    monkeypatch.setattr(scheduler_mod.ax_capture, "create_provider", lambda **_: _FakeProvider())
+    monkeypatch.setattr(scheduler_mod, "_CaptureRunner", FakeRunner)
+    monkeypatch.setattr(scheduler_mod, "AXWatcherProcess", FakeWatcher)
+    monkeypatch.setattr(scheduler_mod, "EventDispatcher", FakeDispatcher)
+
+    task = asyncio.create_task(
+        scheduler_mod.run_forever(
+            CaptureConfig(heartbeat_minutes=0),
+            protection_monitor=FakeMonitor(),
+        )
+    )
+    await asyncio.wait_for(event_was_queued.wait(), timeout=1.0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert order[:2] == ["refresh", "queue"]
 
 
 def test_write_capture_indexes_into_fts(ac_root: Path) -> None:

@@ -21,9 +21,13 @@ from ..logger import get
 from ..store import fts as fts_store
 from . import ax_capture, privacy, s1_parser, screenshot, window_meta
 from .event_dispatcher import EventDispatcher
+from .protection import ProtectionState
+from .protection_monitor import PrivacyProtectionMonitor, ProtectionDecision
 from .watcher import AXWatcherProcess
 
 logger = get("openchronicle.capture")
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).astimezone().replace(microsecond=0).isoformat()
 
@@ -36,6 +40,8 @@ def _build_capture(
     cfg: CaptureConfig,
     provider: ax_capture.AXProvider,
     trigger: dict[str, Any] | None,
+    *,
+    protection_monitor: PrivacyProtectionMonitor | None = None,
 ) -> dict[str, Any] | None:
     """Build an enriched capture dict in memory. Returns None if capturing is paused."""
     paths.ensure_dirs()
@@ -58,6 +64,13 @@ def _build_capture(
         "bundle_id": meta.bundle_id,
     }
 
+    decision: ProtectionDecision | None = None
+    if protection_monitor is not None:
+        decision = protection_monitor.decision_for_capture(force=True)
+        if decision.snapshot.state is ProtectionState.FAILED:
+            logger.warning("capture skipped: privacy protection failed closed")
+            return None
+
     reason = privacy.capture_denylist_reason(cfg, out)
     if reason is not None:
         logger.info(
@@ -68,15 +81,18 @@ def _build_capture(
         )
         return None
 
-    if provider.available:
-        result = provider.capture_frontmost(focused_window_only=True)
-        if result is not None:
-            out["ax_tree"] = result.raw_json
-            out["ax_metadata"] = result.metadata
+    if decision is not None and decision.snapshot.ax_blocked:
+        out["ax_skipped"] = "protected_display"
     else:
-        out["ax_unavailable"] = True
+        if provider.available:
+            result = provider.capture_frontmost(focused_window_only=True)
+            if result is not None:
+                out["ax_tree"] = result.raw_json
+                out["ax_metadata"] = result.metadata
+        else:
+            out["ax_unavailable"] = True
 
-    s1_parser.enrich(out)
+        s1_parser.enrich(out)
 
     reason = privacy.capture_denylist_reason(cfg, out)
     if reason is not None:
@@ -90,7 +106,30 @@ def _build_capture(
 
     if cfg.include_screenshot:
         blocked_regions: list[privacy.ScreenRegion] | None = []
-        if cfg.screenshot_privacy_mode == "skip-monitor":
+        if decision is not None:
+            if decision.snapshot.fresh_until <= time.monotonic():
+                refreshed = protection_monitor.decision_for_capture(force=True)
+                if refreshed.snapshot.state is ProtectionState.FAILED:
+                    logger.warning("capture skipped: privacy protection failed closed")
+                    return None
+                if (
+                    refreshed.snapshot.generation != decision.snapshot.generation
+                    and refreshed.snapshot.ax_blocked
+                    and "ax_tree" in out
+                ):
+                    logger.warning(
+                        "capture skipped: refreshed privacy protection invalidated AX data"
+                    )
+                    return None
+                decision = refreshed
+            if (
+                decision.snapshot.indicator_style != "off"
+                and not decision.indicator_confirmed
+            ):
+                logger.warning("screenshot skipped: privacy indicator not confirmed")
+                return out
+            blocked_regions = decision.snapshot.protected_regions
+        elif cfg.screenshot_privacy_mode == "skip-monitor":
             blocked_regions = privacy.sensitive_window_regions(cfg)
         if blocked_regions is None and cfg.screenshot_privacy_fail_closed:
             logger.warning(
@@ -230,10 +269,12 @@ class _CaptureRunner:
         provider: ax_capture.AXProvider,
         *,
         pre_capture_hook: Callable[[dict[str, Any]], None] | None = None,
+        protection_monitor: PrivacyProtectionMonitor | None = None,
     ) -> None:
         self._cfg = cfg
         self._provider = provider
         self._pre_capture_hook = pre_capture_hook
+        self._protection_monitor = protection_monitor
         self._lock = threading.Lock()
         self._last_fingerprint: str | None = None
         self._queue: queue.Queue[Any] = queue.Queue(maxsize=self._MAX_PENDING)
@@ -270,7 +311,12 @@ class _CaptureRunner:
         # Serialize so two near-simultaneous triggers don't double-capture.
         with self._lock:
             try:
-                out = _build_capture(self._cfg, self._provider, trigger)
+                out = _build_capture(
+                    self._cfg,
+                    self._provider,
+                    trigger,
+                    protection_monitor=self._protection_monitor,
+                )
                 if out is None:
                     return
                 fingerprint = _content_fingerprint(out)
@@ -309,6 +355,7 @@ async def run_forever(
     cfg: CaptureConfig,
     *,
     pre_capture_hook: Callable[[dict[str, Any]], None] | None = None,
+    protection_monitor: PrivacyProtectionMonitor | None = None,
 ) -> None:
     """Run the capture pipeline until cancelled.
 
@@ -328,7 +375,12 @@ async def run_forever(
             "AX capture unavailable: %s", getattr(provider, "reason", "unknown reason")
         )
 
-    runner = _CaptureRunner(cfg, provider, pre_capture_hook=pre_capture_hook)
+    runner = _CaptureRunner(
+        cfg,
+        provider,
+        pre_capture_hook=pre_capture_hook,
+        protection_monitor=protection_monitor,
+    )
     runner.start_worker()
     watcher: AXWatcherProcess | None = None
     dispatcher: EventDispatcher | None = None
@@ -336,6 +388,8 @@ async def run_forever(
     def _on_capture(trigger: dict[str, Any] | None) -> None:
         # Hook firing is deferred into the runner so content-deduped captures
         # (e.g. overnight lock-screen repeats) don't refresh the session timer.
+        if protection_monitor is not None:
+            protection_monitor.request_refresh()
         runner.run_threaded(trigger)
 
     if cfg.event_driven:
