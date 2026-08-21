@@ -15,6 +15,7 @@ from typing import Any
 
 from ..config import CaptureConfig
 from ..logger import get
+from .protection_reason import ProtectionReasonCode
 
 logger = get("openchronicle.capture")
 _WARNED_BAD_PATTERNS: set[str] = set()
@@ -77,29 +78,56 @@ class InventoryReadResult:
     failure_reason: ProtectionFailureReason | None
 
 
+@dataclass(frozen=True)
+class VisibleWindowRuleMatch:
+    kind: ProtectionReasonCode
+    rule: str | None
+    app_name: str | None
+    bundle_id: str | None
+    window_title: str | None
+
+
 def exact_match(value: str | None, patterns: list[str]) -> bool:
-    if not value:
-        return False
-    folded = value.casefold()
-    return any(pattern.casefold() == folded for pattern in patterns if pattern)
+    return bool(_exact_matching_rules(value, patterns))
 
 
 def regex_match(value: str | None, patterns: list[str]) -> bool:
+    return bool(_regex_matching_rules(value, patterns))
+
+
+def _exact_matching_rules(value: str | None, patterns: list[str]) -> tuple[str, ...]:
     if not value:
-        return False
+        return ()
+    folded = value.casefold()
+    matches: list[str] = []
+    seen: set[str] = set()
+    for pattern in patterns:
+        if not pattern or pattern.casefold() != folded or pattern.casefold() in seen:
+            continue
+        seen.add(pattern.casefold())
+        matches.append(pattern)
+    return tuple(matches)
+
+
+def _regex_matching_rules(value: str | None, patterns: list[str]) -> tuple[str, ...]:
+    if not value:
+        return ()
+    matches: list[str] = []
+    seen: set[str] = set()
     for pattern in patterns:
         if not pattern:
             continue
         try:
-            if re.search(pattern, value, flags=re.IGNORECASE):
-                return True
+            matched = re.search(pattern, value, flags=re.IGNORECASE) is not None
         except re.error:
             if pattern not in _WARNED_BAD_PATTERNS:
                 logger.warning("invalid capture denylist regex; falling back to substring match")
                 _WARNED_BAD_PATTERNS.add(pattern)
-            if pattern.casefold() in value.casefold():
-                return True
-    return False
+            matched = pattern.casefold() in value.casefold()
+        if matched and pattern.casefold() not in seen:
+            seen.add(pattern.casefold())
+            matches.append(pattern)
+    return tuple(matches)
 
 
 def capture_denylist_reason(cfg: CaptureConfig, out: dict[str, Any]) -> str | None:
@@ -136,15 +164,54 @@ def has_visible_window_rules(cfg: CaptureConfig) -> bool:
 def visible_window_denylist_reason(
     cfg: CaptureConfig, window: VisibleWindow
 ) -> str | None:
-    if exact_match(window.app_name, cfg.deny_app_names):
-        return "app_name"
-    if exact_match(window.bundle_id, cfg.deny_bundle_ids):
-        return "bundle_id"
-    if not window.title_available and any(cfg.deny_window_title_patterns):
-        return "window_title_unknown"
-    if regex_match(window.title, cfg.deny_window_title_patterns):
-        return "window_title"
-    return None
+    """Return the legacy first-match category for existing callers."""
+    matches = visible_window_rule_matches(cfg, window)
+    return {
+        ProtectionReasonCode.APP_RULE: "app_name",
+        ProtectionReasonCode.BUNDLE_RULE: "bundle_id",
+        ProtectionReasonCode.WINDOW_TITLE_UNKNOWN: "window_title_unknown",
+        ProtectionReasonCode.WINDOW_TITLE_RULE: "window_title",
+    }.get(matches[0].kind) if matches else None
+
+
+def visible_window_rule_matches(
+    cfg: CaptureConfig, window: VisibleWindow
+) -> tuple[VisibleWindowRuleMatch, ...]:
+    """Return every de-duplicated visible-window denylist match in fixed order."""
+    app_name = window.app_name or None
+    bundle_id = window.bundle_id or None
+    window_title = window.title if window.title_available and window.title else None
+    matches: list[VisibleWindowRuleMatch] = []
+    for kind, rules in (
+        (ProtectionReasonCode.APP_RULE, _exact_matching_rules(window.app_name, cfg.deny_app_names)),
+        (ProtectionReasonCode.BUNDLE_RULE, _exact_matching_rules(window.bundle_id, cfg.deny_bundle_ids)),
+    ):
+        matches.extend(
+            VisibleWindowRuleMatch(kind, rule, app_name, bundle_id, window_title)
+            for rule in rules
+        )
+    if not window.title_available and cfg.deny_window_title_patterns:
+        matches.append(
+            VisibleWindowRuleMatch(
+                ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,
+                None,
+                app_name,
+                bundle_id,
+                None,
+            )
+        )
+    else:
+        matches.extend(
+            VisibleWindowRuleMatch(
+                ProtectionReasonCode.WINDOW_TITLE_RULE,
+                rule,
+                app_name,
+                bundle_id,
+                window_title,
+            )
+            for rule in _regex_matching_rules(window.title, cfg.deny_window_title_patterns)
+        )
+    return tuple(dict.fromkeys(matches))
 
 
 def sensitive_window_regions(cfg: CaptureConfig) -> list[ScreenRegion] | None:

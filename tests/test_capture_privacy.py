@@ -46,6 +46,44 @@ def test_sensitive_window_regions_match_all_metadata_fields(monkeypatch) -> None
     assert [region.left for region in regions] == [0, 100, 200]
 
 
+def test_visible_window_rule_matches_keep_every_matching_rule_and_value() -> None:
+    cfg = CaptureConfig(
+        deny_app_names=["Private Browser"],
+        deny_bundle_ids=["com.example.private"],
+        deny_window_title_patterns=["InPrivate"],
+    )
+    window = _window(
+        app="Private Browser",
+        bundle="com.example.private",
+        title="New InPrivate Window",
+    )
+
+    matches = privacy.visible_window_rule_matches(cfg, window)
+
+    assert [(match.kind.value, match.rule) for match in matches] == [
+        ("app_rule", "Private Browser"),
+        ("bundle_rule", "com.example.private"),
+        ("window_title_rule", "InPrivate"),
+    ]
+    assert all(match.app_name == "Private Browser" for match in matches)
+    assert all(match.bundle_id == "com.example.private" for match in matches)
+    assert all(match.window_title == "New InPrivate Window" for match in matches)
+
+
+def test_unknown_window_title_has_no_invented_title_rule_or_value() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(app="Browser", bundle="com.example.browser", title="", title_available=False),
+    )
+
+    assert len(matches) == 1
+    assert matches[0].kind.value == "window_title_unknown"
+    assert matches[0].rule is None
+    assert matches[0].window_title is None
+
+
 def test_privacy_mode_off_preserves_every_foreground_denylist_field() -> None:
     cases = [
         (CaptureConfig(screenshot_privacy_mode="off", deny_app_names=["PrivateApp"]), {

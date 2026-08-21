@@ -9,7 +9,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import config
-from ..capture_pause import capture_is_paused_strict
+from ..capture_pause import (
+    CapturePauseDecision,
+    CapturePauseKind,
+    capture_pause_decision_strict,
+    pause_reason_from_decision,
+)
 from ..config import CaptureConfig
 from ..logger import get
 from .privacy import (
@@ -25,6 +30,7 @@ from .protection import (
     build_protection_snapshot,
     failure_requires_fail_closed,
 )
+from .protection_reason import ProtectionReason
 
 logger = get("openchronicle.capture")
 _MONITOR_JOIN_TIMEOUT = 0.25
@@ -47,7 +53,7 @@ class PrivacyProtectionMonitor:
         config_path: Path,
         overlay: PrivacyOverlayClient,
         inventory_reader: Callable[[], WindowInventory | InventoryReadResult | None] = read_window_inventory_result,
-        pause_reader: Callable[[], bool] = capture_is_paused_strict,
+        pause_reader: Callable[[], CapturePauseDecision | bool] = capture_pause_decision_strict,
         watchdog_seconds: float = 1.0,
         before_overlay_call: Callable[[], None] | None = None,
     ) -> None:
@@ -149,7 +155,7 @@ class PrivacyProtectionMonitor:
             self._reload_indicator_style()
             with self._state_lock:
                 covered_request_epoch = self._requested_epoch
-            paused, inventory, failure_reason = self._read_protection_inputs()
+            paused, inventory, failure_reason, pause_reason = self._read_protection_inputs()
             self._raise_if_stopped()
             now = time.monotonic()
             generation = self._generation + 1
@@ -160,6 +166,7 @@ class PrivacyProtectionMonitor:
                 generation=generation,
                 now=now,
                 failure_reason=failure_reason,
+                pause_reason=pause_reason,
             )
             self._log_failure_transition(snapshot)
             self._raise_if_stopped()
@@ -203,23 +210,42 @@ class PrivacyProtectionMonitor:
 
     def _read_protection_inputs(
         self,
-    ) -> tuple[bool, WindowInventory | None, ProtectionFailureReason | None]:
+    ) -> tuple[
+        bool,
+        WindowInventory | None,
+        ProtectionFailureReason | None,
+        ProtectionReason | None,
+    ]:
         try:
-            paused = self._pause_reader()
+            pause_decision = self._normalize_pause_decision(self._pause_reader())
         except Exception as exc:  # A pause-read failure must not allow capture.
             logger.warning("privacy protection pause read failed: %s", type(exc).__name__)
-            return False, None, ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+            return False, None, ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE, None
+        paused = pause_decision.paused
+        pause_reason = pause_reason_from_decision(pause_decision)
         try:
             result = self._inventory_reader()
         except Exception:  # Inventory metadata and exception text must never be logged.
-            return paused, None, ProtectionFailureReason.INVENTORY_UNAVAILABLE
+            return paused, None, ProtectionFailureReason.INVENTORY_UNAVAILABLE, pause_reason
         if isinstance(result, InventoryReadResult):
-            return paused, result.inventory, result.failure_reason
+            return paused, result.inventory, result.failure_reason, pause_reason
         return (
             paused,
             result,
             ProtectionFailureReason.INVENTORY_UNAVAILABLE if result is None else None,
+            pause_reason,
         )
+
+    @staticmethod
+    def _normalize_pause_decision(value: CapturePauseDecision | bool) -> CapturePauseDecision:
+        if isinstance(value, CapturePauseDecision):
+            return value
+        if isinstance(value, bool):
+            return CapturePauseDecision(
+                paused=value,
+                kind=CapturePauseKind.INDEFINITE if value else CapturePauseKind.NOT_PAUSED,
+            )
+        raise TypeError("pause reader returned an unsupported decision")
 
     def _render(self, snapshot: ProtectionSnapshot) -> bool:
         with self._lifecycle_lock:

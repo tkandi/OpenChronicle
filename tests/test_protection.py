@@ -12,6 +12,7 @@ from openchronicle.capture.protection import (
     build_protection_snapshot,
     failure_requires_fail_closed,
 )
+from openchronicle.capture.protection_reason import ProtectionReasonCode
 from openchronicle.config import CaptureConfig
 
 LEFT = DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True)
@@ -99,6 +100,52 @@ def test_all_marks_every_display_and_active_candidate_blocks_ax() -> None:
     assert snapshot.active_display_id is None
     assert snapshot.active_candidate_display_ids == frozenset({1})
     assert snapshot.ax_blocked is True
+
+
+def test_all_mode_records_direct_and_inherited_display_reasons() -> None:
+    snapshot = build_protection_snapshot(
+        CaptureConfig(
+            screenshot_monitor="all",
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        WindowInventory(
+            windows=(VisibleWindow("Edge", "edge", "InPrivate", RIGHT.region),),
+            displays=(LEFT, RIGHT),
+        ),
+        paused=False,
+        generation=40,
+        now=1.0,
+    )
+
+    assert [reason.code for reason in snapshot.reasons_for_display(2)] == [
+        ProtectionReasonCode.WINDOW_TITLE_RULE,
+    ]
+    inherited = snapshot.reasons_for_display(1)
+    assert inherited[0].code is ProtectionReasonCode.MODE_ALL_INHERITED
+    assert inherited[0].source_display_id == 2
+
+
+def test_diagnostic_display_reason_is_composed_with_direct_rule() -> None:
+    snapshot = build_protection_snapshot(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        WindowInventory(
+            windows=(VisibleWindow("Edge", "edge", "InPrivate", RIGHT.region),),
+            displays=(LEFT, RIGHT),
+        ),
+        paused=False,
+        generation=41,
+        now=2.0,
+        diagnostic_display_ids=frozenset({2}),
+    )
+
+    assert snapshot.protected_display_ids == frozenset({2})
+    assert [reason.code for reason in snapshot.reasons_for_display(2)] == [
+        ProtectionReasonCode.DIAGNOSTICS_REVEAL,
+        ProtectionReasonCode.WINDOW_TITLE_RULE,
+    ]
 
 
 def test_paused_snapshot_blocks_ax_without_inventory() -> None:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 from ..config import CaptureConfig
@@ -14,6 +14,11 @@ from .privacy import (
     ScreenRegion,
     VisibleWindow,
     WindowInventory,
+)
+from .protection_reason import (
+    DisplayProtectionReasons,
+    ProtectionReason,
+    ProtectionReasonCode,
 )
 
 SNAPSHOT_FRESH_SECONDS = 0.25
@@ -49,6 +54,10 @@ class ProtectionSnapshot:
     fresh_until: float
     failure_reason: ProtectionFailureReason | None = None
     active_candidate_display_ids: frozenset[int] = frozenset()
+    reason_display: str = "hybrid"
+    reason_detail: str = "exact"
+    reason_trigger: str = "hover"
+    display_reasons: DisplayProtectionReasons = field(default_factory=DisplayProtectionReasons)
 
     @property
     def protected_regions(self) -> list[ScreenRegion]:
@@ -67,6 +76,9 @@ class ProtectionSnapshot:
         if self.active_display_id is not None:
             return self.active_display_id in self.protected_display_ids
         return bool(self.active_candidate_display_ids & self.protected_display_ids)
+
+    def reasons_for_display(self, display_id: int | None) -> tuple[ProtectionReason, ...]:
+        return self.display_reasons.for_display(display_id)
 
 
 def _intersection_area(left: ScreenRegion, right: ScreenRegion) -> float:
@@ -119,6 +131,8 @@ def build_protection_snapshot(
     generation: int,
     now: float,
     failure_reason: ProtectionFailureReason | None = None,
+    pause_reason: ProtectionReason | None = None,
+    diagnostic_display_ids: frozenset[int] = frozenset(),
 ) -> ProtectionSnapshot:
     displays = inventory.displays if inventory is not None else ()
     all_ids = frozenset(display.id for display in displays)
@@ -137,18 +151,17 @@ def build_protection_snapshot(
     )
     sensitive_windows = (
         [
-            (window, reason)
+            (window, matches)
             for window in inventory.windows
-            if (reason := privacy.visible_window_denylist_reason(cfg, window)) is not None
+            if (matches := privacy.visible_window_rule_matches(cfg, window))
         ]
         if inventory is not None
         else []
     )
-    sensitive_regions = [window.region for window, _reason in sensitive_windows]
     has_unmapped_sensitive_window = any(
-        reason != "window_title_unknown"
+        any(match.kind is not ProtectionReasonCode.WINDOW_TITLE_UNKNOWN for match in matches)
         and not any(_regions_intersect(display.region, window.region) for display in displays)
-        for window, reason in sensitive_windows
+        for window, matches in sensitive_windows
     )
     derived_failure_reason = failure_reason
     if derived_failure_reason is None:
@@ -174,11 +187,62 @@ def build_protection_snapshot(
     else:
         matched_ids = frozenset(
             display.id
+            for window, _matches in sensitive_windows
             for display in displays
-            if any(_regions_intersect(display.region, region) for region in sensitive_regions)
-        )
+            if _regions_intersect(display.region, window.region)
+        ) | (frozenset(diagnostic_display_ids) & all_ids)
         state = ProtectionState.PROTECTED if matched_ids else ProtectionState.INACTIVE
         protected_ids = all_ids if matched_ids and cfg.screenshot_monitor == "all" else matched_ids
+
+    direct_reason_display_ids: set[int] = set()
+    reasons: list[ProtectionReason] = []
+    for window, matches in sensitive_windows:
+        matched_display_ids = tuple(
+            display.id
+            for display in displays
+            if _regions_intersect(display.region, window.region)
+        )
+        for display_id in matched_display_ids:
+            direct_reason_display_ids.add(display_id)
+            reasons.extend(
+                ProtectionReason(
+                    code=match.kind,
+                    display_id=display_id,
+                    app_name=match.app_name,
+                    bundle_id=match.bundle_id,
+                    window_title=match.window_title,
+                    rule=match.rule,
+                )
+                for match in matches
+            )
+
+    diagnostic_ids = frozenset(diagnostic_display_ids) & all_ids
+    reasons.extend(
+        ProtectionReason(ProtectionReasonCode.DIAGNOSTICS_REVEAL, display_id)
+        for display_id in sorted(diagnostic_ids)
+    )
+    direct_reason_display_ids.update(diagnostic_ids)
+    if (
+        state is ProtectionState.PROTECTED
+        and cfg.screenshot_monitor == "all"
+        and direct_reason_display_ids
+    ):
+        source_display_id = min(direct_reason_display_ids)
+        reasons.extend(
+            ProtectionReason(
+                ProtectionReasonCode.MODE_ALL_INHERITED,
+                display.id,
+                source_display_id=source_display_id,
+            )
+            for display in displays
+            if display.id not in direct_reason_display_ids
+        )
+    if paused:
+        reasons.append(pause_reason or ProtectionReason(ProtectionReasonCode.MANUAL_PAUSE, None))
+    elif derived_failure_reason is not None:
+        reasons.append(
+            ProtectionReason(ProtectionReasonCode(derived_failure_reason.value), display_id=None)
+        )
 
     return ProtectionSnapshot(
         generation=generation,
@@ -192,4 +256,8 @@ def build_protection_snapshot(
         fresh_until=now + SNAPSHOT_FRESH_SECONDS,
         failure_reason=None if paused else derived_failure_reason,
         active_candidate_display_ids=active_candidate_display_ids,
+        reason_display=cfg.privacy_reason_display,
+        reason_detail=cfg.privacy_reason_detail,
+        reason_trigger=cfg.privacy_reason_trigger,
+        display_reasons=DisplayProtectionReasons.from_reasons(reasons),
     )

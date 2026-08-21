@@ -19,6 +19,8 @@ from openchronicle.capture.privacy import (
 )
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_monitor import PrivacyProtectionMonitor
+from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.capture_pause import CapturePauseDecision, CapturePauseKind
 from openchronicle.config import CaptureConfig
 
 
@@ -114,6 +116,22 @@ def test_monitor_renders_pause_on_all_displays(tmp_path, inventory, fake_overlay
     assert decision.snapshot.state is ProtectionState.PAUSED
     assert decision.snapshot.protected_display_ids == frozenset({1, 2})
     assert decision.indicator_confirmed is True
+
+
+def test_monitor_accepts_typed_pause_decision_and_preserves_reason(inventory, fake_overlay) -> None:
+    pause_decision = CapturePauseDecision(paused=True, kind=CapturePauseKind.TIMED)
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(privacy_indicator_style="pill"),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: pause_decision,
+    )
+
+    protected = monitor.decision_for_capture(force=True)
+
+    assert protected.snapshot.state is ProtectionState.PAUSED
+    assert protected.snapshot.reasons_for_display(1)[0].code is ProtectionReasonCode.TIMED_PAUSE
 
 
 def test_required_overlay_timeout_is_unconfirmed(inventory, fake_overlay) -> None:

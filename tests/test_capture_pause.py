@@ -5,7 +5,15 @@ import logging
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from openchronicle.capture_pause import capture_is_paused, parse_pause_state
+from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.capture_pause import (
+    CapturePauseKind,
+    capture_is_paused,
+    capture_is_paused_strict,
+    capture_pause_decision_strict,
+    parse_pause_state,
+    pause_reason_from_decision,
+)
 
 
 def _state(
@@ -89,6 +97,63 @@ def test_effective_deadline_preserves_full_warning_minute() -> None:
 
     assert state is not None
     assert state.effective_resume_at == armed_at + timedelta(minutes=1)
+
+
+def test_pause_decision_classifies_missing_legacy_timed_and_safe_resume(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 19, 8, tzinfo=UTC)
+    pause_file = tmp_path / ".paused"
+
+    assert capture_pause_decision_strict(pause_path=pause_file, now=now).kind is CapturePauseKind.NOT_PAUSED
+
+    pause_file.write_text("2026-07-19T12:00:00+08:00")
+    assert capture_pause_decision_strict(pause_path=pause_file, now=now).kind is CapturePauseKind.INDEFINITE
+
+    pause_file.write_bytes(
+        _state(
+            resume_at=now + timedelta(minutes=5),
+            armed_at=now,
+            heartbeat_at=now,
+        )
+    )
+    timed = capture_pause_decision_strict(pause_path=pause_file, now=now)
+    assert timed.paused is True
+    assert timed.kind is CapturePauseKind.TIMED
+    assert timed.effective_resume_at == now + timedelta(minutes=5)
+
+    pause_file.write_bytes(
+        _state(
+            resume_at=now - timedelta(minutes=1),
+            armed_at=now - timedelta(minutes=2),
+            heartbeat_at=now,
+        )
+    )
+    resumed = capture_pause_decision_strict(pause_path=pause_file, now=now)
+    assert resumed.paused is False
+    assert resumed.kind is CapturePauseKind.NOT_PAUSED
+    assert not pause_file.exists()
+
+
+def test_pause_decision_reports_timed_wait_and_effective_resume(tmp_path: Path) -> None:
+    now = datetime(2026, 7, 19, 8, tzinfo=UTC)
+    pause_file = tmp_path / ".paused"
+    pause_file.write_bytes(
+        _state(
+            resume_at=now - timedelta(minutes=1),
+            armed_at=now - timedelta(minutes=2),
+            heartbeat_at=now - timedelta(minutes=2),
+        )
+    )
+
+    decision = capture_pause_decision_strict(pause_path=pause_file, now=now)
+
+    assert decision.paused is True
+    assert decision.kind is CapturePauseKind.TIMED_WAITING
+    assert decision.effective_resume_at == now - timedelta(minutes=1)
+    assert capture_is_paused_strict(pause_path=pause_file, now=now) is True
+    reason = pause_reason_from_decision(decision)
+    assert reason is not None
+    assert reason.code is ProtectionReasonCode.TIMED_PAUSE_WAITING
+    assert reason.effective_resume_at == now - timedelta(minutes=1)
 
 
 def test_capture_is_paused_fails_closed_with_sanitized_log(
