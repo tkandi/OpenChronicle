@@ -17,15 +17,46 @@ enum IndicatorStyle: String, Codable {
     case banner
 }
 
-struct OverlayDisplay: Codable, Hashable {
+struct OverlayDisplay: Codable {
     let id: UInt32
     let left: Double
     let top: Double
     let width: Double
     let height: Double
+    let reasons: [OverlayReason]?
+
+    init(
+        id: UInt32,
+        left: Double,
+        top: Double,
+        width: Double,
+        height: Double,
+        reasons: [OverlayReason]? = nil
+    ) {
+        self.id = id
+        self.left = left
+        self.top = top
+        self.width = width
+        self.height = height
+        self.reasons = reasons
+    }
 
     var frame: NSRect {
         NSRect(x: left, y: top, width: width, height: height)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, left, top, width, height, reasons
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UInt32.self, forKey: .id)
+        left = try container.decode(Double.self, forKey: .left)
+        top = try container.decode(Double.self, forKey: .top)
+        width = try container.decode(Double.self, forKey: .width)
+        height = try container.decode(Double.self, forKey: .height)
+        reasons = try container.decodeIfPresent([OverlayReason].self, forKey: .reasons) ?? []
     }
 }
 
@@ -35,10 +66,56 @@ struct OverlayCommand: Codable {
     let style: IndicatorStyle
     let displays: [OverlayDisplay]
     let allDisplays: Bool
+    let reasonDisplay: String
+    let reasonDetail: String
+    let reasonTrigger: OverlayReasonTrigger
+    let reasons: [OverlayReason]
+
+    init(
+        generation: Int,
+        state: IndicatorState,
+        style: IndicatorStyle,
+        displays: [OverlayDisplay],
+        allDisplays: Bool,
+        reasonDisplay: String = "hybrid",
+        reasonDetail: String = "exact",
+        reasonTrigger: OverlayReasonTrigger = .hover,
+        reasons: [OverlayReason] = []
+    ) {
+        self.generation = generation
+        self.state = state
+        self.style = style
+        self.displays = displays
+        self.allDisplays = allDisplays
+        self.reasonDisplay = reasonDisplay
+        self.reasonDetail = reasonDetail
+        self.reasonTrigger = reasonTrigger
+        self.reasons = reasons
+    }
 
     enum CodingKeys: String, CodingKey {
         case generation, state, style, displays
         case allDisplays = "all_displays"
+        case reasonDisplay = "reason_display"
+        case reasonDetail = "reason_detail"
+        case reasonTrigger = "reason_trigger"
+        case reasons
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        generation = try container.decode(Int.self, forKey: .generation)
+        state = try container.decode(IndicatorState.self, forKey: .state)
+        style = try container.decode(IndicatorStyle.self, forKey: .style)
+        displays = try container.decode([OverlayDisplay].self, forKey: .displays)
+        allDisplays = try container.decode(Bool.self, forKey: .allDisplays)
+        reasonDisplay = try container.decodeIfPresent(String.self, forKey: .reasonDisplay) ?? "hybrid"
+        reasonDetail = try container.decodeIfPresent(String.self, forKey: .reasonDetail) ?? "exact"
+        reasonTrigger = try container.decodeIfPresent(
+            OverlayReasonTrigger.self,
+            forKey: .reasonTrigger
+        ) ?? .hover
+        reasons = try container.decodeIfPresent([OverlayReason].self, forKey: .reasons) ?? []
     }
 }
 
@@ -114,13 +191,31 @@ private final class IndicatorView: NSView {
     private static let compactSize = NSSize(width: 30, height: 30)
     private static let pillHeight: CGFloat = 30
     private static let bannerHeight: CGFloat = 30
+    private static let expandedWidth: CGFloat = 340
+    private static let reasonRowHeight: CGFloat = 18
+    private static let reasonPadding: CGFloat = 10
+    private static let reasonGap: CGFloat = 8
+    private static let maximumReasonLines = 3
 
     private var presentation: IndicatorPresentation
     private var style: IndicatorStyle
+    private var reasons: [OverlayReason]
+    private var includeExactValues: Bool
+    private var revealState: ReasonRevealState
+    var onClick: (() -> Void)?
 
-    init(presentation: IndicatorPresentation, style: IndicatorStyle) {
+    init(
+        presentation: IndicatorPresentation,
+        style: IndicatorStyle,
+        reasons: [OverlayReason],
+        includeExactValues: Bool,
+        trigger: OverlayReasonTrigger
+    ) {
         self.presentation = presentation
         self.style = style
+        self.reasons = reasons
+        self.includeExactValues = includeExactValues
+        revealState = ReasonRevealState(trigger: trigger)
         super.init(frame: .zero)
     }
 
@@ -128,18 +223,115 @@ private final class IndicatorView: NSView {
         nil
     }
 
-    func update(presentation: IndicatorPresentation, style: IndicatorStyle) {
+    var trigger: OverlayReasonTrigger { revealState.trigger }
+    var hasReasons: Bool { !reasons.isEmpty }
+    var isReasonExpanded: Bool { revealState.isExpanded && hasReasons }
+    var styleForLayout: IndicatorStyle { style }
+
+    func update(
+        presentation: IndicatorPresentation,
+        style: IndicatorStyle,
+        reasons: [OverlayReason],
+        includeExactValues: Bool,
+        trigger: OverlayReasonTrigger
+    ) {
         self.presentation = presentation
         self.style = style
+        self.reasons = reasons
+        self.includeExactValues = includeExactValues
+        if revealState.trigger != trigger {
+            revealState = ReasonRevealState(trigger: trigger)
+        }
         needsDisplay = true
     }
 
-    static func panelSize(for presentation: IndicatorPresentation, style: IndicatorStyle) -> NSSize {
+    func update(pointerInside: Bool) -> Bool {
+        let wasExpanded = isReasonExpanded
+        revealState.update(pointerInside: pointerInside)
+        let changed = wasExpanded != isReasonExpanded
+        if changed { needsDisplay = true }
+        return changed
+    }
+
+    func click() -> Bool {
+        guard hasReasons else { return false }
+        let wasExpanded = isReasonExpanded
+        revealState.click()
+        let changed = wasExpanded != isReasonExpanded
+        if changed { needsDisplay = true }
+        return changed
+    }
+
+    func desiredPanelSize() -> NSSize {
+        let compact = compactPanelSize()
+        guard isReasonExpanded else { return compact }
+        return NSSize(
+            width: Self.expandedWidth,
+            height: compact.height + Self.reasonGap + reasonBoxHeight
+        )
+    }
+
+    var hitTargetRect: NSRect {
+        let status = statusRect(in: bounds)
+        guard isReasonExpanded else { return status }
+        return status.union(reasonBoxRect(in: bounds))
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard trigger == .click, hasReasons else { return }
+        onClick?()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+
+        if isReasonExpanded {
+            drawReasonBox(in: reasonBoxRect(in: bounds))
+        }
+        let status = statusRect(in: bounds)
+        switch style {
+        case .border:
+            drawBorder()
+            drawBadge(in: status, fill: presentation.color)
+        case .banner:
+            let banner = NSRect(
+                x: bounds.minX,
+                y: bounds.maxY - Self.bannerHeight,
+                width: bounds.width,
+                height: Self.bannerHeight
+            )
+            drawBadge(in: banner, fill: presentation.color, cornerRadius: 0)
+        case .shield, .pill:
+            drawBadge(in: status, fill: presentation.color)
+        case .quietShield:
+            drawQuietSymbol(in: status)
+        case .off:
+            break
+        }
+    }
+
+    private var reasonLines: [String] {
+        overlayReasonLines(
+            reasons,
+            includeExactValues: includeExactValues,
+            maximumLines: Self.maximumReasonLines
+        )
+    }
+
+    private var reasonBoxHeight: CGFloat {
+        CGFloat(reasonLines.count) * Self.reasonRowHeight + Self.reasonPadding * 2
+    }
+
+    private func compactPanelSize() -> NSSize {
         switch style {
         case .shield, .quietShield:
-            return compactSize
+            return Self.compactSize
         case .pill:
-            return compactSizeForText(presentation.text)
+            return Self.compactSizeForText(presentation.text)
         case .border, .banner, .off:
             return .zero
         }
@@ -152,24 +344,73 @@ private final class IndicatorView: NSView {
         return NSSize(width: max(68, textWidth + 50), height: pillHeight)
     }
 
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
+    private func statusRect(in container: NSRect) -> NSRect {
+        let size: NSSize
+        switch style {
+        case .shield, .quietShield:
+            size = Self.compactSize
+        case .pill, .border, .banner:
+            size = Self.compactSizeForText(presentation.text)
+        case .off:
+            return .zero
+        }
 
         switch style {
+        case .shield, .pill, .quietShield:
+            return NSRect(
+                x: container.maxX - size.width,
+                y: container.minY,
+                width: size.width,
+                height: size.height
+            )
         case .border:
-            drawBorder()
-            drawBadge(in: badgeRect(in: bounds), fill: presentation.color)
+            return NSRect(
+                x: container.maxX - size.width - Self.margin,
+                y: container.minY + Self.margin,
+                width: size.width,
+                height: size.height
+            )
         case .banner:
-            let banner = NSRect(x: bounds.minX, y: bounds.maxY - Self.bannerHeight, width: bounds.width, height: Self.bannerHeight)
-            drawBadge(in: banner, fill: presentation.color, cornerRadius: 0)
-        case .shield:
-            drawBadge(in: bounds, fill: presentation.color)
-        case .pill:
-            drawBadge(in: bounds, fill: presentation.color)
-        case .quietShield:
-            drawQuietSymbol(in: bounds)
+            return NSRect(
+                x: container.maxX - size.width - Self.margin,
+                y: container.maxY - Self.bannerHeight,
+                width: size.width,
+                height: Self.bannerHeight
+            )
         case .off:
-            break
+            return .zero
+        }
+    }
+
+    private func reasonBoxRect(in container: NSRect) -> NSRect {
+        guard isReasonExpanded else { return .zero }
+        let status = statusRect(in: container)
+        switch style {
+        case .shield, .pill, .quietShield:
+            return NSRect(
+                x: container.minX,
+                y: status.maxY + Self.reasonGap,
+                width: container.width,
+                height: reasonBoxHeight
+            )
+        case .border:
+            let width = min(Self.expandedWidth, max(0, container.width - Self.margin * 2))
+            return NSRect(
+                x: container.maxX - width - Self.margin,
+                y: status.maxY + Self.reasonGap,
+                width: width,
+                height: reasonBoxHeight
+            )
+        case .banner:
+            let width = min(Self.expandedWidth, max(0, container.width - Self.margin * 2))
+            return NSRect(
+                x: container.maxX - width - Self.margin,
+                y: status.minY - Self.reasonGap - reasonBoxHeight,
+                width: width,
+                height: reasonBoxHeight
+            )
+        case .off:
+            return .zero
         }
     }
 
@@ -180,14 +421,27 @@ private final class IndicatorView: NSView {
         path.stroke()
     }
 
-    private func badgeRect(in container: NSRect) -> NSRect {
-        let size = Self.compactSizeForText(presentation.text)
-        return NSRect(
-            x: container.maxX - size.width - Self.margin,
-            y: container.minY + Self.margin,
-            width: size.width,
-            height: size.height
-        )
+    private func drawReasonBox(in rect: NSRect) {
+        guard !rect.isEmpty else { return }
+        NSColor.black.withAlphaComponent(0.86).setFill()
+        NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7).fill()
+
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.lineBreakMode = .byTruncatingTail
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11, weight: .regular),
+            .foregroundColor: NSColor.white,
+            .paragraphStyle: paragraph,
+        ]
+        for (index, line) in reasonLines.enumerated() {
+            let lineRect = NSRect(
+                x: rect.minX + Self.reasonPadding,
+                y: rect.maxY - Self.reasonPadding - CGFloat(index + 1) * Self.reasonRowHeight,
+                width: rect.width - Self.reasonPadding * 2,
+                height: Self.reasonRowHeight
+            )
+            (line as NSString).draw(in: lineRect, withAttributes: attributes)
+        }
     }
 
     private func drawBadge(in rect: NSRect, fill: NSColor, cornerRadius: CGFloat = 7) {
@@ -221,7 +475,11 @@ private final class IndicatorView: NSView {
         presentation.color.withAlphaComponent(0.18).setFill()
         NSBezierPath(roundedRect: rect, xRadius: 7, yRadius: 7).fill()
         presentation.color.withAlphaComponent(0.8).setStroke()
-        let path = NSBezierPath(roundedRect: rect.insetBy(dx: 0.5, dy: 0.5), xRadius: 7, yRadius: 7)
+        let path = NSBezierPath(
+            roundedRect: rect.insetBy(dx: 0.5, dy: 0.5),
+            xRadius: 7,
+            yRadius: 7
+        )
         path.lineWidth = 1
         path.stroke()
         drawSymbol(in: rect.insetBy(dx: 6, dy: 6), color: presentation.color)
@@ -231,23 +489,44 @@ private final class IndicatorView: NSView {
         guard let image = NSImage(
             systemSymbolName: presentation.symbolName,
             accessibilityDescription: nil
-        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(paletteColors: [color])) else { return }
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(paletteColors: [color])
+        ) else { return }
         image.isTemplate = false
         image.draw(in: rect)
     }
 }
 
+typealias OverlayPointerTimerFactory = (
+    _ interval: TimeInterval,
+    _ tick: @escaping () -> Void
+) -> () -> Void
+
+private let pointerPollInterval: TimeInterval = 0.08
+
 final class PrivacyOverlayController {
     private var panels: [UInt32: PrivacyOverlayPanel] = [:]
+    private var panelScreens: [UInt32: OverlayScreenGeometry] = [:]
+    private var cancelPointerTimer: (() -> Void)?
     private let screenProvider: () -> [OverlayScreenGeometry]
     private let panelFactory: () -> PrivacyOverlayPanel
+    private let pointerProvider: () -> NSPoint
+    private let timerFactory: OverlayPointerTimerFactory
 
     init(
         screenProvider: @escaping () -> [OverlayScreenGeometry] = PrivacyOverlayController.systemScreenGeometry,
-        panelFactory: @escaping () -> PrivacyOverlayPanel = { PrivacyOverlayPanel(contentRect: .zero) }
+        panelFactory: @escaping () -> PrivacyOverlayPanel = { PrivacyOverlayPanel(contentRect: .zero) },
+        pointerProvider: @escaping () -> NSPoint = { NSEvent.mouseLocation },
+        timerFactory: @escaping OverlayPointerTimerFactory = PrivacyOverlayController.makePointerTimer
     ) {
         self.screenProvider = screenProvider
         self.panelFactory = panelFactory
+        self.pointerProvider = pointerProvider
+        self.timerFactory = timerFactory
+    }
+
+    deinit {
+        cancelPointerTimer?()
     }
 
     func apply(_ command: OverlayCommand, completion: @escaping (Bool) -> Void) {
@@ -268,6 +547,7 @@ final class PrivacyOverlayController {
         let displayIDs = Set(displays.map(\.id))
         let obsoleteIDs = panels.keys.filter { !displayIDs.contains($0) }
         for id in obsoleteIDs {
+            panelScreens.removeValue(forKey: id)
             guard let panel = panels.removeValue(forKey: id) else { continue }
             panel.orderOut(nil)
             panel.close()
@@ -276,23 +556,46 @@ final class PrivacyOverlayController {
         let presentation = IndicatorPresentation.make(state: command.state, style: command.style)
         for display in displays {
             let panel = panels[display.id] ?? panelFactory()
-            let frame = panelFrame(for: display, style: command.style, presentation: presentation)
-            panel.setFrame(frame, display: true)
+            let displayReasons: [OverlayReason]
+            if command.reasonDisplay == "overlay" || command.reasonDisplay == "hybrid" {
+                displayReasons = command.displays.first { $0.id == display.id }?.reasons
+                    ?? command.reasons
+            } else {
+                displayReasons = []
+            }
             let view: IndicatorView
             if let existing = panel.contentView as? IndicatorView {
                 view = existing
-                view.update(presentation: presentation, style: command.style)
+                view.update(
+                    presentation: presentation,
+                    style: command.style,
+                    reasons: displayReasons,
+                    includeExactValues: command.reasonDetail == "exact",
+                    trigger: command.reasonTrigger
+                )
             } else {
-                view = IndicatorView(presentation: presentation, style: command.style)
+                view = IndicatorView(
+                    presentation: presentation,
+                    style: command.style,
+                    reasons: displayReasons,
+                    includeExactValues: command.reasonDetail == "exact",
+                    trigger: command.reasonTrigger
+                )
                 panel.contentView = view
             }
-            view.frame = panel.contentView?.bounds ?? .zero
+            view.onClick = { [weak self] in
+                self?.toggleReason(for: display.id)
+            }
+            panels[display.id] = panel
+            panelScreens[display.id] = display
+            layoutPanel(displayID: display.id)
             panel.orderFrontRegardless()
             view.displayIfNeeded()
             panel.displayIfNeeded()
-            panels[display.id] = panel
         }
 
+        startPointerTimerIfNeeded()
+        pollPointer()
         completion(true)
     }
 
@@ -308,7 +611,8 @@ final class PrivacyOverlayController {
             var resolved: [OverlayScreenGeometry] = []
             var requestedIDs = Set<UInt32>()
             for display in command.displays {
-                guard requestedIDs.insert(display.id).inserted, let screen = screensByID[display.id] else {
+                guard requestedIDs.insert(display.id).inserted,
+                      let screen = screensByID[display.id] else {
                     return nil
                 }
                 resolved.append(screen)
@@ -320,14 +624,22 @@ final class PrivacyOverlayController {
         return screens
     }
 
+    private func layoutPanel(displayID: UInt32) {
+        guard let panel = panels[displayID],
+              let display = panelScreens[displayID],
+              let view = panel.contentView as? IndicatorView else { return }
+        panel.setFrame(panelFrame(for: display, view: view), display: true)
+        view.frame = panel.contentView?.bounds ?? .zero
+        view.needsDisplay = true
+    }
+
     private func panelFrame(
         for display: OverlayScreenGeometry,
-        style: IndicatorStyle,
-        presentation: IndicatorPresentation
+        view: IndicatorView
     ) -> NSRect {
-        switch style {
+        switch view.styleForLayout {
         case .shield, .pill, .quietShield:
-            let size = IndicatorView.panelSize(for: presentation, style: style)
+            let size = view.desiredPanelSize()
             return NSRect(
                 x: display.visibleFrame.maxX - size.width - 12,
                 y: display.visibleFrame.minY + 12,
@@ -339,9 +651,81 @@ final class PrivacyOverlayController {
         }
     }
 
+    private func toggleReason(for displayID: UInt32) {
+        guard let panel = panels[displayID],
+              let view = panel.contentView as? IndicatorView,
+              view.click() else { return }
+        layoutPanel(displayID: displayID)
+        updateInputState(panel: panel, view: view, pointer: pointerProvider())
+        view.displayIfNeeded()
+        panel.displayIfNeeded()
+    }
+
+    private func pollPointer() {
+        let pointer = pointerProvider()
+        for displayID in panels.keys.sorted() {
+            guard let panel = panels[displayID],
+                  let view = panel.contentView as? IndicatorView else { continue }
+            let inside = pointerIsInside(pointer, panel: panel, view: view)
+            let revealChanged = view.update(pointerInside: inside)
+            if revealChanged {
+                layoutPanel(displayID: displayID)
+            }
+            updateInputState(panel: panel, view: view, pointer: pointer)
+            if revealChanged {
+                view.displayIfNeeded()
+                panel.displayIfNeeded()
+            }
+        }
+    }
+
+    private func updateInputState(
+        panel: PrivacyOverlayPanel,
+        view: IndicatorView,
+        pointer: NSPoint
+    ) {
+        let inside = pointerIsInside(pointer, panel: panel, view: view)
+        panel.ignoresMouseEvents = !(view.trigger == .click && view.hasReasons && inside)
+    }
+
+    private func pointerIsInside(
+        _ pointer: NSPoint,
+        panel: PrivacyOverlayPanel,
+        view: IndicatorView
+    ) -> Bool {
+        let pointInPanel = NSPoint(
+            x: pointer.x - panel.frame.minX,
+            y: pointer.y - panel.frame.minY
+        )
+        return view.hitTargetRect.contains(pointInPanel)
+    }
+
+    private func startPointerTimerIfNeeded() {
+        guard cancelPointerTimer == nil, !panels.isEmpty else { return }
+        cancelPointerTimer = timerFactory(pointerPollInterval) { [weak self] in
+            self?.pollPointer()
+        }
+    }
+
+    private func stopPointerTimer() {
+        cancelPointerTimer?()
+        cancelPointerTimer = nil
+    }
+
+    static func makePointerTimer(
+        interval: TimeInterval,
+        tick: @escaping () -> Void
+    ) -> () -> Void {
+        let timer = Timer(timeInterval: interval, repeats: true) { _ in tick() }
+        RunLoop.main.add(timer, forMode: .common)
+        return { timer.invalidate() }
+    }
+
     private static func systemScreenGeometry() -> [OverlayScreenGeometry] {
         NSScreen.screens.compactMap { screen in
-            guard let number = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else {
+            guard let number = screen.deviceDescription[
+                NSDeviceDescriptionKey("NSScreenNumber")
+            ] as? NSNumber else {
                 return nil
             }
             return OverlayScreenGeometry(
@@ -353,10 +737,12 @@ final class PrivacyOverlayController {
     }
 
     private func removeAllPanels() {
+        stopPointerTimer()
         for panel in panels.values {
             panel.orderOut(nil)
             panel.close()
         }
         panels.removeAll()
+        panelScreens.removeAll()
     }
 }

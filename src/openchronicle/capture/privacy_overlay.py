@@ -22,6 +22,9 @@ logger = get("openchronicle.capture")
 _INITIAL_RESTART_DELAY = 1.0
 _MAX_RESTART_DELAY = 30.0
 _CLOSE_TIMEOUT = 1.0
+_REASON_DISPLAY_MODES = frozenset({"overlay", "diagnostics", "hybrid"})
+_REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
+_REASON_TRIGGERS = frozenset({"always", "hover", "click"})
 
 
 class OverlayTransport(Protocol):
@@ -37,10 +40,16 @@ def _is_executable(path: Path) -> bool:
         return False
 
 
-def _sources_are_fresh(core_path: Path, main_path: Path, binary_path: Path) -> bool:
+def _sources_are_fresh(
+    reason_path: Path,
+    core_path: Path,
+    main_path: Path,
+    binary_path: Path,
+) -> bool:
     try:
         return (
             _is_executable(binary_path)
+            and binary_path.stat().st_mtime >= reason_path.stat().st_mtime
             and binary_path.stat().st_mtime >= core_path.stat().st_mtime
             and binary_path.stat().st_mtime >= main_path.stat().st_mtime
         )
@@ -48,12 +57,17 @@ def _sources_are_fresh(core_path: Path, main_path: Path, binary_path: Path) -> b
         return False
 
 
-def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) -> Path | None:
+def _maybe_compile_overlay(
+    reason_path: Path,
+    core_path: Path,
+    main_path: Path,
+    binary_path: Path,
+) -> Path | None:
     """Build the helper atomically and return only a confirmed-fresh executable."""
     try:
-        if not core_path.is_file() or not main_path.is_file():
+        if not reason_path.is_file() or not core_path.is_file() or not main_path.is_file():
             return None
-        if _sources_are_fresh(core_path, main_path, binary_path):
+        if _sources_are_fresh(reason_path, core_path, main_path, binary_path):
             return binary_path
 
         cache = Path(tempfile.gettempdir()) / "openchronicle-clang-cache"
@@ -71,6 +85,7 @@ def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) 
         result = subprocess.run(
             [
                 "swiftc",
+                str(reason_path),
                 str(core_path),
                 str(main_path),
                 "-o",
@@ -92,7 +107,11 @@ def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) 
             logger.warning("privacy overlay helper compilation failed")
             return None
         os.replace(temporary_binary, binary_path)
-        return binary_path if _sources_are_fresh(core_path, main_path, binary_path) else None
+        return (
+            binary_path
+            if _sources_are_fresh(reason_path, core_path, main_path, binary_path)
+            else None
+        )
     except (OSError, FileNotFoundError, subprocess.TimeoutExpired):
         logger.warning("privacy overlay helper compilation unavailable")
         return None
@@ -102,15 +121,17 @@ def _maybe_compile_overlay(core_path: Path, main_path: Path, binary_path: Path) 
 
 def _usable_overlay_binary(binary_path: Path) -> Path | None:
     parent = binary_path.parent
+    reason_path = parent / "mac-privacy-overlay-reason.swift"
     core_path = parent / "mac-privacy-overlay-core.swift"
     main_path = parent / "mac-privacy-overlay.swift"
     try:
+        reason_exists = reason_path.is_file()
         core_exists = core_path.is_file()
         main_exists = main_path.is_file()
     except OSError:
         return None
-    if core_exists or main_exists:
-        return _maybe_compile_overlay(core_path, main_path, binary_path)
+    if reason_exists or core_exists or main_exists:
+        return _maybe_compile_overlay(reason_path, core_path, main_path, binary_path)
     return binary_path if _is_executable(binary_path) else None
 
 
@@ -298,6 +319,42 @@ class _SubprocessOverlayTransport:
             self._condition.notify_all()
 
 
+def _reason_setting(snapshot: ProtectionSnapshot, name: str, default: str) -> str:
+    allowed = {
+        "reason_display": _REASON_DISPLAY_MODES,
+        "reason_detail": _REASON_DETAIL_MODES,
+        "reason_trigger": _REASON_TRIGGERS,
+    }[name]
+    value = getattr(snapshot, name, default)
+    return value if isinstance(value, str) and value in allowed else default
+
+
+def _reason_payloads_for_display(
+    snapshot: ProtectionSnapshot,
+    display_id: int | None,
+) -> list[dict[str, object]]:
+    """Serialize bounded reasons without widening the snapshot's capture boundary."""
+    if _reason_setting(snapshot, "reason_display", "hybrid") not in {"overlay", "hybrid"}:
+        return []
+    display_reasons = getattr(snapshot, "display_reasons", None)
+    if display_reasons is None:
+        return []
+
+    detail = _reason_setting(snapshot, "reason_detail", "exact")
+    exact_allowed = detail == "exact" and (
+        snapshot.state is ProtectionState.PAUSED
+        or (
+            display_id is not None
+            and display_id in getattr(snapshot, "protected_display_ids", frozenset())
+        )
+    )
+    payload_detail = "exact" if exact_allowed else "category"
+    return [
+        reason.to_payload(payload_detail)
+        for reason in display_reasons.for_display(display_id)
+    ]
+
+
 class PrivacyOverlayClient:
     """Render state-only protection indicators with confirmed generations."""
 
@@ -328,6 +385,10 @@ class PrivacyOverlayClient:
                 "style": "off",
                 "displays": [],
                 "all_displays": False,
+                "reason_display": "hybrid",
+                "reason_detail": "category",
+                "reason_trigger": "hover",
+                "reasons": [],
             },
             generation,
             timeout,
@@ -430,6 +491,14 @@ class PrivacyOverlayClient:
         else:
             displays = ()
 
+        reason_display = _reason_setting(snapshot, "reason_display", "hybrid")
+        reason_detail = _reason_setting(snapshot, "reason_detail", "exact")
+        reason_trigger = _reason_setting(snapshot, "reason_trigger", "hover")
+        all_displays = not displays and snapshot.state in (
+            ProtectionState.PAUSED,
+            ProtectionState.FAILED,
+        )
+
         return {
             "generation": snapshot.generation,
             "state": snapshot.state.value,
@@ -441,11 +510,13 @@ class PrivacyOverlayClient:
                     "top": display.region.top,
                     "width": display.region.width,
                     "height": display.region.height,
+                    "reasons": _reason_payloads_for_display(snapshot, display.id),
                 }
                 for display in displays
             ],
-            "all_displays": not displays and snapshot.state in (
-                ProtectionState.PAUSED,
-                ProtectionState.FAILED,
-            ),
+            "all_displays": all_displays,
+            "reason_display": reason_display,
+            "reason_detail": reason_detail,
+            "reason_trigger": reason_trigger,
+            "reasons": _reason_payloads_for_display(snapshot, None) if all_displays else [],
         }

@@ -23,6 +23,9 @@ def test_privacy_overlay_sources_are_declared_for_wheel() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
     mappings = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
+    assert mappings["resources/mac-privacy-overlay-reason.swift"] == (
+        "openchronicle/_bundled/mac-privacy-overlay-reason.swift"
+    )
     assert mappings["resources/mac-privacy-overlay-core.swift"] == (
         "openchronicle/_bundled/mac-privacy-overlay-core.swift"
     )

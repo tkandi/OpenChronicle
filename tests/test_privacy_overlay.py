@@ -19,6 +19,11 @@ from openchronicle.capture.privacy_overlay import (
     _SubprocessOverlayTransport,
 )
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
+from openchronicle.capture.protection_reason import (
+    DisplayProtectionReasons,
+    ProtectionReason,
+    ProtectionReasonCode,
+)
 
 
 class FakeTransport:
@@ -101,6 +106,45 @@ def snapshot() -> ProtectionSnapshot:
     )
 
 
+def _private_title_reason(display_id: int) -> ProtectionReason:
+    return ProtectionReason(
+        code=ProtectionReasonCode.WINDOW_TITLE_RULE,
+        display_id=display_id,
+        app_name="Edge",
+        bundle_id="com.microsoft.edgemac",
+        window_title="InPrivate",
+        rule="InPrivate",
+    )
+
+
+def _protected_snapshot(
+    *,
+    reason_display: str = "hybrid",
+    reason_detail: str = "exact",
+    reason_trigger: str = "hover",
+    reasons: tuple[ProtectionReason, ...] = (),
+) -> ProtectionSnapshot:
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    return ProtectionSnapshot(
+        generation=42,
+        state=ProtectionState.PROTECTED,
+        capture_mode="separate",
+        indicator_style="pill",
+        displays=displays,
+        protected_display_ids=frozenset({2}),
+        active_display_id=2,
+        created_monotonic=1.0,
+        fresh_until=1.25,
+        reason_display=reason_display,
+        reason_detail=reason_detail,
+        reason_trigger=reason_trigger,
+        display_reasons=DisplayProtectionReasons.from_reasons(reasons),
+    )
+
+
 @pytest.fixture
 def fake_transport() -> FakeTransport:
     return FakeTransport(True)
@@ -129,13 +173,159 @@ def test_overlay_command_contains_only_geometry_and_state(
         "state": "protected",
         "style": "pill",
         "displays": [
-            {"id": 2, "left": 100, "top": 0, "width": 100, "height": 100}
+            {
+                "id": 2,
+                "left": 100,
+                "top": 0,
+                "width": 100,
+                "height": 100,
+                "reasons": [],
+            }
         ],
         "all_displays": False,
+        "reason_display": "hybrid",
+        "reason_detail": "exact",
+        "reason_trigger": "hover",
+        "reasons": [],
     }
     serialized = fake_transport.writes[-1]
     assert "InPrivate" not in serialized
     assert "Microsoft Edge" not in serialized
+
+
+def test_overlay_exact_reason_is_sent_only_for_protected_display() -> None:
+    snapshot = _protected_snapshot(
+        reason_display="hybrid",
+        reason_detail="exact",
+        reason_trigger="hover",
+        reasons=(_private_title_reason(display_id=2),),
+    )
+
+    command = PrivacyOverlayClient._render_command(snapshot)
+    by_id = {row["id"]: row for row in command["displays"]}
+
+    assert by_id[2]["reasons"][0] == {
+        "code": "window_title_rule",
+        "display_id": 2,
+        "app_name": "Edge",
+        "bundle_id": "com.microsoft.edgemac",
+        "window_title": "InPrivate",
+        "rule": "InPrivate",
+    }
+    assert 1 not in by_id
+    assert command["reason_display"] == "hybrid"
+    assert command["reason_detail"] == "exact"
+    assert command["reason_trigger"] == "hover"
+
+
+def test_diagnostics_only_overlay_payload_contains_no_reason_values() -> None:
+    snapshot = _protected_snapshot(
+        reason_display="diagnostics",
+        reason_detail="exact",
+        reasons=(_private_title_reason(display_id=2),),
+    )
+
+    raw = json.dumps(
+        PrivacyOverlayClient._render_command(snapshot), separators=(",", ":")
+    )
+
+    assert '"reasons":[]' in raw
+    assert "InPrivate" not in raw
+    assert "com.microsoft.edgemac" not in raw
+
+
+@pytest.mark.parametrize("detail", ["category", "tiered"])
+def test_overlay_category_and_tiered_send_only_fixed_reason_codes(detail: str) -> None:
+    snapshot = _protected_snapshot(
+        reason_detail=detail,
+        reasons=(_private_title_reason(display_id=2),),
+    )
+
+    command = PrivacyOverlayClient._render_command(snapshot)
+
+    assert command["displays"][0]["reasons"] == [
+        {"code": "window_title_rule", "display_id": 2}
+    ]
+    assert "InPrivate" not in json.dumps(command)
+
+
+def test_overlay_reason_payload_is_priority_ordered_and_bounded_to_eight() -> None:
+    direct = tuple(
+        ProtectionReason(
+            code=ProtectionReasonCode.APP_RULE,
+            display_id=2,
+            app_name=f"App {index}",
+        )
+        for index in range(9)
+    )
+    failed = ProtectionReason(
+        code=ProtectionReasonCode.HELPER_EXIT,
+        display_id=2,
+    )
+    snapshot = _protected_snapshot(reason_detail="category", reasons=direct + (failed,))
+
+    payloads = privacy_overlay._reason_payloads_for_display(snapshot, 2)
+
+    assert len(payloads) == 8
+    assert payloads[0] == {"code": "helper_exit", "display_id": 2}
+
+
+def test_overlay_old_snapshot_shape_renders_with_reason_defaults(
+    snapshot: ProtectionSnapshot,
+) -> None:
+    legacy = SimpleNamespace(
+        **{
+            name: value
+            for name, value in vars(snapshot).items()
+            if name
+            not in {
+                "reason_display",
+                "reason_detail",
+                "reason_trigger",
+                "display_reasons",
+            }
+        }
+    )
+
+    command = PrivacyOverlayClient._render_command(legacy)
+
+    assert command["reason_trigger"] == "hover"
+    assert command["reasons"] == []
+    assert command["displays"][0]["reasons"] == []
+
+
+def test_clear_explicitly_removes_reason_content(fake_transport: FakeTransport) -> None:
+    client = PrivacyOverlayClient(transport_factory=lambda: fake_transport)
+
+    assert client.clear(99) is True
+
+    command = json.loads(fake_transport.writes[-1])
+    assert command["reason_display"] == "hybrid"
+    assert command["reason_detail"] == "category"
+    assert command["reason_trigger"] == "hover"
+    assert command["reasons"] == []
+
+
+def test_global_reason_is_available_to_all_displays_fallback() -> None:
+    paused = ProtectionSnapshot(
+        generation=43,
+        state=ProtectionState.PAUSED,
+        capture_mode="separate",
+        indicator_style="pill",
+        displays=(),
+        protected_display_ids=frozenset(),
+        active_display_id=None,
+        created_monotonic=1.0,
+        fresh_until=1.25,
+        display_reasons=DisplayProtectionReasons.from_reasons(
+            [ProtectionReason(ProtectionReasonCode.MANUAL_PAUSE, display_id=None)]
+        ),
+    )
+
+    command = PrivacyOverlayClient._render_command(paused)
+
+    assert command["all_displays"] is True
+    assert command["reasons"] == [{"code": "manual_pause", "display_id": None}]
 
 
 def test_paused_and_failed_cover_all_known_displays(
@@ -553,14 +743,17 @@ def test_resolver_accepts_executable_environment_override(monkeypatch, tmp_path:
 def test_resolver_rejects_stale_binary_when_recompile_fails(monkeypatch, tmp_path: Path) -> None:
     source_root = tmp_path / "resources"
     source_root.mkdir()
+    reason = source_root / "mac-privacy-overlay-reason.swift"
     core = source_root / "mac-privacy-overlay-core.swift"
     main = source_root / "mac-privacy-overlay.swift"
     binary = source_root / "mac-privacy-overlay"
+    reason.write_text("reason")
     core.write_text("core")
     main.write_text("main")
     binary.write_text("old binary")
     binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
     os.utime(binary, (1, 1))
+    os.utime(reason, (2, 2))
     os.utime(core, (2, 2))
     os.utime(main, (2, 2))
 
@@ -578,9 +771,35 @@ def test_resolver_rejects_stale_binary_when_recompile_fails(monkeypatch, tmp_pat
     assert _resolve_overlay_path() is None
 
 
-def test_compiler_cache_metadata_failure_returns_none(monkeypatch, tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "missing_name",
+    [
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+    ],
+)
+def test_compiler_rejects_an_old_binary_when_any_source_is_missing(
+    missing_name: str, tmp_path: Path
+) -> None:
+    reason = tmp_path / "mac-privacy-overlay-reason.swift"
     core = tmp_path / "mac-privacy-overlay-core.swift"
     main = tmp_path / "mac-privacy-overlay.swift"
+    binary = tmp_path / "mac-privacy-overlay"
+    for source in (reason, core, main):
+        if source.name != missing_name:
+            source.write_text(source.stem)
+    binary.write_text("old binary")
+    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+
+    assert _maybe_compile_overlay(reason, core, main, binary) is None
+
+
+def test_compiler_cache_metadata_failure_returns_none(monkeypatch, tmp_path: Path) -> None:
+    reason = tmp_path / "mac-privacy-overlay-reason.swift"
+    core = tmp_path / "mac-privacy-overlay-core.swift"
+    main = tmp_path / "mac-privacy-overlay.swift"
+    reason.write_text("reason")
     core.write_text("core")
     main.write_text("main")
 
@@ -589,7 +808,7 @@ def test_compiler_cache_metadata_failure_returns_none(monkeypatch, tmp_path: Pat
 
     monkeypatch.setattr(privacy_overlay.Path, "mkdir", fail_mkdir)
 
-    assert _maybe_compile_overlay(core, main, tmp_path / "mac-privacy-overlay") is None
+    assert _maybe_compile_overlay(reason, core, main, tmp_path / "mac-privacy-overlay") is None
 
 
 def test_resolver_handles_override_path_metadata_failure(monkeypatch) -> None:

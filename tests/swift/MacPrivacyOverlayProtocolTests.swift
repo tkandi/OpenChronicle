@@ -6,9 +6,8 @@ private struct Acknowledgement: Decodable {
     let error: String?
 }
 
-@main
 enum MacPrivacyOverlayProtocolTests {
-    static func main() throws {
+    static func run() throws {
         guard CommandLine.arguments.count == 2 else {
             throw NSError(domain: "MacPrivacyOverlayProtocolTests", code: 1)
         }
@@ -23,6 +22,16 @@ enum MacPrivacyOverlayProtocolTests {
         precondition(unresolvedAck.generation == 12)
         precondition(unresolvedAck.rendered == false)
         precondition(unresolvedAck.error == "unresolved-display")
+
+        let exactMarker = "exact-private-marker-must-not-escape"
+        let reasonCommand = #"{"generation":13,"state":"protected","style":"pill","displays":[],"all_displays":false,"reason_display":"hybrid","reason_detail":"exact","reason_trigger":"hover","reasons":[{"code":"window_title_rule","window_title":"\#(exactMarker)"}]}"# + "\n"
+        let reasonResult = try runHelper(helper, input: reasonCommand)
+        precondition(reasonResult.status == 0)
+        precondition(!String(data: reasonResult.output, encoding: .utf8)!.contains(exactMarker))
+        let reasonAck = try JSONDecoder().decode(Acknowledgement.self, from: reasonResult.output)
+        precondition(reasonAck.generation == 13)
+        precondition(reasonAck.rendered == false)
+        precondition(reasonAck.error == "unresolved-display")
 
         let privateMarker = "private-marker-must-not-escape"
         let invalid = try runHelper(helper, input: "{\(privateMarker)}\n")
@@ -58,3 +67,5 @@ enum MacPrivacyOverlayProtocolTests {
         return (standardOutput.fileHandleForReading.readDataToEndOfFile(), process.terminationStatus)
     }
 }
+
+try MacPrivacyOverlayProtocolTests.run()

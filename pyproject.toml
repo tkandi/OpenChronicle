@@ -55,6 +55,7 @@ packages = ["src/openchronicle"]
 "resources/mac-window-list-core.swift" = "openchronicle/_bundled/mac-window-list-core.swift"
 "resources/build-mac-window-list.sh" = "openchronicle/_bundled/build-mac-window-list.sh"
 "resources/mac-privacy-overlay-core.swift" = "openchronicle/_bundled/mac-privacy-overlay-core.swift"
+"resources/mac-privacy-overlay-reason.swift" = "openchronicle/_bundled/mac-privacy-overlay-reason.swift"
 "resources/mac-privacy-overlay.swift" = "openchronicle/_bundled/mac-privacy-overlay.swift"
 "resources/build-mac-privacy-overlay.sh" = "openchronicle/_bundled/build-mac-privacy-overlay.sh"
 

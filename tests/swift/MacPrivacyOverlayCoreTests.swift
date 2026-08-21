@@ -23,6 +23,12 @@ enum MacPrivacyOverlayCoreTests {
         let command = try JSONDecoder().decode(OverlayCommand.self, from: raw)
         precondition(command.generation == 9)
         precondition(command.style == .pill)
+        precondition(command.reasonTrigger == .hover)
+        precondition(command.reasons.isEmpty)
+        precondition(command.displays.allSatisfy { ($0.reasons ?? []).isEmpty })
+
+        testRevealState()
+        testReasonPresentation()
 
         let protectedPresentation = IndicatorPresentation.make(state: .protected, style: .pill)
         precondition(protectedPresentation.text == "已保护")
@@ -38,7 +44,69 @@ enum MacPrivacyOverlayCoreTests {
         precondition(!panel.canBecomeMain)
 
         testControllerRendering()
+        testHoverStaysMouseThrough()
+        testClickUsesOnlyIndicatorHitTarget()
+        testBannerUsesOnlyCornerHitTarget()
+        testAlwaysStaysExpandedAndMouseThrough()
+        testDiagnosticsModeIgnoresWireReasons()
+        testPointerTimerStopsWhenOverlayClears()
         print("MacPrivacyOverlayCoreTests passed")
+    }
+
+    private static func testRevealState() {
+        var hover = ReasonRevealState(trigger: .hover)
+        hover.update(pointerInside: true)
+        precondition(hover.isExpanded)
+        hover.update(pointerInside: false)
+        precondition(!hover.isExpanded)
+
+        var click = ReasonRevealState(trigger: .click)
+        click.click()
+        precondition(click.isExpanded)
+        click.click()
+        precondition(!click.isExpanded)
+
+        var always = ReasonRevealState(trigger: .always)
+        precondition(always.isExpanded)
+        always.update(pointerInside: false)
+        always.click()
+        precondition(always.isExpanded)
+    }
+
+    private static func testReasonPresentation() {
+        let reason = OverlayReason(
+            code: "window_title_rule",
+            displayID: 2,
+            sourceDisplayID: nil,
+            appName: "Edge",
+            bundleID: "com.microsoft.edgemac",
+            windowTitle: "InPrivate",
+            rule: "InPrivate"
+        )
+        precondition(reason.presentationText(includeExactValues: false) == "窗口标题规则")
+        let exact = reason.presentationText(includeExactValues: true)
+        precondition(exact.contains("应用: Edge"))
+        precondition(exact.contains("标识: com.microsoft.edgemac"))
+        precondition(exact.contains("标题: InPrivate"))
+        precondition(exact.contains("规则: InPrivate"))
+
+        let unknown = OverlayReason(
+            code: "private-error-payload",
+            displayID: nil,
+            sourceDisplayID: nil,
+            appName: nil,
+            bundleID: nil,
+            windowTitle: nil,
+            rule: nil
+        )
+        precondition(unknown.presentationText(includeExactValues: true) == "隐私保护")
+
+        let overflow = overlayReasonLines(
+            Array(repeating: reason, count: 5),
+            includeExactValues: false,
+            maximumLines: 3
+        )
+        precondition(overflow == ["窗口标题规则", "窗口标题规则", "+3"])
     }
 
     private static func testControllerRendering() {
@@ -75,7 +143,10 @@ enum MacPrivacyOverlayCoreTests {
             )
         ) { rendered in
             precondition(panels.count == 2)
-            precondition(panels.allSatisfy { $0.displayIfNeededCount == 1 })
+            precondition(
+                panels.allSatisfy { $0.displayIfNeededCount == 1 },
+                "display counts: \(panels.map(\.displayIfNeededCount))"
+            )
             firstRendered = rendered
         }
         precondition(firstRendered == true)
@@ -116,5 +187,254 @@ enum MacPrivacyOverlayCoreTests {
         precondition(rejected == false)
         precondition(panels[0].orderOutCount >= 1)
         precondition(!panels[0].isVisible)
+    }
+
+    private static func testHoverStaysMouseThrough() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        var pointer = NSPoint(x: -100, y: -100)
+        var tick: (() -> Void)?
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel },
+            pointerProvider: { pointer },
+            timerFactory: { interval, handler in
+                precondition(interval == 0.08)
+                tick = handler
+                return {}
+            }
+        )
+
+        controller.apply(reasonCommand(trigger: .hover, style: .pill)) { rendered in
+            precondition(rendered)
+        }
+        let compactFrame = panel.frame
+        precondition(panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: compactFrame.midX, y: compactFrame.midY)
+        tick?()
+        precondition(panel.frame.width > compactFrame.width)
+        precondition(panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: -100, y: -100)
+        tick?()
+        precondition(panel.frame == compactFrame)
+        precondition(panel.ignoresMouseEvents)
+        precondition(!panel.canBecomeKey)
+        precondition(!panel.canBecomeMain)
+    }
+
+    private static func testClickUsesOnlyIndicatorHitTarget() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        var pointer = NSPoint(x: 400, y: 300)
+        var tick: (() -> Void)?
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel },
+            pointerProvider: { pointer },
+            timerFactory: { _, handler in
+                tick = handler
+                return {}
+            }
+        )
+
+        controller.apply(reasonCommand(trigger: .click, style: .border)) { rendered in
+            precondition(rendered)
+        }
+        precondition(panel.frame == screen.frame)
+        precondition(panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: 740, y: 27)
+        tick?()
+        precondition(!panel.ignoresMouseEvents)
+
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: pointer,
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: panel.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        )!
+        panel.contentView?.mouseDown(with: event)
+        precondition(!panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: 740, y: 70)
+        tick?()
+        precondition(!panel.ignoresMouseEvents)
+        panel.contentView?.mouseDown(with: event)
+        precondition(panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: 400, y: 300)
+        tick?()
+        precondition(panel.ignoresMouseEvents)
+        precondition(!panel.canBecomeKey)
+        precondition(!panel.canBecomeMain)
+    }
+
+    private static func testAlwaysStaysExpandedAndMouseThrough() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel },
+            pointerProvider: { NSPoint(x: -100, y: -100) },
+            timerFactory: { _, _ in {} }
+        )
+
+        controller.apply(reasonCommand(trigger: .always, style: .pill)) { rendered in
+            precondition(rendered)
+        }
+
+        precondition(panel.frame.width == 340)
+        precondition(panel.ignoresMouseEvents)
+        precondition(!panel.canBecomeKey)
+        precondition(!panel.canBecomeMain)
+    }
+
+    private static func testBannerUsesOnlyCornerHitTarget() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        var pointer = NSPoint(x: 100, y: 585)
+        var tick: (() -> Void)?
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel },
+            pointerProvider: { pointer },
+            timerFactory: { _, handler in
+                tick = handler
+                return {}
+            }
+        )
+
+        controller.apply(reasonCommand(trigger: .click, style: .banner)) { rendered in
+            precondition(rendered)
+        }
+        precondition(panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: 740, y: 585)
+        tick?()
+        precondition(!panel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: 100, y: 585)
+        tick?()
+        precondition(panel.ignoresMouseEvents)
+    }
+
+    private static func testPointerTimerStopsWhenOverlayClears() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        var timerCancelled = false
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel },
+            pointerProvider: { NSPoint(x: -100, y: -100) },
+            timerFactory: { _, _ in
+                { timerCancelled = true }
+            }
+        )
+
+        controller.apply(reasonCommand(trigger: .hover, style: .pill)) { rendered in
+            precondition(rendered)
+        }
+        precondition(!timerCancelled)
+
+        controller.apply(
+            OverlayCommand(
+                generation: 21,
+                state: .inactive,
+                style: .off,
+                displays: [],
+                allDisplays: false
+            )
+        ) { rendered in
+            precondition(rendered)
+        }
+        precondition(timerCancelled)
+    }
+
+    private static func testDiagnosticsModeIgnoresWireReasons() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel },
+            pointerProvider: { NSPoint(x: -100, y: -100) },
+            timerFactory: { _, _ in {} }
+        )
+
+        controller.apply(
+            reasonCommand(trigger: .always, style: .pill, reasonDisplay: "diagnostics")
+        ) { rendered in
+            precondition(rendered)
+        }
+
+        precondition(panel.frame.width < 340)
+        precondition(panel.ignoresMouseEvents)
+    }
+
+    private static func reasonCommand(
+        trigger: OverlayReasonTrigger,
+        style: IndicatorStyle,
+        reasonDisplay: String = "hybrid"
+    ) -> OverlayCommand {
+        OverlayCommand(
+            generation: 20,
+            state: .protected,
+            style: style,
+            displays: [
+                OverlayDisplay(
+                    id: 1,
+                    left: 0,
+                    top: 0,
+                    width: 800,
+                    height: 600,
+                    reasons: [
+                        OverlayReason(
+                            code: "window_title_rule",
+                            displayID: 1,
+                            sourceDisplayID: nil,
+                            appName: "Edge",
+                            bundleID: "com.microsoft.edgemac",
+                            windowTitle: "InPrivate",
+                            rule: "InPrivate"
+                        )
+                    ]
+                )
+            ],
+            allDisplays: false,
+            reasonDisplay: reasonDisplay,
+            reasonDetail: "exact",
+            reasonTrigger: trigger,
+            reasons: []
+        )
     }
 }
