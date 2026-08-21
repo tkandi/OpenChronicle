@@ -183,14 +183,23 @@ capture is fail-closed. The overlay helper is a separate process, so no visible
 indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
-The decision locally inspects top-level owner/app name, bundle identifier,
-window title, position, size, and active state; on-screen/minimized state is
-handled where the platform exposes it. This detection inventory is not copied
-into capture JSON, FTS, timeline, memory, or model requests. In `separate` and
-`primary` modes, a safe-display capture JSON may still be written. When the
-gate protects the active display, the protected window's content and derived
-AX/S1 fields are suppressed; a foreground denylist match can instead skip the
-entire capture before it is written or processed.
+The decision inventory is limited to alpha-positive, positive-size, normal
+layer-0 windows returned by CoreGraphics as on-screen. It locally inspects owner
+or app name, bundle identifier, title, CoreGraphics position and size, and
+AX-derived active state. AX supplies only a missing title, and only after a
+globally unique exact same-PID `CGWindowID` match; AX geometry never authorizes
+fallback, and a required missing or ambiguous identity fails closed. Menus,
+popovers, and non-layer-0 floating panels are not independently protected as
+full-display windows by title, although an app or bundle denylist can still
+protect the capture when it independently matches an inventoried normal window
+or the foreground window.
+
+This detection inventory is not copied into capture JSON, FTS, timeline,
+memory, or model requests. In `separate` and `primary` modes, a safe-display
+capture JSON may still be written. When the gate protects the active display,
+the protected window's content and derived AX/S1 fields are suppressed; a
+foreground denylist match can instead skip the entire capture before it is
+written or processed.
 
 Before relying on the setting in daily use, perform this manual acceptance on
 empty privacy windows after an explicit reinstall: verify `separate` and `all`

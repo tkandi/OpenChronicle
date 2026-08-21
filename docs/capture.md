@@ -23,7 +23,28 @@ Privacy denylist checks can short-circuit this flow:
 - `deny_url_patterns` and `deny_text_patterns` run after S1 parsing, before screenshots and disk writes.
 - Denied captures are not written to JSON, not inserted into `captures_fts`, not absorbed into timeline blocks, and not sent to any model stage.
 
-With `screenshot_privacy_mode = "skip-monitor"`, the bundled `mac-window-list` helper uses CoreGraphics to inspect every on-screen window's owner, bundle ID, title, and bounds immediately before `mss` captures pixels. Because CoreGraphics can omit background browser titles, the helper falls back to top-level AX window title, position, and size metadata. This includes floating panels, but it never traverses background AX trees or reads their controls and contents. In `separate` mode, only monitors intersecting a denied window are skipped. In `all` mode, any denied window skips the full virtual-desktop screenshot. If Screen Recording permission is unavailable, or enumeration otherwise fails, `screenshot_privacy_fail_closed = true` suppresses that tick's screenshots while allowing the non-sensitive foreground AX/text record to be written.
+With `screenshot_privacy_mode = "skip-monitor"`, the bundled `mac-window-list`
+helper inventories only alpha-positive, positive-size windows returned by
+CoreGraphics as on-screen at normal layer 0. It records their owner, bundle ID,
+CoreGraphics title, and CoreGraphics bounds immediately before `mss` captures
+pixels. When one of those windows has a blank CoreGraphics title, the helper
+first collects top-level AX element and window-ID metadata without reading the
+AX title, then requires a globally unique, exact same-PID `CGWindowID` match
+before reading that accepted element's title. AX position, size, and geometry
+never authorize or locate a fallback. If a required identity or title is
+missing, mismatched, duplicate, or otherwise ambiguous, enumeration fails
+closed.
+
+Menus, popovers, and non-layer-0 floating panels are not independently treated
+as protected full-display windows by their titles. Protection can still apply
+when an app or bundle denylist independently matches an inventoried normal
+window or the foreground window. The helper never traverses background AX trees
+or reads their controls and contents. In `separate` mode, only monitors
+intersecting a denied inventoried window are skipped. In `all` mode, any denied
+inventoried window skips the full virtual-desktop screenshot. If Screen
+Recording permission is unavailable, or enumeration otherwise fails,
+`screenshot_privacy_fail_closed = true` suppresses that tick's screenshots while
+allowing the non-sensitive foreground AX/text record to be written.
 
 This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
 
@@ -42,12 +63,14 @@ The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
   it cannot display the yellow failure state and screenshot capture remains
   stopped until the helper is confirmed again.
 
-Protection detection locally inspects top-level visible-window metadata: owner
-or app name, bundle identifier, window title, position, size, and active state;
-on-screen/minimized state is handled where the platform exposes it. It does not
-traverse background window controls or contents. The detection inventory is used
-only for the protection decision and is not copied into capture JSON, FTS,
-timeline, memory, or model requests.
+Protection detection locally inspects the normal layer-0 on-screen CoreGraphics
+inventory: owner or app name, bundle identifier, title, CoreGraphics position
+and size, and AX-derived active state. AX can supply a blank CoreGraphics title
+only after the exact same-PID `CGWindowID` resolution described above; AX
+geometry is never authorization. It does not traverse background window
+controls or contents. The detection inventory is used only for the protection
+decision and is not copied into capture JSON, FTS, timeline, memory, or model
+requests.
 
 In `separate` and `primary` modes, a capture JSON for a safe display may still
 be written. The protected window's content and derived AX/S1 fields are not

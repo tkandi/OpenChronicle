@@ -37,6 +37,11 @@ private struct CGWindowSource {
     let bundleID: String
 }
 
+private struct AXWindowSource {
+    let metadata: AXWindowMetadata
+    let element: AXUIElement
+}
+
 private typealias AXUIElementGetWindowFunction = @convention(c) (
     AXUIElement,
     UnsafeMutablePointer<CGWindowID>
@@ -75,12 +80,11 @@ func axBool(_ element: AXUIElement, _ attribute: String) -> Bool? {
     return axAttribute(element, attribute) as? Bool
 }
 
-private func axWindowMetadata(
+private func axWindowSources(
     pid: pid_t,
     frontmostPID: pid_t?,
-    titleFallbackWindowIDs: Set<CGWindowID>,
     getWindowID: AXUIElementGetWindowFunction
-) -> [AXWindowMetadata] {
+) -> [AXWindowSource] {
     let app = AXUIElementCreateApplication(pid)
     guard
         let rawWindows = axAttribute(app, kAXWindowsAttribute as String),
@@ -89,7 +93,7 @@ private func axWindowMetadata(
 
     let focusedWindow = axAttribute(app, kAXFocusedWindowAttribute as String)
 
-    var records: [AXWindowMetadata] = []
+    var sources: [AXWindowSource] = []
     for window in axWindows {
         if axBool(window, kAXMinimizedAttribute as String) == true { continue }
         var resolvedWindowID = kCGNullWindowID
@@ -97,17 +101,17 @@ private func axWindowMetadata(
         let windowID = identityError == .success && resolvedWindowID != kCGNullWindowID
             ? resolvedWindowID
             : nil
-        let title = windowID.map { titleFallbackWindowIDs.contains($0) } == true
-            ? axString(window, kAXTitleAttribute as String)
-            : nil
-        records.append(AXWindowMetadata(
-            windowID: windowID,
-            ownerPID: pid,
-            title: title,
-            isFocused: pid == frontmostPID && focusedWindow.map { CFEqual(window, $0) } == true
+        sources.append(AXWindowSource(
+            metadata: AXWindowMetadata(
+                windowID: windowID,
+                ownerPID: pid,
+                isFocused: pid == frontmostPID
+                    && focusedWindow.map { CFEqual(window, $0) } == true
+            ),
+            element: window
         ))
     }
-    return records
+    return sources
 }
 
 @main
@@ -133,7 +137,6 @@ enum MacWindowList {
 
         var cgSources: [CGWindowSource] = []
         var visiblePIDs = Set<pid_t>()
-        var titleFallbackWindowIDs: [pid_t: Set<CGWindowID>] = [:]
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         for info in windowInfo {
             let alpha = info[kCGWindowAlpha as String] as? Double ?? 0
@@ -176,25 +179,26 @@ enum MacWindowList {
             if pid > 0 {
                 visiblePIDs.insert(pid)
             }
-            if title.isEmpty, let windowID, pid > 0 {
-                titleFallbackWindowIDs[pid, default: []].insert(windowID)
-            }
         }
 
-        var axWindows: [AXWindowMetadata] = []
+        // Phase one records AX elements and identities without reading titles.
+        var axSources: [AXWindowSource] = []
         for pid in visiblePIDs.sorted() {
-            axWindows.append(contentsOf: axWindowMetadata(
+            axSources.append(contentsOf: axWindowSources(
                 pid: pid,
                 frontmostPID: frontmostPID,
-                titleFallbackWindowIDs: titleFallbackWindowIDs[pid] ?? [],
                 getWindowID: getWindowID
             ))
         }
 
         let cgWindows = cgSources.map(\.metadata)
+        let axWindows = axSources.map(\.metadata)
         guard let resolvedMetadata = resolvedWindowMetadata(
             cgWindows: cgWindows,
-            axWindows: axWindows
+            axWindows: axWindows,
+            readAXTitle: { axIndex in
+                axString(axSources[axIndex].element, kAXTitleAttribute as String)
+            }
         ) else {
             fputs("Could not resolve visible window metadata\n", stderr)
             exit(3)
