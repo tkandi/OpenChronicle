@@ -66,6 +66,8 @@ privacy_indicator_style = "pill"
 
 denylist 窗口关闭、最小化或移动到另一块显示器后，下一份保护快照会撤下或移动标识。旧快照可以在很短时间内造成额外保护，但绝不能允许一张会被较新决策阻止的截图通过。
 
+`screenshot_privacy_mode = "off"` 保留前台 app、bundle、标题、URL 和文本 denylist，但关闭后台窗口 inventory 与标识。后台保护启用时，`screenshot_privacy_fail_closed = false` 允许在真实 inventory 故障后执行一次无后台保护的采集；系统会清除旧标识，并且不会把该决策声明为已获得视觉确认。批准的默认值仍为 `skip-monitor` 加 fail closed。
+
 ## 安全语义
 
 看到标识意味着：
@@ -89,11 +91,19 @@ denylist 窗口关闭、最小化或移动到另一块显示器后，下一份�
 - 当前选择的标识样式；
 - 显示器边界和被阻止的显示器 identifier；
 - 能够确定时，活动窗口所在的显示器；
+- 无法精确确定 focused window 时的活动候选显示器；
+- 已发布决策覆盖的刷新请求 epoch；
 - 创建时间和新鲜度截止时间。
 
-窗口事件会请求立即刷新。每秒一次的 watchdog 刷新用于兜底那些不能可靠发出 AX 通知的应用。每次截图前还会强制刷新，确保获取像素前使用最新状态。
+每个窗口事件都会递增单调 request epoch 并请求立即刷新。已发布决策记录读取 inventory 前观察到的 epoch。非强制校验只有在新鲜决策覆盖校验时已观察到的全部请求时才能复用缓存；刷新期间到达的新请求会触发下一次同步刷新。每秒一次的 watchdog 用于兜底不能可靠发出 AX 通知的应用；每次采集在 AX 前都会强制刷新。
 
 monitor 会统一完成 denylist 窗口区域、活动窗口与物理显示器之间的映射。浮层、AX gate 和截图选择器共同使用这份映射。
+
+### 部分窗口身份与显式不确定性
+
+inventory 从 CoreGraphics `optionOnScreenOnly` 结果开始，只保留 alpha 大于零、尺寸为正的 layer-0 窗口。非空 CG 标题标记为可用。空标题只有在同 PID、`CGWindowID` 全局唯一且精确匹配时才允许读取对应 AX 标题；几何信息永远不能授权身份。如果精确匹配或标题读取不可用，helper 仍输出该 CG 记录并设置 `title_available = false`，不会因为一个无关窗口而使整个 inventory 失败。
+
+存在标题 deny pattern 时，未知标题窗口只保守保护其几何范围相交的显示器；精确 app/bundle deny 仍正常生效。如果前台 PID 的 focused AX window 无法精确匹配，该 PID 的所有 on-screen layer-0 CG 窗口都会标记为活动候选。只有候选显示器与受保护显示器相交时才阻止 AX；另一块显示器上的不确定性不会升级为全局 AX 故障。helper 退出、输出解析失败以及缺失或非法 display inventory 仍产生固定原因码的 `failed` 状态。这些确定性标志和检测值只留在本机，不进入浮层 IPC。
 
 ### 原生浮层 helper
 
@@ -127,17 +137,20 @@ Python 通过 stdin 发送逐行 JSON 命令。只有在主线程完成对应 pa
 1. 强制执行一次新的隐私扫描并生成下一份快照。
 2. 将快照发送给浮层 helper。
 3. 如果活动窗口位于被标记的显示器，省略 AX 遍历和所有派生 S1 内容。
-4. 如果快照状态为 `failed`，同时省略 AX 和截图采集。
+4. 如果快照状态为 `paused`，无论 inventory、截图或 AX 是否可用，都省略整次采集。
+5. 如果快照状态为 `failed` 且启用 fail closed，同时省略 AX 和截图采集。
 
 每次截图前，如果快照已经不够新，则再次刷新。隐私状态激活且标识已启用时，等待对应 generation 的确认，然后只采集该快照明确允许的目标。
 
 启用标识且需要显示时，如果 helper 启动失败、退出或未在截止时间内确认，截图会 fail closed。AX 显示器 gate 和前台 denylist 不依赖浮层，仍然继续工作。设置 `privacy_indicator_style = "off"` 时，浮层是否可用不会影响现有隐私防护。
 
+inventory 失败且 `screenshot_privacy_fail_closed = false` 时，monitor 会清除旧浮层，以 `indicator_confirmed = false` 发布固定故障原因，scheduler 随后执行无后台保护的采集。此时不得显示黄色“截图已停用”状态。
+
 ### 暂停与故障处理
 
 monitor 独立于采集调度器检查结构化暂停状态。因此即使正常采集任务已经跳过，暂停标识仍然保持可见。
 
-隐私枚举失败时生成 `failed` 快照，隐藏过期的绿色浮层，显示黄色 fail-closed 状态并阻止截图。如果无法枚举显示器，helper 会在自身能够发现的每个 `NSScreen` 上显示警告。
+隐私枚举失败时生成 `failed` 快照。默认 fail-closed 策略会隐藏过期绿色浮层、显示黄色状态并终止整次采集；如果无法枚举显示器，helper 会在自身能够发现的每个 `NSScreen` 上显示警告。显式 fail-open 策略则清除旧浮层并允许无视觉确认的采集。
 
 浮层进程断开连接后，daemon 会使上一次确认失效，并采用有上限的退避策略重启它。需要显示但尚未获得确认时，截图继续被阻止。由于已经失败的浮层进程无法显示自己的警告，这种情况下不会出现标识；标识缺失表示保护状态没有得到视觉确认。
 
@@ -152,6 +165,7 @@ daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_sty
 - 将 Swift 源码和构建脚本加入 wheel 资源。
 - 扩展 `install.sh`，与其他 macOS helper 一起编译并验证 `mac-privacy-overlay`。
 - 仅在 daemon 运行且配置样式不是 `off` 时启动 helper。启用标识后，暂停和失败状态会显示在所有显示器上。
+- `screenshot_privacy_mode = "off"` 时不启动后台 monitor 或 helper。
 - daemon 关闭时终止 helper 并移除所有 panel。
 - helper 的关闭不与菜单栏应用的退出绑定。
 
@@ -161,12 +175,15 @@ daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_sty
 
 - 覆盖六个配置值的解析、归一化、配置编辑器校验、snapshot 和 patch。
 - 覆盖 `primary`、`separate` 和 `all` 的显示器映射。
+- 覆盖未知标题以及同屏/异屏活动候选窗口。
 - 覆盖 `inactive`、`protected`、`paused` 和 `failed` 状态转换。
 - 活动窗口位于被标记显示器时，不产生 AX Tree 或派生 S1 内容；在 `all` 模式下，任意隐私命中都会阻止所有显示器上的 AX 遍历。
 - 截图使用与浮层确认一致的 generation。
 - 浮层确认缺失、进程崩溃、响应格式错误或超时后，系统 fail closed。
 - `off` 不要求浮层存在，同时保留现有隐私行为。
 - 配置热加载只更新标识样式。
+- 刷新期间和 AX 期间到达的事件不能复用事件前决策。
+- `off` 模式与显式 inventory fail-open 保留原有控制语义。
 
 ### Swift 测试与构建检查
 

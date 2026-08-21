@@ -10,7 +10,6 @@ from typing import Any
 
 from . import paths
 
-
 PRIVACY_INDICATOR_STYLES = frozenset(
     {"off", "border", "shield", "pill", "quiet-shield", "banner"}
 )
@@ -289,7 +288,7 @@ buffer_max_mb = 2000                   # hard ceiling; oldest absorbed files evi
 include_screenshot = true
 screenshot_monitor = "primary"          # "primary" (legacy single monitor), "all" (one virtual desktop image), or "separate" (screenshots[] per monitor)
 screenshot_privacy_mode = "skip-monitor" # skip monitors containing any visible app/bundle/title denylist match
-screenshot_privacy_fail_closed = true    # if visible-window enumeration fails, do not take screenshots
+screenshot_privacy_fail_closed = true    # if window/display inventory fails, abort the capture tick
 privacy_indicator_style = "pill"       # off, border, shield, pill, quiet-shield, or banner
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80

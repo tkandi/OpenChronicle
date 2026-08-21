@@ -43,6 +43,8 @@ class VisibleWindow:
     title: str
     region: ScreenRegion
     is_active: bool = False
+    title_available: bool = True
+    is_active_candidate: bool = False
 
 
 @dataclass(frozen=True)
@@ -137,6 +139,8 @@ def visible_window_denylist_reason(
         return "app_name"
     if exact_match(window.bundle_id, cfg.deny_bundle_ids):
         return "bundle_id"
+    if not window.title_available and any(cfg.deny_window_title_patterns):
+        return "window_title_unknown"
     if regex_match(window.title, cfg.deny_window_title_patterns):
         return "window_title"
     return None
@@ -248,8 +252,17 @@ def _parse_visible_window(row: Any) -> VisibleWindow:
         bundle_id=str(row.get("bundle_id") or ""),
         title=str(row.get("title") or ""),
         region=region,
-        is_active=bool(row.get("is_active")),
+        is_active=_optional_bool(row, "is_active", False),
+        title_available=_optional_bool(row, "title_available", True),
+        is_active_candidate=_optional_bool(row, "is_active_candidate", False),
     )
+
+
+def _optional_bool(row: dict[str, Any], key: str, default: bool) -> bool:
+    value = row.get(key, default)
+    if not isinstance(value, bool):
+        raise TypeError(f"{key} is not a boolean")
+    return value
 
 
 def _parse_display(row: Any) -> DisplayInfo:

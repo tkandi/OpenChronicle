@@ -22,12 +22,14 @@ from .privacy_overlay import PrivacyOverlayClient
 from .protection import ProtectionSnapshot, ProtectionState, build_protection_snapshot
 
 logger = get("openchronicle.capture")
+_MONITOR_JOIN_TIMEOUT = 0.25
 
 
 @dataclass(frozen=True)
 class ProtectionDecision:
     snapshot: ProtectionSnapshot
     indicator_confirmed: bool
+    covered_request_epoch: int = 0
 
 
 class PrivacyProtectionMonitor:
@@ -54,6 +56,7 @@ class PrivacyProtectionMonitor:
         self._indicator_style = cfg.privacy_indicator_style
         self._config_mtime_ns: int | None = None
         self._generation = 0
+        self._requested_epoch = 0
         self._decision: ProtectionDecision | None = None
 
         self._state_lock = threading.Lock()
@@ -65,6 +68,7 @@ class PrivacyProtectionMonitor:
         self._started = False
         self._stopped = False
         self._overlay_closed = False
+        self._last_logged_failure: tuple[ProtectionFailureReason, bool] | None = None
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -86,28 +90,42 @@ class PrivacyProtectionMonitor:
             if self._overlay_closed:
                 return
             self._overlay_closed = True
-            self._overlay.mark_terminal()
-        threading.Thread(
-            target=self._overlay.close,
-            daemon=True,
-            name="privacy-protection-overlay-close",
-        ).start()
+            monitor_thread = self._thread
+        self._overlay.mark_terminal()
+        if monitor_thread is not None and monitor_thread is not threading.current_thread():
+            monitor_thread.join(timeout=_MONITOR_JOIN_TIMEOUT)
+        self._overlay.close()
 
     def request_refresh(self) -> None:
-        if not self._is_stopped():
-            self._wake.set()
+        with self._lifecycle_lock:
+            if self._stopped:
+                return
+            with self._state_lock:
+                self._requested_epoch += 1
+        self._wake.set()
 
     def decision_for_capture(self, *, force: bool = True) -> ProtectionDecision:
-        self._raise_if_stopped()
-        with self._state_lock:
-            current = self._decision
-        if not force and current is not None and current.snapshot.fresh_until >= time.monotonic():
-            return current
-        return self._refresh()
+        must_refresh = force
+        while True:
+            self._raise_if_stopped()
+            if must_refresh:
+                self._refresh()
+                must_refresh = False
+            with self._state_lock:
+                current = self._decision
+                requested_epoch = self._requested_epoch
+            if (
+                current is not None
+                and current.covered_request_epoch >= requested_epoch
+                and current.snapshot.fresh_until >= time.monotonic()
+            ):
+                self._raise_if_stopped()
+                return current
+            self._refresh()
 
     def _run(self) -> None:
         try:
-            self._refresh()
+            self.decision_for_capture(force=True)
         except RuntimeError:
             return
         while not self._stop.is_set():
@@ -115,7 +133,7 @@ class PrivacyProtectionMonitor:
             self._wake.clear()
             if not self._stop.is_set():
                 try:
-                    self._refresh()
+                    self.decision_for_capture(force=True)
                 except RuntimeError:
                     return
 
@@ -124,6 +142,8 @@ class PrivacyProtectionMonitor:
             self._raise_if_stopped()
 
             self._reload_indicator_style()
+            with self._state_lock:
+                covered_request_epoch = self._requested_epoch
             paused, inventory, failure_reason = self._read_protection_inputs()
             self._raise_if_stopped()
             now = time.monotonic()
@@ -136,19 +156,21 @@ class PrivacyProtectionMonitor:
                 now=now,
                 failure_reason=failure_reason,
             )
-            if snapshot.state is ProtectionState.FAILED:
-                logger.warning(
-                    "privacy protection failed closed: reason=%s",
-                    snapshot.failure_reason.value,
-                )
+            self._log_failure_transition(snapshot)
             self._raise_if_stopped()
             indicator_confirmed = self._render(snapshot)
             self._raise_if_stopped()
-            decision = ProtectionDecision(snapshot, indicator_confirmed)
-            with self._state_lock:
-                self._raise_if_stopped()
-                self._generation = generation
-                self._decision = decision
+            decision = ProtectionDecision(
+                snapshot,
+                indicator_confirmed,
+                covered_request_epoch=covered_request_epoch,
+            )
+            with self._lifecycle_lock:
+                if self._stopped:
+                    raise RuntimeError("privacy protection monitor is stopped")
+                with self._state_lock:
+                    self._generation = generation
+                    self._decision = decision
             logger.debug(
                 "privacy protection generation=%s state=%s style=%s displays=%s confirmed=%s",
                 generation,
@@ -198,14 +220,45 @@ class PrivacyProtectionMonitor:
         with self._lifecycle_lock:
             if self._stopped:
                 return False
-            self._before_overlay_call()
-            try:
-                if snapshot.indicator_style != "off" and snapshot.state is ProtectionState.INACTIVE:
-                    return self._overlay.clear(snapshot.generation)
-                return self._overlay.render(snapshot)
-            except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
-                logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
+        self._before_overlay_call()
+        with self._lifecycle_lock:
+            if self._stopped:
                 return False
+        try:
+            if (
+                snapshot.state is ProtectionState.FAILED
+                and not self._cfg.screenshot_privacy_fail_closed
+            ):
+                if snapshot.indicator_style == "off":
+                    self._overlay.render(snapshot)
+                else:
+                    self._overlay.clear(snapshot.generation)
+                return False
+            if snapshot.indicator_style != "off" and snapshot.state is ProtectionState.INACTIVE:
+                return self._overlay.clear(snapshot.generation)
+            return self._overlay.render(snapshot)
+        except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
+            logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
+            return False
+
+    def _log_failure_transition(self, snapshot: ProtectionSnapshot) -> None:
+        if snapshot.state is not ProtectionState.FAILED or snapshot.failure_reason is None:
+            self._last_logged_failure = None
+            return
+        key = (snapshot.failure_reason, self._cfg.screenshot_privacy_fail_closed)
+        if key == self._last_logged_failure:
+            return
+        self._last_logged_failure = key
+        if self._cfg.screenshot_privacy_fail_closed:
+            logger.warning(
+                "privacy protection failed closed: reason=%s",
+                snapshot.failure_reason.value,
+            )
+        else:
+            logger.warning(
+                "privacy protection unavailable: reason=%s policy=fail_open",
+                snapshot.failure_reason.value,
+            )
 
     def _is_stopped(self) -> bool:
         with self._lifecycle_lock:

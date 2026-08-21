@@ -163,7 +163,7 @@ class _SubprocessOverlayTransport:
         self._protocol_failed = False
         self._pending_generation: int | None = None
         self._pending_result: bool | None = None
-        self._completed_generations: set[int] = set()
+        self._last_completed_generation: int | None = None
         command = [str(helper_path)] if interpreter is None else [interpreter, str(helper_path)]
         self._process: subprocess.Popen[str] | None = subprocess.Popen(
             command,
@@ -188,7 +188,10 @@ class _SubprocessOverlayTransport:
                     self._closed
                     or self._protocol_failed
                     or self._reader_finished
-                    or generation in self._completed_generations
+                    or (
+                        self._last_completed_generation is not None
+                        and generation <= self._last_completed_generation
+                    )
                     or process is None
                     or process.poll() is not None
                     or process.stdin is None
@@ -218,7 +221,7 @@ class _SubprocessOverlayTransport:
                     self._condition.wait(remaining)
                 confirmed = self._pending_result is True and not self._protocol_failed
                 if confirmed:
-                    self._completed_generations.add(generation)
+                    self._last_completed_generation = generation
                 self._pending_generation = None
                 self._pending_result = None
                 return confirmed

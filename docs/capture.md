@@ -11,11 +11,12 @@ Capture is the only layer that touches the outside world. It produces one JSON f
 Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 
 1. `window_meta.active_window()` — app name, title, bundle_id via `NSRunningApplication`.
-2. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers.
-3. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from the AX tree (see [S1 fields](#s1-fields) below).
-4. `privacy.sensitive_window_regions()` — enumerate visible window metadata and locate denied windows when the screenshot privacy guard is enabled.
-5. `screenshot.grab_many()` — unless `include_screenshot = false`; targets intersecting denied windows are omitted.
-6. Write `{iso8601_safe}.json` to the buffer.
+2. Force a protection-monitor decision when the background guard is enabled.
+3. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers, unless the decision blocks AX.
+4. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from an allowed AX tree (see [S1 fields](#s1-fields) below).
+5. Validate again against every refresh request observed during AX work; a newly protected or paused decision discards the complete in-memory capture.
+6. `screenshot.grab_many()` — unless `include_screenshot = false`; targets intersecting denied windows are omitted.
+7. Write `{iso8601_safe}.json` to the buffer.
 
 Privacy denylist checks can short-circuit this flow:
 
@@ -31,9 +32,18 @@ pixels. When one of those windows has a blank CoreGraphics title, the helper
 first collects top-level AX element and window-ID metadata without reading the
 AX title, then requires a globally unique, exact same-PID `CGWindowID` match
 before reading that accepted element's title. AX position, size, and geometry
-never authorize or locate a fallback. If a required identity or title is
-missing, mismatched, duplicate, or otherwise ambiguous, enumeration fails
-closed.
+never authorize or locate a fallback. A blank title that cannot be resolved is
+still emitted with `title_available = false`; it does not invalidate unrelated
+windows. If any title deny rule is enabled, that unknown-title window is treated
+as sensitive only on the displays its CoreGraphics bounds intersect.
+
+The focused AX window is marked active only through the same exact identity. If
+that identity is unavailable, every on-screen layer-0 window owned by the
+frontmost PID is emitted as an active candidate. AX is then suppressed only when
+a candidate intersects a protected display. This avoids a global outage when
+the uncertain foreground candidates are confined to a different display, while
+never treating an unknown title as allowed. Genuine helper exit, JSON parse, or
+display-inventory failures still produce a fixed-code `failed` decision.
 
 Menus, popovers, and non-layer-0 floating panels are not independently treated
 as protected full-display windows by their titles. Protection can still apply
@@ -41,10 +51,17 @@ when an app or bundle denylist independently matches an inventoried normal
 window or the foreground window. The helper never traverses background AX trees
 or reads their controls and contents. In `separate` mode, only monitors
 intersecting a denied inventoried window are skipped. In `all` mode, any denied
-inventoried window skips the full virtual-desktop screenshot. If Screen
-Recording permission is unavailable, or enumeration otherwise fails,
-`screenshot_privacy_fail_closed = true` suppresses that tick's screenshots while
-allowing the non-sensitive foreground AX/text record to be written.
+inventoried window skips the full virtual-desktop screenshot. Each watcher event
+increments a request epoch; pre-capture and post-AX validation return only a
+decision that covers every request observed at validation time.
+
+`screenshot_privacy_mode = "off"` disables the background inventory guard and
+its indicator, but all foreground app, bundle, title, URL, and text deny rules
+remain active. On a genuine inventory failure,
+`screenshot_privacy_fail_closed = true` aborts the complete tick. Setting it to
+`false` permits an unprotected capture, clears stale protection indicators, and
+leaves visual confirmation false; no yellow "screenshot disabled" state is
+shown because capture is not disabled.
 
 This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
 
@@ -71,6 +88,12 @@ geometry is never authorization. It does not traverse background window
 controls or contents. The detection inventory is used only for the protection
 decision and is not copied into capture JSON, FTS, timeline, memory, or model
 requests.
+
+An unresolved blank title is represented as unknown rather than dropping the
+whole inventory. With title rules configured, its intersecting display is
+conservatively protected. When exact active-window identity is unavailable,
+frontmost-PID layer-0 windows are active candidates; AX is blocked only where a
+candidate display and a protected display overlap.
 
 In `separate` and `primary` modes, a capture JSON for a safe display may still
 be written. The protected window's content and derived AX/S1 fields are not

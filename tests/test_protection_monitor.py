@@ -194,6 +194,68 @@ def test_inactive_state_clears_indicator_and_reuses_fresh_decision(fake_overlay)
     assert cached is first
 
 
+def test_non_forced_decision_covers_refresh_requested_during_refresh(
+    inventory, fake_overlay
+) -> None:
+    safe_inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+        ),
+        displays=inventory.displays,
+    )
+    second_read_started = threading.Event()
+    release_second_read = threading.Event()
+    read_count = 0
+    read_lock = threading.Lock()
+
+    def read_inventory() -> WindowInventory:
+        nonlocal read_count
+        with read_lock:
+            read_count += 1
+            current_read = read_count
+        if current_read == 2:
+            second_read_started.set()
+            assert release_second_read.wait(timeout=1.0)
+            return safe_inventory
+        return safe_inventory if current_read == 1 else inventory
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        inventory_reader=read_inventory,
+        watchdog_seconds=10.0,
+    )
+    first = monitor.decision_for_capture(force=True)
+    monitor.request_refresh()
+    decisions = []
+    errors: list[BaseException] = []
+
+    def validate() -> None:
+        try:
+            decisions.append(monitor.decision_for_capture(force=False))
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            errors.append(exc)
+
+    validation_thread = threading.Thread(target=validate)
+    validation_thread.start()
+    if not second_read_started.wait(timeout=0.5):
+        release_second_read.set()
+        validation_thread.join(timeout=1.0)
+        pytest.fail("pending request reused a pre-request cached decision")
+
+    monitor.request_refresh()
+    release_second_read.set()
+    validation_thread.join(timeout=1.0)
+
+    assert not validation_thread.is_alive()
+    assert errors == []
+    assert len(decisions) == 1
+    assert decisions[0].snapshot.state is ProtectionState.PROTECTED
+    assert decisions[0].covered_request_epoch == 2
+    assert decisions[0].covered_request_epoch > first.covered_request_epoch
+    assert read_count == 3
+
+
 def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory, fake_overlay, caplog) -> None:
     marker = "private-window-title"
 
@@ -213,6 +275,31 @@ def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory,
     assert decision.indicator_confirmed is True
     assert fake_overlay.snapshots[-1].state is ProtectionState.FAILED
     assert marker not in caplog.text
+
+
+def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmation(
+    inventory, fake_overlay
+) -> None:
+    cfg = CaptureConfig(
+        privacy_indicator_style="pill",
+        screenshot_privacy_fail_closed=False,
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: InventoryReadResult(
+            None, ProtectionFailureReason.HELPER_EXIT
+        ),
+        pause_reader=lambda: False,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert decision.indicator_confirmed is False
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_generations == [decision.snapshot.generation]
 
 
 def test_failed_snapshot_logs_one_fixed_reason_without_private_metadata(inventory, fake_overlay) -> None:
@@ -240,6 +327,48 @@ def test_failed_snapshot_logs_one_fixed_reason_without_private_metadata(inventor
     assert decision.snapshot.failure_reason is ProtectionFailureReason.HELPER_EXIT
     assert messages == ["privacy protection failed closed: reason=helper_exit"]
     assert marker not in messages
+
+
+def test_failed_snapshot_logs_only_on_failure_transition(inventory, fake_overlay) -> None:
+    result = InventoryReadResult(None, ProtectionFailureReason.HELPER_EXIT)
+    current_result: WindowInventory | InventoryReadResult = result
+
+    def read_inventory() -> WindowInventory | InventoryReadResult:
+        return current_result
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        inventory_reader=read_inventory,
+    )
+
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
+        monitor.decision_for_capture(force=True)
+        monitor.decision_for_capture(force=True)
+        current_result = inventory
+        monitor.decision_for_capture(force=True)
+        current_result = result
+        monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
+
+    failures = [
+        message
+        for message in messages
+        if message.startswith("privacy protection failed closed:")
+    ]
+    assert failures == [
+        "privacy protection failed closed: reason=helper_exit",
+        "privacy protection failed closed: reason=helper_exit",
+    ]
 
 
 def test_monitor_sanitizes_invalid_window_regex_logs(inventory, fake_overlay, caplog) -> None:
@@ -275,6 +404,39 @@ def test_stop_before_first_decision_is_terminal(inventory, fake_overlay) -> None
     assert fake_overlay.clear_generations == []
     assert fake_overlay.closed.wait(timeout=0.5)
     assert fake_overlay.close_calls == 1
+
+
+def test_stop_waits_for_overlay_cleanup_to_finish(inventory) -> None:
+    close_started = threading.Event()
+    release_close = threading.Event()
+    close_finished = threading.Event()
+
+    class BlockingCloseOverlay(FakeOverlay):
+        def close(self) -> None:
+            self.close_calls += 1
+            close_started.set()
+            assert release_close.wait(timeout=1.0)
+            self.closed.set()
+            close_finished.set()
+
+    overlay = BlockingCloseOverlay()
+    monitor = make_monitor(inventory=inventory, overlay=overlay)
+    stop_finished = threading.Event()
+    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+
+    stop_thread.start()
+    assert close_started.wait(timeout=0.5)
+    try:
+        assert stop_finished.wait(timeout=0.1) is False
+        assert close_finished.is_set() is False
+    finally:
+        release_close.set()
+        stop_thread.join(timeout=1.0)
+
+    assert not stop_thread.is_alive()
+    assert stop_finished.is_set()
+    assert close_finished.is_set()
+    assert overlay.close_calls == 1
 
 
 def test_stopped_monitor_rejects_cached_and_forced_decisions(inventory, fake_overlay) -> None:
@@ -335,7 +497,9 @@ def test_stop_during_blocked_force_refresh_is_bounded_and_prevents_late_render(
     assert fake_overlay.close_calls == 1
 
 
-def test_stop_marks_overlay_terminal_before_a_pre_overlay_barrier_releases(inventory, fake_overlay) -> None:
+def test_stop_marks_overlay_terminal_while_a_pre_overlay_barrier_is_blocked(
+    inventory, fake_overlay
+) -> None:
     reached_barrier = threading.Event()
     release_barrier = threading.Event()
     stop_finished = threading.Event()
@@ -370,8 +534,9 @@ def test_stop_marks_overlay_terminal_before_a_pre_overlay_barrier_releases(inven
     stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
     stop_thread.start()
     try:
-        assert stop_finished.wait(timeout=0.1) is False
-        assert fake_overlay.terminal_marked.is_set() is False
+        assert stop_finished.wait(timeout=0.5)
+        assert fake_overlay.terminal_marked.is_set()
+        assert fake_overlay.closed.is_set()
     finally:
         release_barrier.set()
         refresh_thread.join(timeout=1.0)
@@ -381,9 +546,10 @@ def test_stop_marks_overlay_terminal_before_a_pre_overlay_barrier_releases(inven
     assert not stop_thread.is_alive()
     assert stop_finished.is_set()
     assert fake_overlay.terminal_marked.is_set()
-    assert fake_overlay.render_calls == 1
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
+    assert fake_overlay.render_calls == 0
     assert fake_overlay.clear_calls == 0
-    assert len(fake_overlay.snapshots) == 1
+    assert fake_overlay.snapshots == []
     assert fake_overlay.clear_generations == []
 
 

@@ -38,6 +38,7 @@ class ProtectionSnapshot:
     created_monotonic: float
     fresh_until: float
     failure_reason: ProtectionFailureReason | None = None
+    active_candidate_display_ids: frozenset[int] = frozenset()
 
     @property
     def protected_regions(self) -> list[ScreenRegion]:
@@ -49,14 +50,13 @@ class ProtectionSnapshot:
 
     @property
     def ax_blocked(self) -> bool:
-        if self.state is ProtectionState.FAILED:
+        if self.state in (ProtectionState.PAUSED, ProtectionState.FAILED):
             return True
         if not self.protected_display_ids:
             return False
-        return (
-            self.active_display_id is None
-            or self.active_display_id in self.protected_display_ids
-        )
+        if self.active_display_id is not None:
+            return self.active_display_id in self.protected_display_ids
+        return bool(self.active_candidate_display_ids & self.protected_display_ids)
 
 
 def _intersection_area(left: ScreenRegion, right: ScreenRegion) -> float:
@@ -115,18 +115,30 @@ def build_protection_snapshot(
     active_windows = tuple(window for window in inventory.windows if window.is_active) if inventory else ()
     active_window = active_windows[0] if len(active_windows) == 1 else None
     active_display_id = _display_for_active_window(active_window, displays)
-    sensitive_regions = (
+    active_candidates = (
+        tuple(window for window in inventory.windows if window.is_active_candidate)
+        if inventory is not None and active_window is None
+        else ()
+    )
+    active_candidate_display_ids = frozenset(
+        display.id
+        for display in displays
+        if any(_regions_intersect(display.region, window.region) for window in active_candidates)
+    )
+    sensitive_windows = (
         [
-            window.region
+            (window, reason)
             for window in inventory.windows
-            if privacy.visible_window_denylist_reason(cfg, window) is not None
+            if (reason := privacy.visible_window_denylist_reason(cfg, window)) is not None
         ]
         if inventory is not None
         else []
     )
+    sensitive_regions = [window.region for window, _reason in sensitive_windows]
     has_unmapped_sensitive_window = any(
-        not any(_regions_intersect(display.region, region) for display in displays)
-        for region in sensitive_regions
+        reason != "window_title_unknown"
+        and not any(_regions_intersect(display.region, window.region) for display in displays)
+        for window, reason in sensitive_windows
     )
     derived_failure_reason = failure_reason
     if derived_failure_reason is None:
@@ -169,4 +181,5 @@ def build_protection_snapshot(
         created_monotonic=now,
         fresh_until=now + SNAPSHOT_FRESH_SECONDS,
         failure_reason=None if paused else derived_failure_reason,
+        active_candidate_display_ids=active_candidate_display_ids,
     )

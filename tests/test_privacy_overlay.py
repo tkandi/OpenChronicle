@@ -429,6 +429,31 @@ def test_subprocess_transport_can_launch_helper_through_existing_interpreter(
         client.close()
 
 
+def test_subprocess_acknowledgement_state_stays_constant_over_long_run(tmp_path: Path) -> None:
+    helper = _helper_script(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+    )
+    transport = _python_helper_transport(helper)
+
+    try:
+        for generation in range(1, 257):
+            assert transport.send_and_wait(
+                json.dumps({"generation": generation}),
+                generation,
+                timeout=0.2,
+            )
+
+        assert transport._last_completed_generation == 256
+        assert not any(isinstance(value, set) for value in vars(transport).values())
+        assert transport.send_and_wait('{"generation":1}', 1, timeout=0.01) is False
+    finally:
+        transport.close()
+
+
 def test_close_stops_subprocess_reader_thread(snapshot: ProtectionSnapshot, tmp_path: Path) -> None:
     helper = _helper_script(
         tmp_path,
@@ -439,10 +464,16 @@ def test_close_stops_subprocess_reader_thread(snapshot: ProtectionSnapshot, tmp_
     )
     transport = _python_helper_transport(helper)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
+    reader = transport._reader_thread
+    process = transport._process
 
     assert client.render(snapshot) is True
     client.close()
 
+    assert reader is not None
+    assert process is not None
+    assert not reader.is_alive()
+    assert process.poll() is not None
     assert transport._reader_thread is None
     assert transport._process is None
 

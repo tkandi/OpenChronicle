@@ -29,12 +29,25 @@ struct AXWindowMetadata: Equatable {
 
 struct AXWindowMatchResolution: Equatable {
     let axIndexByCGIndex: [Int?]
-    let titleFallbackIdentitiesComplete: Bool
 }
 
 struct ResolvedWindowMetadata: Equatable {
     let title: String
     let isActive: Bool
+    let titleAvailable: Bool
+    let isActiveCandidate: Bool
+
+    init(
+        title: String,
+        isActive: Bool,
+        titleAvailable: Bool = true,
+        isActiveCandidate: Bool = false
+    ) {
+        self.title = title
+        self.isActive = isActive
+        self.titleAvailable = titleAvailable
+        self.isActiveCandidate = isActiveCandidate
+    }
 }
 
 private struct WindowIdentity: Hashable {
@@ -86,38 +99,43 @@ func resolveAXWindowMatches(
         axIndexByCGIndex[cgIndex] = axIndices[0]
     }
 
-    let titleFallbackIdentitiesComplete = cgWindows.indices.allSatisfy { cgIndex in
-        let cgWindow = cgWindows[cgIndex]
-        guard cgWindow.layer == 0, cgWindow.title.isEmpty else { return true }
-        return axIndexByCGIndex[cgIndex] != nil
-    }
-
     return AXWindowMatchResolution(
-        axIndexByCGIndex: axIndexByCGIndex,
-        titleFallbackIdentitiesComplete: titleFallbackIdentitiesComplete
+        axIndexByCGIndex: axIndexByCGIndex
     )
 }
 
 func resolvedWindowMetadata(
     cgWindows: [OnScreenCGWindow],
     axWindows: [AXWindowMetadata],
+    frontmostPID: Int32? = nil,
     readAXTitle: (Int) -> String?
-) -> [ResolvedWindowMetadata]? {
+) -> [ResolvedWindowMetadata] {
     let resolution = resolveAXWindowMatches(cgWindows: cgWindows, axWindows: axWindows)
-    guard resolution.titleFallbackIdentitiesComplete else { return nil }
+    let focusedCGIndices = cgWindows.indices.filter { cgIndex in
+        guard let axIndex = resolution.axIndexByCGIndex[cgIndex] else { return false }
+        return axWindows[axIndex].isFocused
+    }
+    let activeCGIndex = focusedCGIndices.count == 1 ? focusedCGIndices[0] : nil
 
     var metadata: [ResolvedWindowMetadata] = []
     for cgIndex in cgWindows.indices {
         let cgWindow = cgWindows[cgIndex]
         let axIndex = resolution.axIndexByCGIndex[cgIndex]
         var title = cgWindow.title
+        var titleAvailable = !title.isEmpty
         if title.isEmpty, cgWindow.layer == 0 {
-            guard let axIndex, let axTitle = readAXTitle(axIndex) else { return nil }
-            title = axTitle
+            if let axIndex, let axTitle = readAXTitle(axIndex) {
+                title = axTitle
+                titleAvailable = true
+            }
         }
         metadata.append(ResolvedWindowMetadata(
             title: title,
-            isActive: axIndex.map { axWindows[$0].isFocused } ?? false
+            isActive: cgIndex == activeCGIndex,
+            titleAvailable: titleAvailable,
+            isActiveCandidate: activeCGIndex == nil
+                && cgWindow.layer == 0
+                && cgWindow.ownerPID == frontmostPID
         ))
     }
     return metadata

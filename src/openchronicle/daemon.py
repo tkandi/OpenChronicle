@@ -25,7 +25,9 @@ from .timeline import tick as timeline_tick
 logger = get("openchronicle.daemon")
 
 
-def _build_protection_monitor(cfg: Config) -> PrivacyProtectionMonitor:
+def _build_protection_monitor(cfg: Config) -> PrivacyProtectionMonitor | None:
+    if cfg.capture.screenshot_privacy_mode != "skip-monitor":
+        return None
     return PrivacyProtectionMonitor(
         cfg.capture,
         config_path=paths.config_file(),
@@ -68,7 +70,8 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
     done_task: asyncio.Task | None = None
     try:
         protection_monitor = _build_protection_monitor(cfg)
-        protection_monitor.start()
+        if protection_monitor is not None:
+            protection_monitor.start()
 
         # SessionManager observes every capture-worthy event and fires the
         # reducer via its on_session_end callback. Built even when

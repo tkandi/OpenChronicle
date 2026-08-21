@@ -10,13 +10,19 @@ from openchronicle.config import CaptureConfig
 
 
 def _window(
-    *, app: str = "", bundle: str = "", title: str = "", left: float = 0
+    *,
+    app: str = "",
+    bundle: str = "",
+    title: str = "",
+    left: float = 0,
+    title_available: bool = True,
 ) -> privacy.VisibleWindow:
     return privacy.VisibleWindow(
         app_name=app,
         bundle_id=bundle,
         title=title,
         region=privacy.ScreenRegion(left=left, top=0, width=100, height=100),
+        title_available=title_available,
     )
 
 
@@ -38,6 +44,46 @@ def test_sensitive_window_regions_match_all_metadata_fields(monkeypatch) -> None
 
     assert regions is not None
     assert [region.left for region in regions] == [0, 100, 200]
+
+
+def test_privacy_mode_off_preserves_every_foreground_denylist_field() -> None:
+    cases = [
+        (CaptureConfig(screenshot_privacy_mode="off", deny_app_names=["PrivateApp"]), {
+            "window_meta": {"app_name": "PrivateApp"},
+        }, "app_name"),
+        (CaptureConfig(screenshot_privacy_mode="off", deny_bundle_ids=["private.bundle"]), {
+            "window_meta": {"bundle_id": "private.bundle"},
+        }, "bundle_id"),
+        (CaptureConfig(screenshot_privacy_mode="off", deny_window_title_patterns=["private"]), {
+            "window_meta": {"title": "Private window"},
+        }, "window_title"),
+        (CaptureConfig(screenshot_privacy_mode="off", deny_url_patterns=["private"]), {
+            "url": "https://private.example",
+        }, "url"),
+        (CaptureConfig(screenshot_privacy_mode="off", deny_text_patterns=["private"]), {
+            "focused_element": {"value": "private value"},
+        }, "focused_value"),
+        (CaptureConfig(screenshot_privacy_mode="off", deny_text_patterns=["private"]), {
+            "visible_text": "private text",
+        }, "visible_text"),
+    ]
+
+    for cfg, capture, expected_reason in cases:
+        assert privacy.capture_denylist_reason(cfg, capture) == expected_reason
+
+
+def test_unknown_title_is_locally_sensitive_when_title_rules_are_enabled(monkeypatch) -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+    windows = [
+        _window(app="Unsupported", left=100, title_available=False),
+        _window(app="Known", title="main.py", left=200),
+    ]
+    monkeypatch.setattr(privacy, "list_visible_windows", lambda: windows)
+
+    regions = privacy.sensitive_window_regions(cfg)
+
+    assert regions is not None
+    assert [region.left for region in regions] == [100]
 
 
 def test_sensitive_window_regions_propagates_enumeration_failure(monkeypatch) -> None:
@@ -62,6 +108,8 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
                     "width": 90,
                     "height": 80,
                     "is_active": True,
+                    "title_available": False,
+                    "is_active_candidate": True,
                 }
             ],
             "displays": [
@@ -84,6 +132,38 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
         privacy.DisplayInfo(2, privacy.ScreenRegion(100, 0, 100, 100), False),
     )
     assert inventory.windows[0].is_active is True
+    assert inventory.windows[0].title_available is False
+    assert inventory.windows[0].is_active_candidate is True
+
+
+def test_read_window_inventory_defaults_uncertainty_flags_for_legacy_helper(monkeypatch) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult(
+            {
+                "windows": [
+                    {
+                        "title": "known",
+                        "left": 0,
+                        "top": 0,
+                        "width": 10,
+                        "height": 10,
+                    }
+                ],
+                "displays": [
+                    {"id": 1, "left": 0, "top": 0, "width": 100, "height": 100}
+                ],
+            },
+            None,
+        ),
+    )
+
+    inventory = privacy.read_window_inventory()
+
+    assert inventory is not None
+    assert inventory.windows[0].title_available is True
+    assert inventory.windows[0].is_active_candidate is False
 
 
 def test_read_window_inventory_rejects_empty_displays(monkeypatch) -> None:
@@ -177,6 +257,71 @@ def test_inventory_read_result_classifies_empty_displays_and_multiple_active(mon
         }, None),
     )
     assert privacy.read_window_inventory_result().failure_reason.value == "multiple_active_windows"
+
+
+def test_inventory_accepts_multiple_typed_active_candidates(monkeypatch) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult(
+            {
+                "windows": [
+                    {
+                        "left": 0,
+                        "top": 0,
+                        "width": 10,
+                        "height": 10,
+                        "is_active_candidate": True,
+                    },
+                    {
+                        "left": 20,
+                        "top": 0,
+                        "width": 10,
+                        "height": 10,
+                        "is_active_candidate": True,
+                    },
+                ],
+                "displays": [
+                    {"id": 1, "left": 0, "top": 0, "width": 100, "height": 100}
+                ],
+            },
+            None,
+        ),
+    )
+
+    result = privacy.read_window_inventory_result()
+
+    assert result.failure_reason is None
+    assert result.inventory is not None
+    assert [window.is_active_candidate for window in result.inventory.windows] == [True, True]
+
+
+def test_inventory_rejects_non_boolean_uncertainty_flags(monkeypatch) -> None:
+    base_window = {
+        "left": 0,
+        "top": 0,
+        "width": 10,
+        "height": 10,
+    }
+    display = {"id": 1, "left": 0, "top": 0, "width": 100, "height": 100}
+
+    for field in ("is_active", "title_available", "is_active_candidate"):
+        monkeypatch.setattr(
+            privacy,
+            "_read_window_list_helper",
+            lambda field=field: privacy.WindowListReadResult(
+                {
+                    "windows": [{**base_window, field: "false"}],
+                    "displays": [display],
+                },
+                None,
+            ),
+        )
+
+        result = privacy.read_window_inventory_result()
+
+        assert result.inventory is None
+        assert result.failure_reason is privacy.ProtectionFailureReason.HELPER_PARSE
 
 
 def test_read_window_inventory_does_not_log_parser_private_marker(monkeypatch, caplog) -> None:

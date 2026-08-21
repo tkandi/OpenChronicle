@@ -6,6 +6,10 @@ from pathlib import Path
 import pytest
 
 from openchronicle import daemon as daemon_mod
+from openchronicle.capture import window_meta
+from openchronicle.capture.privacy import ProtectionFailureReason
+from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
+from openchronicle.capture.protection_monitor import ProtectionDecision
 from openchronicle.config import Config
 
 
@@ -67,6 +71,97 @@ async def test_daemon_owns_protection_monitor_lifecycle(
     assert seen_monitor is monitor
     assert monitor.stop_calls == 1
     assert session.force_end_calls == ["daemon-shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_daemon_privacy_mode_off_bypasses_background_monitor(
+    ac_root: Path, monkeypatch,
+) -> None:
+    session = FakeSessionManager()
+    seen_monitor = object()
+
+    def unexpected_monitor(*_args, **_kwargs):
+        raise AssertionError("privacy mode off must not construct a background monitor")
+
+    async def capture_once_then_return(*_args, protection_monitor=None, **_kwargs) -> None:
+        nonlocal seen_monitor
+        seen_monitor = protection_monitor
+
+    async def park_forever(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(daemon_mod, "PrivacyProtectionMonitor", unexpected_monitor)
+    monkeypatch.setattr(daemon_mod, "PrivacyOverlayClient", lambda: object())
+    monkeypatch.setattr(daemon_mod.session_tick, "build_manager", lambda _cfg: session)
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
+    monkeypatch.setattr(daemon_mod.session_tick, "run_check_cuts", park_forever)
+    monkeypatch.setattr(daemon_mod.session_tick, "run_daily_safety_net", park_forever)
+    cfg = Config()
+    cfg.capture.screenshot_privacy_mode = "off"
+    cfg.mcp.auto_start = False
+
+    await daemon_mod._run(cfg, capture_only=True)
+
+    assert seen_monitor is None
+    assert session.force_end_calls == ["daemon-shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_daemon_fail_open_inventory_failure_allows_unprotected_capture(
+    ac_root: Path, monkeypatch,
+) -> None:
+    monitor = FakeMonitor()
+    session = FakeSessionManager()
+    now = 1.0
+    failed = ProtectionDecision(
+        ProtectionSnapshot(
+            generation=1,
+            state=ProtectionState.FAILED,
+            capture_mode="primary",
+            indicator_style="pill",
+            displays=(),
+            protected_display_ids=frozenset(),
+            active_display_id=None,
+            created_monotonic=now,
+            fresh_until=now + 1.0,
+            failure_reason=ProtectionFailureReason.HELPER_EXIT,
+        ),
+        indicator_confirmed=False,
+    )
+    monitor.decision_for_capture = lambda *, force=True: failed  # type: ignore[attr-defined]
+    screenshot_calls = 0
+    built_capture = None
+
+    async def capture_once_then_return(capture_cfg, *, protection_monitor=None, **_kwargs) -> None:
+        nonlocal built_capture
+        built_capture = daemon_mod.capture_scheduler._build_capture(
+            capture_cfg,
+            daemon_mod.capture_scheduler.ax_capture.UnavailableAXProvider("test unavailable"),
+            None,
+            protection_monitor=protection_monitor,
+        )
+
+    def grab_many(**_kwargs):
+        nonlocal screenshot_calls
+        screenshot_calls += 1
+        return []
+
+    cfg = _configure_daemon(monkeypatch, monitor, session)
+    cfg.capture.screenshot_privacy_fail_closed = False
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
+    monkeypatch.setattr(
+        daemon_mod.capture_scheduler.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(daemon_mod.capture_scheduler.screenshot, "grab_many", grab_many)
+
+    await daemon_mod._run(cfg, capture_only=True)
+
+    assert built_capture is not None
+    assert screenshot_calls == 1
+    assert monitor.start_calls == 1
+    assert monitor.stop_calls == 1
 
 
 @pytest.mark.asyncio

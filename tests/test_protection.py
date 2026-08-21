@@ -1,3 +1,5 @@
+import pytest
+
 from openchronicle.capture.privacy import (
     DisplayInfo,
     ScreenRegion,
@@ -42,7 +44,7 @@ def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     assert snapshot.ax_blocked is True
 
 
-def test_all_marks_every_display_and_unknown_active_display_blocks_ax() -> None:
+def test_all_marks_every_display_and_active_candidate_blocks_ax() -> None:
     cfg = CaptureConfig(
         screenshot_monitor="all",
         deny_window_title_patterns=["Private"],
@@ -50,6 +52,13 @@ def test_all_marks_every_display_and_unknown_active_display_blocks_ax() -> None:
     inventory = WindowInventory(
         windows=(
             VisibleWindow("Edge", "edge", "Private", ScreenRegion(110, 0, 80, 90), False),
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(0, 0, 80, 90),
+                is_active_candidate=True,
+            ),
         ),
         displays=(LEFT, RIGHT),
     )
@@ -59,7 +68,190 @@ def test_all_marks_every_display_and_unknown_active_display_blocks_ax() -> None:
     assert snapshot.state is ProtectionState.PROTECTED
     assert snapshot.protected_display_ids == frozenset({1, 2})
     assert snapshot.active_display_id is None
+    assert snapshot.active_candidate_display_ids == frozenset({1})
     assert snapshot.ax_blocked is True
+
+
+def test_paused_snapshot_blocks_ax_without_inventory() -> None:
+    snapshot = build_protection_snapshot(
+        CaptureConfig(),
+        None,
+        paused=True,
+        generation=9,
+        now=12.0,
+    )
+
+    assert snapshot.state is ProtectionState.PAUSED
+    assert snapshot.displays == ()
+    assert snapshot.protected_display_ids == frozenset()
+    assert snapshot.ax_blocked is True
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_ids"),
+    [
+        ("separate", frozenset({2})),
+        ("primary", frozenset({2})),
+        ("all", frozenset({1, 2})),
+    ],
+)
+def test_unknown_title_protects_only_the_mode_mapped_displays(
+    mode: str, expected_ids: frozenset[int]
+) -> None:
+    cfg = CaptureConfig(
+        screenshot_monitor=mode,
+        deny_window_title_patterns=["InPrivate"],
+    )
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Browser",
+                "browser",
+                "",
+                ScreenRegion(110, 0, 80, 90),
+                title_available=False,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        cfg,
+        inventory,
+        paused=False,
+        generation=10,
+        now=13.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == expected_ids
+    assert snapshot.failure_reason is None
+
+
+def test_unmapped_unknown_title_does_not_fail_the_complete_inventory() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Unsupported",
+                "unsupported",
+                "",
+                ScreenRegion(500, 0, 80, 90),
+                title_available=False,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=11,
+        now=14.0,
+    )
+
+    assert snapshot.state is ProtectionState.INACTIVE
+    assert snapshot.protected_display_ids == frozenset()
+    assert snapshot.failure_reason is None
+
+
+def test_exact_app_match_still_protects_when_title_is_unknown() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Passwords",
+                "com.passwords",
+                "",
+                ScreenRegion(0, 0, 80, 90),
+                title_available=False,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Passwords"]),
+        inventory,
+        paused=False,
+        generation=11,
+        now=14.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({1})
+
+
+@pytest.mark.parametrize(
+    ("mode", "candidate_left", "expected_blocked"),
+    [
+        ("separate", True, False),
+        ("separate", False, True),
+        ("primary", True, False),
+        ("primary", False, True),
+        ("all", True, True),
+        ("all", False, True),
+    ],
+)
+def test_uncertain_active_identity_blocks_only_candidate_protected_display(
+    mode: str, candidate_left: bool, expected_blocked: bool
+) -> None:
+    candidate_region = ScreenRegion(0, 0, 80, 90) if candidate_left else ScreenRegion(110, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "InPrivate", ScreenRegion(110, 0, 80, 90)),
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                candidate_region,
+                is_active_candidate=True,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(
+            screenshot_monitor=mode,
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        inventory,
+        paused=False,
+        generation=12,
+        now=15.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.active_display_id is None
+    assert snapshot.active_candidate_display_ids == frozenset({1 if candidate_left else 2})
+    assert snapshot.ax_blocked is expected_blocked
+
+
+def test_active_candidate_without_privacy_display_does_not_block_ax() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(0, 0, 80, 90),
+                is_active_candidate=True,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=13,
+        now=16.0,
+    )
+
+    assert snapshot.state is ProtectionState.INACTIVE
+    assert snapshot.active_candidate_display_ids == frozenset({1})
+    assert snapshot.ax_blocked is False
 
 
 def test_empty_displays_fail_closed_for_sensitive_active_window() -> None:

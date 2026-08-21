@@ -24,6 +24,8 @@ struct WindowRecord: Codable {
     let width: Double
     let height: Double
     let is_active: Bool
+    let title_available: Bool
+    let is_active_candidate: Bool
 }
 
 struct Output: Codable {
@@ -193,16 +195,14 @@ enum MacWindowList {
 
         let cgWindows = cgSources.map(\.metadata)
         let axWindows = axSources.map(\.metadata)
-        guard let resolvedMetadata = resolvedWindowMetadata(
+        let resolvedMetadata = resolvedWindowMetadata(
             cgWindows: cgWindows,
             axWindows: axWindows,
+            frontmostPID: frontmostPID,
             readAXTitle: { axIndex in
                 axString(axSources[axIndex].element, kAXTitleAttribute as String)
             }
-        ) else {
-            fputs("Could not resolve visible window metadata\n", stderr)
-            exit(3)
-        }
+        )
         let windows = zip(cgSources, resolvedMetadata).map { source, resolved in
             WindowRecord(
                 app_name: source.appName,
@@ -212,7 +212,9 @@ enum MacWindowList {
                 top: source.metadata.bounds.top,
                 width: source.metadata.bounds.width,
                 height: source.metadata.bounds.height,
-                is_active: resolved.isActive
+                is_active: resolved.isActive,
+                title_available: resolved.titleAvailable,
+                is_active_candidate: resolved.isActiveCandidate
             )
         }
 

@@ -24,7 +24,6 @@ private func testExactIdentityAuthorizesNormalLayerFallback() {
     let resolution = resolveAXWindowMatches(cgWindows: cgWindows, axWindows: axWindows)
 
     expectMatches(resolution, [0])
-    precondition(resolution.titleFallbackIdentitiesComplete)
 }
 
 private func testNonWindowLayersCannotAuthorizeFallback() {
@@ -42,7 +41,6 @@ private func testNonWindowLayersCannotAuthorizeFallback() {
     let resolution = resolveAXWindowMatches(cgWindows: cgWindows, axWindows: axWindows)
 
     expectMatches(resolution, [nil])
-    precondition(resolution.titleFallbackIdentitiesComplete)
 }
 
 private func testPIDAndWindowIDMustBothMatch() {
@@ -59,7 +57,6 @@ private func testPIDAndWindowIDMustBothMatch() {
     let resolution = resolveAXWindowMatches(cgWindows: cgWindows, axWindows: axWindows)
 
     expectMatches(resolution, [nil, nil])
-    precondition(!resolution.titleFallbackIdentitiesComplete)
 }
 
 private func testSameGeometryDifferentSpaceWindowIsRejected() {
@@ -72,7 +69,6 @@ private func testSameGeometryDifferentSpaceWindowIsRejected() {
     let resolution = resolveAXWindowMatches(cgWindows: cgWindows, axWindows: axWindows)
 
     expectMatches(resolution, [nil])
-    precondition(!resolution.titleFallbackIdentitiesComplete)
 }
 
 private func testDuplicateIdentitiesNeverCreateManyToOneMatches() {
@@ -100,9 +96,7 @@ private func testDuplicateIdentitiesNeverCreateManyToOneMatches() {
     )
 
     expectMatches(duplicateCGResolution, [nil, nil])
-    precondition(!duplicateCGResolution.titleFallbackIdentitiesComplete)
     expectMatches(duplicateAXResolution, [nil])
-    precondition(!duplicateAXResolution.titleFallbackIdentitiesComplete)
 }
 
 private func testWindowIDsMustBeGloballyUniqueAcrossPIDs() {
@@ -130,12 +124,10 @@ private func testWindowIDsMustBeGloballyUniqueAcrossPIDs() {
     )
 
     expectMatches(duplicateCGResolution, [nil, nil])
-    precondition(!duplicateCGResolution.titleFallbackIdentitiesComplete)
     expectMatches(duplicateAXResolution, [nil])
-    precondition(!duplicateAXResolution.titleFallbackIdentitiesComplete)
 }
 
-private func testMissingIdentityOrTitleFailsClosedOnlyWhenFallbackIsRequired() {
+private func testMissingIdentityOrTitleProducesTypedUnknownMetadata() {
     let bounds = WindowBounds(left: 0, top: 0, width: 200, height: 100)
     let missingIdentityCG = [
         OnScreenCGWindow(windowID: nil, ownerPID: 500, layer: 0, bounds: bounds, title: "")
@@ -178,11 +170,17 @@ private func testMissingIdentityOrTitleFailsClosedOnlyWhenFallbackIsRequired() {
     )
 
     expectMatches(missingIdentityResolution, [nil])
-    precondition(!missingIdentityResolution.titleFallbackIdentitiesComplete)
     precondition(titledWindowReadCount == 0)
     precondition(titledMetadata == [ResolvedWindowMetadata(title: "CG title", isActive: false)])
     precondition(unavailableTitleReadCount == 1)
-    precondition(unavailableTitleMetadata == nil)
+    precondition(unavailableTitleMetadata == [
+        ResolvedWindowMetadata(
+            title: "",
+            isActive: false,
+            titleAvailable: false,
+            isActiveCandidate: false
+        )
+    ])
 }
 
 private func testEmptyAXTitleIsACompletedFallbackRead() {
@@ -209,7 +207,6 @@ private func testEmptyAXTitleIsACompletedFallbackRead() {
     )
 
     expectMatches(resolution, [0])
-    precondition(resolution.titleFallbackIdentitiesComplete)
     precondition(titleReadCount == 1)
     precondition(metadata == [ResolvedWindowMetadata(title: "", isActive: false)])
 }
@@ -248,7 +245,7 @@ private func testResolvedMetadataPreservesCGTitleAndUsesExactAXFallback() {
     ])
 }
 
-private func testResolvedMetadataRejectsIncompleteBlankTitle() {
+private func testResolvedMetadataKeepsIncompleteBlankTitleAsActiveCandidate() {
     let cgWindows = [
         OnScreenCGWindow(
             windowID: 54,
@@ -264,14 +261,94 @@ private func testResolvedMetadataRejectsIncompleteBlankTitle() {
     let metadata = resolvedWindowMetadata(
         cgWindows: cgWindows,
         axWindows: axWindows,
+        frontmostPID: 500,
         readAXTitle: { _ in
             titleReadCount += 1
             return "same-geometry-other-space"
         }
     )
 
-    precondition(metadata == nil)
+    precondition(metadata == [
+        ResolvedWindowMetadata(
+            title: "",
+            isActive: false,
+            titleAvailable: false,
+            isActiveCandidate: true
+        )
+    ])
     precondition(titleReadCount == 0)
+}
+
+private func testUnrelatedUnsupportedBlankTitleDoesNotDiscardKnownWindows() {
+    let bounds = WindowBounds(left: 0, top: 0, width: 200, height: 100)
+    let cgWindows = [
+        OnScreenCGWindow(
+            windowID: 70,
+            ownerPID: 500,
+            layer: 0,
+            bounds: bounds,
+            title: "Known title"
+        ),
+        OnScreenCGWindow(windowID: nil, ownerPID: 900, layer: 0, bounds: bounds, title: ""),
+    ]
+
+    let metadata = resolvedWindowMetadata(
+        cgWindows: cgWindows,
+        axWindows: [],
+        frontmostPID: 500,
+        readAXTitle: { _ in
+            preconditionFailure("unsupported identity must not authorize an AX title read")
+        }
+    )
+
+    precondition(metadata == [
+        ResolvedWindowMetadata(
+            title: "Known title",
+            isActive: false,
+            titleAvailable: true,
+            isActiveCandidate: true
+        ),
+        ResolvedWindowMetadata(
+            title: "",
+            isActive: false,
+            titleAvailable: false,
+            isActiveCandidate: false
+        ),
+    ])
+}
+
+private func testExactFocusedIdentitySuppressesActiveCandidates() {
+    let bounds = WindowBounds(left: 0, top: 0, width: 200, height: 100)
+    let cgWindows = [
+        OnScreenCGWindow(windowID: 71, ownerPID: 500, layer: 0, bounds: bounds, title: "one"),
+        OnScreenCGWindow(windowID: 72, ownerPID: 500, layer: 0, bounds: bounds, title: "two"),
+    ]
+    let axWindows = [
+        AXWindowMetadata(windowID: 71, ownerPID: 500, isFocused: true),
+        AXWindowMetadata(windowID: 72, ownerPID: 500),
+    ]
+
+    let metadata = resolvedWindowMetadata(
+        cgWindows: cgWindows,
+        axWindows: axWindows,
+        frontmostPID: 500,
+        readAXTitle: { _ in preconditionFailure("CG titles are already available") }
+    )
+
+    precondition(metadata == [
+        ResolvedWindowMetadata(
+            title: "one",
+            isActive: true,
+            titleAvailable: true,
+            isActiveCandidate: false
+        ),
+        ResolvedWindowMetadata(
+            title: "two",
+            isActive: false,
+            titleAvailable: true,
+            isActiveCandidate: false
+        ),
+    ])
 }
 
 private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
@@ -331,7 +408,8 @@ private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
             }
         )
 
-        precondition(metadata == nil)
+        precondition(metadata.count == cgWindows.count)
+        precondition(metadata.allSatisfy { !$0.titleAvailable })
         precondition(titleReadCount == 0)
     }
 
@@ -368,10 +446,12 @@ enum MacWindowListCoreTests {
         testSameGeometryDifferentSpaceWindowIsRejected()
         testDuplicateIdentitiesNeverCreateManyToOneMatches()
         testWindowIDsMustBeGloballyUniqueAcrossPIDs()
-        testMissingIdentityOrTitleFailsClosedOnlyWhenFallbackIsRequired()
+        testMissingIdentityOrTitleProducesTypedUnknownMetadata()
         testEmptyAXTitleIsACompletedFallbackRead()
         testResolvedMetadataPreservesCGTitleAndUsesExactAXFallback()
-        testResolvedMetadataRejectsIncompleteBlankTitle()
+        testResolvedMetadataKeepsIncompleteBlankTitleAsActiveCandidate()
+        testUnrelatedUnsupportedBlankTitleDoesNotDiscardKnownWindows()
+        testExactFocusedIdentitySuppressesActiveCandidates()
         testTitleReadsOccurOnlyForGloballyAcceptedIdentity()
         print("MacWindowListCoreTests passed")
     }

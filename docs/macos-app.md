@@ -178,8 +178,8 @@ formatting.
 The Capture settings page can select `off`, `border`, `shield`, `pill`,
 `quiet-shield`, or `banner` for `capture.privacy_indicator_style`. Green means a
 display is excluded by the same protection-decision generation used by capture;
-gray means capture is paused; yellow means detection failed and screenshot
-capture is fail-closed. The overlay helper is a separate process, so no visible
+gray means capture is paused; yellow means detection failed and the capture tick
+is fail-closed. The overlay helper is a separate process, so no visible
 indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
@@ -188,7 +188,11 @@ layer-0 windows returned by CoreGraphics as on-screen. It locally inspects owner
 or app name, bundle identifier, title, CoreGraphics position and size, and
 AX-derived active state. AX supplies only a missing title, and only after a
 globally unique exact same-PID `CGWindowID` match; AX geometry never authorizes
-fallback, and a required missing or ambiguous identity fails closed. Menus,
+fallback. A title that remains unavailable is emitted as an unknown-title record
+instead of failing unrelated windows; configured title rules conservatively
+protect only its intersecting displays. If exact focused-window identity is
+unavailable, frontmost-PID layer-0 windows become active candidates, and AX is
+blocked only when a candidate display is protected. Menus,
 popovers, and non-layer-0 floating panels are not independently protected as
 full-display windows by title, although an app or bundle denylist can still
 protect the capture when it independently matches an inventoried normal window
@@ -200,6 +204,13 @@ capture JSON may still be written. When the gate protects the active display,
 the protected window's content and derived AX/S1 fields are suppressed; a
 foreground denylist match can instead skip the entire capture before it is
 written or processed.
+
+With `screenshot_privacy_mode = "off"`, the daemon does not start the background
+inventory monitor or indicator, but foreground app, bundle, title, URL, and text
+rules still skip matching captures. With `screenshot_privacy_fail_closed =
+false`, an inventory failure clears stale overlays and allows an unprotected
+capture without claiming visual confirmation; the default `true` policy aborts
+the complete tick and shows yellow when the helper can render it.
 
 Before relying on the setting in daily use, perform this manual acceptance on
 empty privacy windows after an explicit reinstall: verify `separate` and `all`

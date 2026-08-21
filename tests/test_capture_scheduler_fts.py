@@ -13,9 +13,17 @@ import pytest
 from openchronicle.capture import scheduler as scheduler_mod
 from openchronicle.capture import window_meta
 from openchronicle.capture.ax_models import AXCaptureResult
-from openchronicle.capture.privacy import DisplayInfo, ScreenRegion
+from openchronicle.capture.privacy import (
+    DisplayInfo,
+    ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
+)
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
-from openchronicle.capture.protection_monitor import ProtectionDecision
+from openchronicle.capture.protection_monitor import (
+    PrivacyProtectionMonitor,
+    ProtectionDecision,
+)
 from openchronicle.config import CaptureConfig
 from openchronicle.store import fts
 
@@ -107,6 +115,24 @@ def _failed_decision() -> ProtectionDecision:
     )
 
 
+def _paused_decision(*, generation: int = 22) -> ProtectionDecision:
+    now = time.monotonic()
+    return ProtectionDecision(
+        snapshot=ProtectionSnapshot(
+            generation=generation,
+            state=ProtectionState.PAUSED,
+            capture_mode="separate",
+            indicator_style="pill",
+            displays=(),
+            protected_display_ids=frozenset(),
+            active_display_id=None,
+            created_monotonic=now,
+            fresh_until=now + 1.0,
+        ),
+        indicator_confirmed=True,
+    )
+
+
 def _capture_dict(
     *, ts: str, app: str, title: str, value: str, text: str,
 ) -> dict:
@@ -155,7 +181,10 @@ def _edge_ax_tree(url: str, text: str = "visible page text") -> dict:
 def test_denylist_title_skips_before_ax_and_screenshot(
     ac_root: Path, monkeypatch,
 ) -> None:
-    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate", "无痕"])
+    cfg = CaptureConfig(
+        screenshot_privacy_mode="off",
+        deny_window_title_patterns=["InPrivate", "无痕"],
+    )
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://example.com"))
     monkeypatch.setattr(
         scheduler_mod.window_meta,
@@ -181,7 +210,10 @@ def test_denylist_title_skips_before_ax_and_screenshot(
 
 
 def test_denylist_url_skips_before_screenshot(ac_root: Path, monkeypatch) -> None:
-    cfg = CaptureConfig(deny_url_patterns=["account\\.example"])
+    cfg = CaptureConfig(
+        screenshot_privacy_mode="off",
+        deny_url_patterns=["account\\.example"],
+    )
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://account.example/private"))
     monkeypatch.setattr(
         scheduler_mod.window_meta,
@@ -469,6 +501,70 @@ def test_failed_protection_snapshot_writes_nothing(
     assert provider.calls == 0
 
 
+def test_paused_initial_decision_writes_nothing_without_displays_or_capture_sources(
+    ac_root: Path, monkeypatch,
+) -> None:
+    monitor = _FakeProtectionMonitor(_paused_decision())
+    provider = scheduler_mod.ax_capture.UnavailableAXProvider("test unavailable")
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.s1_parser,
+        "enrich",
+        lambda _capture: (_ for _ in ()).throw(AssertionError("paused capture must not enrich")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(AssertionError("paused capture must not screenshot")),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(include_screenshot=False),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert monitor.force_calls == [True]
+
+
+def test_inventory_failure_is_fail_open_only_when_configured(
+    ac_root: Path, monkeypatch,
+) -> None:
+    monitor = _FakeProtectionMonitor(
+        ProtectionDecision(snapshot=_failed_decision().snapshot, indicator_confirmed=False)
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(screenshot_privacy_fail_closed=False),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert provider.calls == 1
+    assert len(screenshot_calls) == 1
+    assert screenshot_calls[0]["blocked_regions"] == []
+
+
 def test_post_ax_validation_that_newly_blocks_ax_discards_whole_capture(
     ac_root: Path, monkeypatch,
 ) -> None:
@@ -550,21 +646,25 @@ def test_post_ax_validation_discards_newly_blocked_capture_without_ax_tree(
     assert monitor.force_calls == [True, False]
 
 
-@pytest.mark.parametrize("latest_state", [ProtectionState.PROTECTED, ProtectionState.FAILED])
+@pytest.mark.parametrize(
+    "latest_state",
+    [ProtectionState.PROTECTED, ProtectionState.PAUSED, ProtectionState.FAILED],
+)
 def test_post_ax_validation_blocks_write_without_screenshot(
     ac_root: Path, monkeypatch, latest_state: ProtectionState,
 ) -> None:
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example"))
-    latest = (
-        _failed_decision()
-        if latest_state is ProtectionState.FAILED
-        else _protection_decision(
+    if latest_state is ProtectionState.FAILED:
+        latest = _failed_decision()
+    elif latest_state is ProtectionState.PAUSED:
+        latest = _paused_decision(generation=51)
+    else:
+        latest = _protection_decision(
             generation=51,
             active_display_id=1,
             protected_ids={1},
             confirmed=True,
         )
-    )
     monitor = _FakeProtectionMonitor(
         _protection_decision(
             generation=50,
@@ -590,6 +690,89 @@ def test_post_ax_validation_blocks_write_without_screenshot(
     assert out is None
     assert provider.calls == 1
     assert monitor.force_calls == [True, False]
+
+
+def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(
+    ac_root: Path, monkeypatch,
+) -> None:
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    safe_inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+        ),
+        displays=displays,
+    )
+    protected_inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "InPrivate", ScreenRegion(0, 0, 80, 90)),
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+        ),
+        displays=displays,
+    )
+    inventory = safe_inventory
+
+    class Overlay:
+        def render(self, _snapshot, timeout: float = 0.5) -> bool:
+            return True
+
+        def clear(self, _generation: int, timeout: float = 0.5) -> bool:
+            return True
+
+        def mark_terminal(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        config_path=ac_root / "missing.toml",
+        overlay=Overlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        watchdog_seconds=10.0,
+    )
+
+    class EventDuringAXProvider(_FakeProvider):
+        def capture_frontmost(self, *, focused_window_only: bool = True) -> AXCaptureResult | None:
+            nonlocal inventory
+            inventory = protected_inventory
+            monitor.request_refresh()
+            return super().capture_frontmost(focused_window_only=focused_window_only)
+
+    provider = EventDuringAXProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(AssertionError("invalidated capture must not screenshot")),
+    )
+
+    try:
+        out = scheduler_mod._build_capture(
+            CaptureConfig(
+                screenshot_monitor="separate",
+                deny_window_title_patterns=["InPrivate"],
+            ),
+            provider,
+            None,
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert out is None
+    assert provider.calls == 1
 
 
 def test_post_ax_validation_uses_latest_generation_confirmation_and_regions(

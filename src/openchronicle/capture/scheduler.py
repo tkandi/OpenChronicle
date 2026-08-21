@@ -28,6 +28,20 @@ from .watcher import AXWatcherProcess
 logger = get("openchronicle.capture")
 
 
+def _decision_is_terminal(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
+    state = decision.snapshot.state
+    return state is ProtectionState.PAUSED or (
+        state is ProtectionState.FAILED and cfg.screenshot_privacy_fail_closed
+    )
+
+
+def _decision_blocks_ax(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
+    return (
+        decision.snapshot.state is not ProtectionState.FAILED
+        or cfg.screenshot_privacy_fail_closed
+    ) and decision.snapshot.ax_blocked
+
+
 def _now_iso() -> str:
     return datetime.now(UTC).astimezone().replace(microsecond=0).isoformat()
 
@@ -67,7 +81,7 @@ def _build_capture(
     decision: ProtectionDecision | None = None
     if protection_monitor is not None:
         decision = protection_monitor.decision_for_capture(force=True)
-        if decision.snapshot.state is ProtectionState.FAILED:
+        if _decision_is_terminal(cfg, decision):
             return None
 
     reason = privacy.capture_denylist_reason(cfg, out)
@@ -75,7 +89,7 @@ def _build_capture(
         logger.info("capture skipped (denylist: %s)", reason)
         return None
 
-    if decision is not None and decision.snapshot.ax_blocked:
+    if decision is not None and _decision_blocks_ax(cfg, decision):
         out["ax_skipped"] = "protected_display"
     else:
         if provider.available:
@@ -90,11 +104,11 @@ def _build_capture(
 
     if decision is not None:
         latest = protection_monitor.decision_for_capture(force=False)
-        if latest.snapshot.state is ProtectionState.FAILED:
+        if _decision_is_terminal(cfg, latest):
             return None
         if (
             latest.snapshot.generation != decision.snapshot.generation
-            and latest.snapshot.ax_blocked
+            and _decision_blocks_ax(cfg, latest)
         ):
             logger.warning("capture skipped: latest privacy protection invalidated capture")
             return None
@@ -108,7 +122,9 @@ def _build_capture(
     if cfg.include_screenshot:
         blocked_regions: list[privacy.ScreenRegion] | None = []
         if decision is not None:
-            if (
+            if decision.snapshot.state is ProtectionState.FAILED:
+                blocked_regions = []
+            elif (
                 decision.snapshot.indicator_style != "off"
                 and not decision.indicator_confirmed
             ):

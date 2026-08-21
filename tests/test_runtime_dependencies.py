@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 
@@ -19,14 +20,24 @@ def test_litellm_tool_call_response_path_imports() -> None:
 
 
 def test_privacy_overlay_sources_are_declared_for_wheel() -> None:
-    pyproject = Path("pyproject.toml").read_text()
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+    mappings = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
-    assert 'resources/mac-privacy-overlay-core.swift' in pyproject
-    assert 'resources/mac-privacy-overlay.swift' in pyproject
-    assert 'resources/build-mac-privacy-overlay.sh' in pyproject
+    assert mappings["resources/mac-privacy-overlay-core.swift"] == (
+        "openchronicle/_bundled/mac-privacy-overlay-core.swift"
+    )
+    assert mappings["resources/mac-privacy-overlay.swift"] == (
+        "openchronicle/_bundled/mac-privacy-overlay.swift"
+    )
+    assert mappings["resources/build-mac-privacy-overlay.sh"] == (
+        "openchronicle/_bundled/build-mac-privacy-overlay.sh"
+    )
 
 
 def test_window_list_core_source_is_declared_for_wheel() -> None:
-    pyproject = Path("pyproject.toml").read_text()
+    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
+    mappings = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
 
-    assert 'resources/mac-window-list-core.swift' in pyproject
+    assert mappings["resources/mac-window-list-core.swift"] == (
+        "openchronicle/_bundled/mac-window-list-core.swift"
+    )
