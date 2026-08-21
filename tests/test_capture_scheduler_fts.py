@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import time
@@ -20,6 +21,7 @@ from openchronicle.capture.privacy import (
     VisibleWindow,
     WindowInventory,
 )
+from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsLeaseManager
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_monitor import (
     PrivacyProtectionMonitor,
@@ -76,6 +78,20 @@ class _FakeProtectionMonitor:
 
     def request_refresh(self) -> None:
         self.refresh_requests += 1
+
+
+class _AlwaysConfirmedOverlay:
+    def render(self, _snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+        return True
+
+    def clear(self, _generation: int, timeout: float = 0.5) -> bool:
+        return True
+
+    def mark_terminal(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 def _protection_decision(
@@ -457,6 +473,142 @@ def test_protected_active_display_skips_ax_but_captures_safe_monitor(
     assert "visible_text" not in out
     assert out["ax_skipped"] == "protected_display"
     assert screenshot_calls[0]["blocked_regions"] == monitor.snapshot.protected_regions
+
+
+def test_diagnostics_guard_uses_monitor_gate_without_leaking_exact_reason(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    marker = "private-diagnostics-window-title"
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", marker, ScreenRegion(110, 0, 80, 90), False),
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(110, 0, 80, 90), True),
+        ),
+        displays=displays,
+    )
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        deny_window_title_patterns=[marker],
+    )
+    manager = DiagnosticsLeaseManager(
+        ac_root / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    manager.acquire(pid=os.getpid(), display_id=2)
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://private.example", marker))
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+
+    def capture_only_safe_monitor(**kwargs):
+        screenshot_calls.append(kwargs)
+        assert kwargs["blocked_regions"] == [displays[1].region]
+        return [
+            scheduler_mod.screenshot.Screenshot(
+                image_base64="SAFE",
+                width=100,
+                height=100,
+                monitor_index=1,
+                monitor_left=0,
+                monitor_top=0,
+                monitor_width=100,
+                monitor_height=100,
+            )
+        ]
+
+    monkeypatch.setattr(scheduler_mod.screenshot, "grab_many", capture_only_safe_monitor)
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert out is not None
+    assert provider.calls == 0
+    assert out["ax_skipped"] == "protected_display"
+    assert [shot["image_base64"] for shot in out["screenshots"]] == ["SAFE"]
+    assert screenshot_calls
+    assert marker not in json.dumps(out)
+
+
+def test_diagnostics_guard_in_all_mode_skips_virtual_desktop_screenshot(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(
+        windows=(VisibleWindow("Cursor", "cursor", "main.py", displays[0].region, True),),
+        displays=displays,
+    )
+    cfg = CaptureConfig(screenshot_monitor="all")
+    manager = DiagnosticsLeaseManager(
+        ac_root / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    manager.acquire(pid=os.getpid(), display_id=2)
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+
+    def skip_virtual_desktop(**kwargs):
+        screenshot_calls.append(kwargs)
+        assert kwargs["monitor_mode"] == "all"
+        assert kwargs["blocked_regions"] == [display.region for display in displays]
+        return []
+
+    monkeypatch.setattr(scheduler_mod.screenshot, "grab_many", skip_virtual_desktop)
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert out is not None
+    assert provider.calls == 0
+    assert screenshot_calls
+    assert "screenshot" not in out
+    assert "screenshots" not in out
 
 
 def test_unconfirmed_indicator_fails_screenshot_closed(

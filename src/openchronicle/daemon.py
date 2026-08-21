@@ -11,10 +11,16 @@ from __future__ import annotations
 import asyncio
 import os
 import signal
+from collections.abc import Callable
 from contextlib import suppress
 
 from . import paths
 from .capture import scheduler as capture_scheduler
+from .capture.privacy_diagnostics import PrivacyDiagnosticsServer
+from .capture.privacy_diagnostics_guard import (
+    DiagnosticsGuardSnapshot,
+    DiagnosticsLeaseManager,
+)
 from .capture.privacy_overlay import PrivacyOverlayClient
 from .capture.protection_monitor import PrivacyProtectionMonitor
 from .config import Config
@@ -25,13 +31,18 @@ from .timeline import tick as timeline_tick
 logger = get("openchronicle.daemon")
 
 
-def _build_protection_monitor(cfg: Config) -> PrivacyProtectionMonitor | None:
+def _build_protection_monitor(
+    cfg: Config,
+    *,
+    diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
+) -> PrivacyProtectionMonitor | None:
     if cfg.capture.screenshot_privacy_mode != "skip-monitor":
         return None
     return PrivacyProtectionMonitor(
         cfg.capture,
         config_path=paths.config_file(),
         overlay=PrivacyOverlayClient(),
+        diagnostics_guard_reader=diagnostics_guard_reader,
     )
 
 
@@ -65,29 +76,39 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
     paths.pid_file().write_text(str(os.getpid()))
 
     protection_monitor: PrivacyProtectionMonitor | None = None
+    diagnostics_server: PrivacyDiagnosticsServer | None = None
+    lease_manager: DiagnosticsLeaseManager | None = None
     session_manager = None
     tasks: list[asyncio.Task] = []
     done_task: asyncio.Task | None = None
     try:
-        protection_monitor = _build_protection_monitor(cfg)
+        if cfg.capture.screenshot_privacy_mode == "skip-monitor":
+            lease_manager = DiagnosticsLeaseManager(paths.privacy_diagnostics_guard())
+            lease_manager.load()
+            protection_monitor = _build_protection_monitor(
+                cfg,
+                diagnostics_guard_reader=lease_manager.snapshot,
+            )
         if protection_monitor is not None:
+            if lease_manager is None:
+                raise RuntimeError("privacy diagnostics lease manager is unavailable")
+            diagnostics_server = PrivacyDiagnosticsServer(
+                paths.privacy_diagnostics_socket(),
+                lease_manager,
+                request_refresh=protection_monitor.request_refresh,
+                wait_for_display_protection=(
+                    protection_monitor.wait_for_display_protection
+                ),
+            )
+            protection_monitor.add_decision_listener(diagnostics_server.publish)
             protection_monitor.start()
+            diagnostics_server.start()
 
         # SessionManager observes every capture-worthy event and fires the
         # reducer via its on_session_end callback. Built even when
         # capture_only is true so session rows still land on disk.
         session_manager = session_tick.build_manager(cfg)
 
-        tasks.append(
-            asyncio.create_task(
-                capture_scheduler.run_forever(
-                    cfg.capture,
-                    pre_capture_hook=session_manager.on_event,
-                    protection_monitor=protection_monitor,
-                ),
-                name="capture",
-            )
-        )
         tasks.append(
             asyncio.create_task(
                 session_tick.run_check_cuts(cfg, session_manager), name="session",
@@ -116,6 +137,16 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
             )
         if cfg.mcp.auto_start and cfg.mcp.transport in ("sse", "streamable-http"):
             tasks.append(asyncio.create_task(_mcp_loop(cfg), name="mcp"))
+        tasks.append(
+            asyncio.create_task(
+                capture_scheduler.run_forever(
+                    cfg.capture,
+                    pre_capture_hook=session_manager.on_event,
+                    protection_monitor=protection_monitor,
+                ),
+                name="capture",
+            )
+        )
 
         stop = asyncio.Event()
 
@@ -133,6 +164,9 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
             [done_task, *tasks], return_when=asyncio.FIRST_COMPLETED
         )
     finally:
+        if diagnostics_server is not None:
+            with suppress(Exception):
+                diagnostics_server.stop()
         if done_task is not None:
             done_task.cancel()
         for task in tasks:

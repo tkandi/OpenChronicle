@@ -8,21 +8,92 @@ import pytest
 from openchronicle import daemon as daemon_mod
 from openchronicle.capture import window_meta
 from openchronicle.capture.privacy import ProtectionFailureReason
+from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsGuardSnapshot
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_monitor import ProtectionDecision
 from openchronicle.config import Config
 
 
 class FakeMonitor:
-    def __init__(self) -> None:
+    def __init__(self, events: list[str] | None = None) -> None:
         self.start_calls = 0
         self.stop_calls = 0
+        self.events = events
+        self.listeners = []
 
     def start(self) -> None:
         self.start_calls += 1
+        if self.events is not None:
+            self.events.append("start monitor")
 
     def stop(self) -> None:
         self.stop_calls += 1
+        if self.events is not None:
+            self.events.append("stop monitor")
+
+    def add_decision_listener(self, listener) -> None:
+        self.listeners.append(listener)
+
+    def request_refresh(self) -> None:
+        return None
+
+    def wait_for_display_protection(
+        self,
+        display_id: int,
+        after_generation: int,
+        timeout: float,
+    ) -> int | None:
+        return after_generation + 1
+
+
+class FakeLeaseManager:
+    def __init__(self, _path: Path, events: list[str] | None = None) -> None:
+        self.events = events
+        self.load_calls = 0
+
+    def load(self) -> DiagnosticsGuardSnapshot:
+        self.load_calls += 1
+        if self.events is not None:
+            self.events.append("load guard")
+        return self.snapshot()
+
+    def snapshot(self) -> DiagnosticsGuardSnapshot:
+        return DiagnosticsGuardSnapshot(frozenset(), False)
+
+    def prune_dead(self) -> DiagnosticsGuardSnapshot:
+        return self.snapshot()
+
+
+class FakeDiagnosticsServer:
+    def __init__(
+        self,
+        socket_path: Path,
+        _manager: FakeLeaseManager,
+        *,
+        events: list[str] | None = None,
+        **_kwargs,
+    ) -> None:
+        self.socket_path = socket_path
+        self.events = events
+        self.start_calls = 0
+        self.stop_calls = 0
+        self.published = []
+
+    def start(self) -> None:
+        self.start_calls += 1
+        if self.events is not None:
+            self.events.append("start diagnostics")
+        self.socket_path.write_text("fake socket")
+
+    def stop(self) -> None:
+        self.stop_calls += 1
+        if self.events is not None:
+            self.events.append("stop diagnostics")
+        self.socket_path.unlink(missing_ok=True)
+
+    def publish(self, decision) -> bool:
+        self.published.append(decision)
+        return True
 
 
 class FakeSessionManager:
@@ -40,7 +111,13 @@ def _configure_daemon(monkeypatch, monitor: FakeMonitor, session: FakeSessionMan
     async def park_forever(*_args, **_kwargs) -> None:
         await asyncio.Event().wait()
 
-    monkeypatch.setattr(daemon_mod, "_build_protection_monitor", lambda _cfg: monitor)
+    monkeypatch.setattr(
+        daemon_mod,
+        "_build_protection_monitor",
+        lambda _cfg, **_kwargs: monitor,
+    )
+    monkeypatch.setattr(daemon_mod, "DiagnosticsLeaseManager", FakeLeaseManager)
+    monkeypatch.setattr(daemon_mod, "PrivacyDiagnosticsServer", FakeDiagnosticsServer)
     monkeypatch.setattr(daemon_mod.session_tick, "build_manager", lambda _cfg: session)
     monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", park_forever)
     monkeypatch.setattr(daemon_mod.session_tick, "run_check_cuts", park_forever)
@@ -71,6 +148,63 @@ async def test_daemon_owns_protection_monitor_lifecycle(
     assert seen_monitor is monitor
     assert monitor.stop_calls == 1
     assert session.force_end_calls == ["daemon-shutdown"]
+
+
+@pytest.mark.asyncio
+async def test_daemon_orders_guard_monitor_diagnostics_capture_and_shutdown(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    events: list[str] = []
+    manager = FakeLeaseManager(ac_root / "runtime" / "privacy-reveal.guard", events)
+    monitor = FakeMonitor(events)
+    session = FakeSessionManager()
+    server: FakeDiagnosticsServer | None = None
+
+    async def capture_once_then_return(*_args, **_kwargs) -> None:
+        events.append("start capture")
+
+    async def park_forever(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
+
+    def build_server(socket_path, lease_manager, **kwargs):
+        nonlocal server
+        assert lease_manager is manager
+        assert kwargs["request_refresh"] == monitor.request_refresh
+        assert kwargs["wait_for_display_protection"] == monitor.wait_for_display_protection
+        server = FakeDiagnosticsServer(socket_path, lease_manager, events=events, **kwargs)
+        return server
+
+    monkeypatch.setattr(daemon_mod, "DiagnosticsLeaseManager", lambda _path: manager)
+    monkeypatch.setattr(
+        daemon_mod,
+        "_build_protection_monitor",
+        lambda _cfg, **_kwargs: monitor,
+    )
+    monkeypatch.setattr(daemon_mod, "PrivacyDiagnosticsServer", build_server)
+    monkeypatch.setattr(daemon_mod.session_tick, "build_manager", lambda _cfg: session)
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
+    monkeypatch.setattr(daemon_mod.session_tick, "run_check_cuts", park_forever)
+    monkeypatch.setattr(daemon_mod.session_tick, "run_daily_safety_net", park_forever)
+    cfg = Config()
+    cfg.mcp.auto_start = False
+
+    await daemon_mod._run(cfg, capture_only=True)
+
+    assert events == [
+        "load guard",
+        "start monitor",
+        "start diagnostics",
+        "start capture",
+        "stop diagnostics",
+        "stop monitor",
+    ]
+    assert server is not None
+    assert monitor.listeners == [server.publish]
+    assert server.start_calls == 1
+    assert server.stop_calls == 1
+    assert not daemon_mod.paths.privacy_diagnostics_socket().exists()
+    assert not daemon_mod.paths.pid_file().exists()
 
 
 @pytest.mark.asyncio
@@ -172,7 +306,7 @@ async def test_daemon_removes_pid_when_monitor_factory_fails(
     monkeypatch.setattr(
         daemon_mod,
         "_build_protection_monitor",
-        lambda _cfg: (_ for _ in ()).throw(RuntimeError("factory failed")),
+        lambda _cfg, **_kwargs: (_ for _ in ()).throw(RuntimeError("factory failed")),
     )
 
     with pytest.raises(RuntimeError, match="factory failed"):

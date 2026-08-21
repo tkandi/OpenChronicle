@@ -23,6 +23,7 @@ from .privacy import (
     WindowInventory,
     read_window_inventory_result,
 )
+from .privacy_diagnostics_guard import DiagnosticsGuardSnapshot
 from .privacy_overlay import PrivacyOverlayClient
 from .protection import (
     ProtectionSnapshot,
@@ -56,6 +57,8 @@ class PrivacyProtectionMonitor:
         pause_reader: Callable[[], CapturePauseDecision | bool] = capture_pause_decision_strict,
         watchdog_seconds: float = 1.0,
         before_overlay_call: Callable[[], None] | None = None,
+        diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
+        decision_listener: Callable[[ProtectionDecision], None] | None = None,
     ) -> None:
         self._cfg = cfg
         self._config_path = config_path
@@ -64,6 +67,7 @@ class PrivacyProtectionMonitor:
         self._pause_reader = pause_reader
         self._watchdog_seconds = max(0.0, watchdog_seconds)
         self._before_overlay_call = before_overlay_call or (lambda: None)
+        self._diagnostics_guard_reader = diagnostics_guard_reader
         self._indicator_style = cfg.privacy_indicator_style
         self._config_mtime_ns: int | None = None
         self._generation = 0
@@ -71,7 +75,12 @@ class PrivacyProtectionMonitor:
         self._decision: ProtectionDecision | None = None
 
         self._state_lock = threading.Lock()
+        self._decision_condition = threading.Condition(self._state_lock)
         self._refresh_lock = threading.Lock()
+        self._listeners_lock = threading.Lock()
+        self._decision_listeners = (
+            [decision_listener] if decision_listener is not None else []
+        )
         self._lifecycle_lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
@@ -79,7 +88,7 @@ class PrivacyProtectionMonitor:
         self._started = False
         self._stopped = False
         self._overlay_closed = False
-        self._last_logged_failure: tuple[ProtectionFailureReason, bool] | None = None
+        self._last_logged_failure: tuple[str, bool] | None = None
 
     def start(self) -> None:
         with self._lifecycle_lock:
@@ -102,6 +111,8 @@ class PrivacyProtectionMonitor:
                 return
             self._overlay_closed = True
             monitor_thread = self._thread
+        with self._decision_condition:
+            self._decision_condition.notify_all()
         self._overlay.mark_terminal()
         if monitor_thread is not None and monitor_thread is not threading.current_thread():
             monitor_thread.join(timeout=_MONITOR_JOIN_TIMEOUT)
@@ -114,6 +125,40 @@ class PrivacyProtectionMonitor:
             with self._state_lock:
                 self._requested_epoch += 1
         self._wake.set()
+
+    def add_decision_listener(
+        self,
+        listener: Callable[[ProtectionDecision], None],
+    ) -> None:
+        """Register a post-publication listener without exposing monitor locks."""
+        with self._listeners_lock:
+            if listener not in self._decision_listeners:
+                self._decision_listeners.append(listener)
+
+    def wait_for_display_protection(
+        self,
+        display_id: int,
+        after_generation: int,
+        timeout: float,
+    ) -> int | None:
+        """Wait for a newer, acknowledged decision protecting one display."""
+        deadline = time.monotonic() + max(0.0, timeout)
+        with self._decision_condition:
+            while True:
+                current = self._decision
+                if (
+                    current is not None
+                    and current.snapshot.generation > after_generation
+                    and display_id in current.snapshot.protected_display_ids
+                    and current.indicator_confirmed
+                ):
+                    return current.snapshot.generation
+                if self._stop.is_set():
+                    return None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                self._decision_condition.wait(remaining)
 
     def decision_for_capture(self, *, force: bool = True) -> ProtectionDecision:
         must_refresh = force
@@ -156,6 +201,7 @@ class PrivacyProtectionMonitor:
             with self._state_lock:
                 covered_request_epoch = self._requested_epoch
             paused, inventory, failure_reason, pause_reason = self._read_protection_inputs()
+            diagnostics_guard = self._read_diagnostics_guard()
             self._raise_if_stopped()
             now = time.monotonic()
             generation = self._generation + 1
@@ -167,10 +213,13 @@ class PrivacyProtectionMonitor:
                 now=now,
                 failure_reason=failure_reason,
                 pause_reason=pause_reason,
+                diagnostic_display_ids=diagnostics_guard.display_ids,
+                diagnostics_guard_invalid=diagnostics_guard.fail_closed_all,
             )
             self._log_failure_transition(snapshot)
             self._raise_if_stopped()
-            indicator_confirmed = self._render(snapshot)
+            rendered = self._render(snapshot)
+            indicator_confirmed = rendered or snapshot.indicator_style == "off"
             self._raise_if_stopped()
             decision = ProtectionDecision(
                 snapshot,
@@ -180,9 +229,10 @@ class PrivacyProtectionMonitor:
             with self._lifecycle_lock:
                 if self._stopped:
                     raise RuntimeError("privacy protection monitor is stopped")
-                with self._state_lock:
+                with self._decision_condition:
                     self._generation = generation
                     self._decision = decision
+                    self._decision_condition.notify_all()
             logger.debug(
                 "privacy protection generation=%s state=%s style=%s displays=%s confirmed=%s",
                 generation,
@@ -191,7 +241,30 @@ class PrivacyProtectionMonitor:
                 sorted(snapshot.protected_display_ids),
                 indicator_confirmed,
             )
-            return decision
+        self._notify_decision_listeners(decision)
+        return decision
+
+    def _read_diagnostics_guard(self) -> DiagnosticsGuardSnapshot:
+        if self._diagnostics_guard_reader is None:
+            return DiagnosticsGuardSnapshot(frozenset(), False)
+        try:
+            snapshot = self._diagnostics_guard_reader()
+        except Exception as exc:
+            logger.warning("privacy diagnostics guard read failed: %s", type(exc).__name__)
+            return DiagnosticsGuardSnapshot(frozenset(), True)
+        if not isinstance(snapshot, DiagnosticsGuardSnapshot):
+            logger.warning("privacy diagnostics guard read failed: invalid_snapshot")
+            return DiagnosticsGuardSnapshot(frozenset(), True)
+        return snapshot
+
+    def _notify_decision_listeners(self, decision: ProtectionDecision) -> None:
+        with self._listeners_lock:
+            listeners = tuple(self._decision_listeners)
+        for listener in listeners:
+            try:
+                listener(decision)
+            except Exception as exc:
+                logger.warning("privacy protection listener failed: %s", type(exc).__name__)
 
     def _reload_indicator_style(self) -> None:
         try:
@@ -273,11 +346,19 @@ class PrivacyProtectionMonitor:
             return False
 
     def _log_failure_transition(self, snapshot: ProtectionSnapshot) -> None:
+        if snapshot.diagnostics_guard_invalid:
+            key = ("diagnostics_guard_invalid", True)
+            if key != self._last_logged_failure:
+                self._last_logged_failure = key
+                logger.warning(
+                    "privacy protection failed closed: reason=diagnostics_guard_invalid"
+                )
+            return
         if snapshot.state is not ProtectionState.FAILED or snapshot.failure_reason is None:
             self._last_logged_failure = None
             return
         requires_fail_closed = failure_requires_fail_closed(self._cfg, snapshot)
-        key = (snapshot.failure_reason, requires_fail_closed)
+        key = (snapshot.failure_reason.value, requires_fail_closed)
         if key == self._last_logged_failure:
             return
         self._last_logged_failure = key

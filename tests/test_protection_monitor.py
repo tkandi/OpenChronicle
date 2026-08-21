@@ -17,8 +17,12 @@ from openchronicle.capture.privacy import (
     VisibleWindow,
     WindowInventory,
 )
+from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsGuardSnapshot
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
-from openchronicle.capture.protection_monitor import PrivacyProtectionMonitor
+from openchronicle.capture.protection_monitor import (
+    PrivacyProtectionMonitor,
+    ProtectionDecision,
+)
 from openchronicle.capture.protection_reason import ProtectionReasonCode
 from openchronicle.capture_pause import CapturePauseDecision, CapturePauseKind
 from openchronicle.config import CaptureConfig
@@ -58,6 +62,20 @@ class FakeOverlay:
         self.closed.set()
 
 
+class MutableGuard:
+    def __init__(
+        self,
+        *,
+        display_ids: frozenset[int] = frozenset(),
+        fail_closed_all: bool = False,
+    ) -> None:
+        self.display_ids = display_ids
+        self.fail_closed_all = fail_closed_all
+
+    def snapshot(self) -> DiagnosticsGuardSnapshot:
+        return DiagnosticsGuardSnapshot(self.display_ids, self.fail_closed_all)
+
+
 @pytest.fixture
 def inventory() -> WindowInventory:
     displays = (
@@ -84,6 +102,8 @@ def make_monitor(
     inventory_reader: Callable[[], WindowInventory | None] | None = None,
     pause_reader: Callable[[], bool] | None = None,
     watchdog_seconds: float = 0.01,
+    diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
+    decision_listener: Callable[[ProtectionDecision], None] | None = None,
 ) -> PrivacyProtectionMonitor:
     cfg = CaptureConfig(
         screenshot_monitor="separate",
@@ -97,6 +117,8 @@ def make_monitor(
         inventory_reader=inventory_reader or (lambda: inventory),
         pause_reader=pause_reader or (lambda: False),
         watchdog_seconds=watchdog_seconds,
+        diagnostics_guard_reader=diagnostics_guard_reader,
+        decision_listener=decision_listener,
     )
 
 
@@ -142,6 +164,113 @@ def test_required_overlay_timeout_is_unconfirmed(inventory, fake_overlay) -> Non
 
     assert decision.snapshot.state is ProtectionState.PROTECTED
     assert decision.indicator_confirmed is False
+
+
+def test_diagnostics_guard_is_published_and_waitable(inventory, fake_overlay) -> None:
+    guard = MutableGuard(display_ids=frozenset({1}))
+    published: list[ProtectionDecision] = []
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        diagnostics_guard_reader=guard.snapshot,
+        decision_listener=published.append,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert 1 in decision.snapshot.protected_display_ids
+    assert decision.snapshot.reasons_for_display(1)[0].code.value == "diagnostics_reveal"
+    assert monitor.wait_for_display_protection(
+        1,
+        after_generation=0,
+        timeout=0.1,
+    ) == decision.snapshot.generation
+    assert published == [decision]
+
+
+def test_wait_rejects_stale_or_unconfirmed_display_generation(
+    inventory,
+    fake_overlay,
+) -> None:
+    guard = MutableGuard(display_ids=frozenset({1}))
+    fake_overlay.render_result = False
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        diagnostics_guard_reader=guard.snapshot,
+    )
+    decision = monitor.decision_for_capture(force=True)
+
+    assert monitor.wait_for_display_protection(
+        1,
+        after_generation=0,
+        timeout=0.01,
+    ) is None
+    fake_overlay.render_result = True
+    confirmed = monitor.decision_for_capture(force=True)
+    assert monitor.wait_for_display_protection(
+        1,
+        after_generation=confirmed.snapshot.generation,
+        timeout=0.01,
+    ) is None
+    assert confirmed.snapshot.generation > decision.snapshot.generation
+
+
+def test_invalid_or_unreadable_diagnostics_guard_fails_closed(
+    inventory,
+    fake_overlay,
+) -> None:
+    marker = "private-guard-reader-detail"
+
+    def fail_guard_read() -> DiagnosticsGuardSnapshot:
+        raise OSError(marker)
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        diagnostics_guard_reader=fail_guard_read,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert decision.snapshot.protected_display_ids == frozenset({1, 2})
+    assert decision.snapshot.diagnostics_guard_invalid is True
+    assert marker not in " ".join(reason.code.value for reason in decision.snapshot.display_reasons.reasons)
+
+
+def test_listener_exception_is_sanitized_and_does_not_stop_monitor(
+    inventory,
+    fake_overlay,
+) -> None:
+    marker = "private-listener-body"
+
+    def broken_listener(_decision: ProtectionDecision) -> None:
+        raise RuntimeError(marker)
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=broken_listener,
+    )
+
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    capture_logger.addHandler(handler)
+    try:
+        first = monitor.decision_for_capture(force=True)
+        second = monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+
+    assert second.snapshot.generation > first.snapshot.generation
+    assert messages == [
+        "privacy protection listener failed: RuntimeError",
+        "privacy protection listener failed: RuntimeError",
+    ]
+    assert marker not in "\n".join(messages)
 
 
 def test_style_hot_reload_changes_only_indicator_style(tmp_path, inventory, fake_overlay) -> None:

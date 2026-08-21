@@ -148,6 +148,29 @@ def test_diagnostic_display_reason_is_composed_with_direct_rule() -> None:
     ]
 
 
+def test_invalid_diagnostics_guard_forces_global_fail_closed_protection() -> None:
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        screenshot_privacy_fail_closed=False,
+    )
+    snapshot = build_protection_snapshot(
+        cfg,
+        WindowInventory(windows=(), displays=(LEFT, RIGHT)),
+        paused=False,
+        generation=42,
+        now=2.0,
+        diagnostics_guard_invalid=True,
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.diagnostics_guard_invalid is True
+    assert failure_requires_fail_closed(cfg, snapshot) is True
+    assert [reason.code for reason in snapshot.reasons_for_display(1)] == [
+        ProtectionReasonCode.DIAGNOSTICS_GUARD_INVALID
+    ]
+
+
 def test_paused_snapshot_blocks_ax_without_inventory() -> None:
     snapshot = build_protection_snapshot(
         CaptureConfig(),
