@@ -50,8 +50,8 @@ def test_sensitive_window_regions_propagates_enumeration_failure(monkeypatch) ->
 def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) -> None:
     monkeypatch.setattr(
         privacy,
-        "_run_window_list_helper",
-        lambda: {
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult({
             "windows": [
                 {
                     "app_name": "Cursor",
@@ -74,7 +74,7 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
                     "is_primary": False,
                 }
             ],
-        },
+        }, None),
     )
 
     inventory = privacy.read_window_inventory()
@@ -87,7 +87,11 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
 
 
 def test_read_window_inventory_rejects_empty_displays(monkeypatch) -> None:
-    monkeypatch.setattr(privacy, "_run_window_list_helper", lambda: {"windows": [], "displays": []})
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult({"windows": [], "displays": []}, None),
+    )
 
     assert privacy.read_window_inventory() is None
 
@@ -95,24 +99,92 @@ def test_read_window_inventory_rejects_empty_displays(monkeypatch) -> None:
 def test_read_window_inventory_rejects_invalid_display_bounds(monkeypatch) -> None:
     monkeypatch.setattr(
         privacy,
-        "_run_window_list_helper",
-        lambda: {
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult({
             "windows": [],
             "displays": [
                 {"id": 1, "left": 0, "top": 0, "width": 0, "height": 100, "is_primary": True}
             ],
-        },
+        }, None),
     )
 
     assert privacy.read_window_inventory() is None
+
+
+def test_inventory_read_result_uses_fixed_reason_codes_without_private_markers(
+    monkeypatch, caplog
+) -> None:
+    marker = "private-inventory-marker"
+    cases = [
+        (
+            "inventory_unavailable",
+            lambda: monkeypatch.setattr(privacy, "_resolve_window_list_path", lambda: None),
+        ),
+        (
+            "helper_exit",
+            lambda: (
+                monkeypatch.setattr(privacy, "_resolve_window_list_path", lambda: Path("/helper")),
+                monkeypatch.setattr(
+                    privacy.subprocess,
+                    "run",
+                    lambda *_args, **_kwargs: SimpleNamespace(returncode=7, stdout="", stderr=marker),
+                ),
+            ),
+        ),
+        (
+            "helper_parse",
+            lambda: (
+                monkeypatch.setattr(privacy, "_resolve_window_list_path", lambda: Path("/helper")),
+                monkeypatch.setattr(
+                    privacy.subprocess,
+                    "run",
+                    lambda *_args, **_kwargs: SimpleNamespace(
+                        returncode=0, stdout="{\"windows\": [\"" + marker, stderr=""
+                    ),
+                ),
+            ),
+        ),
+    ]
+
+    for expected, configure in cases:
+        monkeypatch.undo()
+        configure()
+        with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+            result = privacy.read_window_inventory_result()
+        assert result.inventory is None
+        assert result.failure_reason is not None
+        assert result.failure_reason.value == expected
+        assert marker not in caplog.text
+
+
+def test_inventory_read_result_classifies_empty_displays_and_multiple_active(monkeypatch) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult({"windows": [], "displays": []}, None),
+    )
+    assert privacy.read_window_inventory_result().failure_reason.value == "empty_displays"
+
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult({
+            "windows": [
+                {"left": 0, "top": 0, "width": 10, "height": 10, "is_active": True},
+                {"left": 10, "top": 0, "width": 10, "height": 10, "is_active": True},
+            ],
+            "displays": [{"id": 1, "left": 0, "top": 0, "width": 100, "height": 100}],
+        }, None),
+    )
+    assert privacy.read_window_inventory_result().failure_reason.value == "multiple_active_windows"
 
 
 def test_read_window_inventory_does_not_log_parser_private_marker(monkeypatch, caplog) -> None:
     marker = "private-marker"
     monkeypatch.setattr(
         privacy,
-        "_run_window_list_helper",
-        lambda: {
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult({
             "windows": [],
             "displays": [
                 {
@@ -124,7 +196,7 @@ def test_read_window_inventory_does_not_log_parser_private_marker(monkeypatch, c
                     "is_primary": True,
                 }
             ],
-        },
+        }, None),
     )
 
     with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):

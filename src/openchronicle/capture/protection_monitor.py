@@ -12,7 +12,12 @@ from .. import config
 from ..capture_pause import capture_is_paused
 from ..config import CaptureConfig
 from ..logger import get
-from .privacy import WindowInventory, read_window_inventory
+from .privacy import (
+    InventoryReadResult,
+    ProtectionFailureReason,
+    WindowInventory,
+    read_window_inventory_result,
+)
 from .privacy_overlay import PrivacyOverlayClient
 from .protection import ProtectionSnapshot, ProtectionState, build_protection_snapshot
 
@@ -34,7 +39,7 @@ class PrivacyProtectionMonitor:
         *,
         config_path: Path,
         overlay: PrivacyOverlayClient,
-        inventory_reader: Callable[[], WindowInventory | None] = read_window_inventory,
+        inventory_reader: Callable[[], WindowInventory | InventoryReadResult | None] = read_window_inventory_result,
         pause_reader: Callable[[], bool] = capture_is_paused,
         watchdog_seconds: float = 1.0,
         before_overlay_call: Callable[[], None] | None = None,
@@ -119,7 +124,7 @@ class PrivacyProtectionMonitor:
             self._raise_if_stopped()
 
             self._reload_indicator_style()
-            paused, inventory = self._read_protection_inputs()
+            paused, inventory, failure_reason = self._read_protection_inputs()
             self._raise_if_stopped()
             now = time.monotonic()
             generation = self._generation + 1
@@ -129,7 +134,13 @@ class PrivacyProtectionMonitor:
                 paused=paused,
                 generation=generation,
                 now=now,
+                failure_reason=failure_reason,
             )
+            if snapshot.state is ProtectionState.FAILED:
+                logger.warning(
+                    "privacy protection failed closed: reason=%s",
+                    snapshot.failure_reason.value,
+                )
             self._raise_if_stopped()
             indicator_confirmed = self._render(snapshot)
             self._raise_if_stopped()
@@ -163,17 +174,25 @@ class PrivacyProtectionMonitor:
             self._indicator_style = indicator_style
             self._config_mtime_ns = mtime_ns
 
-    def _read_protection_inputs(self) -> tuple[bool, WindowInventory | None]:
+    def _read_protection_inputs(
+        self,
+    ) -> tuple[bool, WindowInventory | None, ProtectionFailureReason | None]:
         try:
             paused = self._pause_reader()
         except Exception as exc:  # A pause-read failure must not allow capture.
             logger.warning("privacy protection pause read failed: %s", type(exc).__name__)
-            return False, None
+            return False, None, ProtectionFailureReason.INVENTORY_UNAVAILABLE
         try:
-            return paused, self._inventory_reader()
-        except Exception as exc:  # Inventory metadata must never be written to logs.
-            logger.warning("privacy protection inventory read failed: %s", type(exc).__name__)
-            return paused, None
+            result = self._inventory_reader()
+        except Exception:  # Inventory metadata and exception text must never be logged.
+            return paused, None, ProtectionFailureReason.INVENTORY_UNAVAILABLE
+        if isinstance(result, InventoryReadResult):
+            return paused, result.inventory, result.failure_reason
+        return (
+            paused,
+            result,
+            ProtectionFailureReason.INVENTORY_UNAVAILABLE if result is None else None,
+        )
 
     def _render(self, snapshot: ProtectionSnapshot) -> bool:
         with self._lifecycle_lock:

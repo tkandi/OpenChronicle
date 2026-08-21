@@ -7,15 +7,16 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CORE="${SCRIPT_DIR}/mac-window-list-core.swift"
 SRC="${SCRIPT_DIR}/mac-window-list.swift"
 OUT="${SCRIPT_DIR}/mac-window-list"
 
-if [[ ! -f "${SRC}" ]]; then
-  echo "[mac-window-list] Source not found: ${SRC}" >&2
+if [[ ! -f "${CORE}" || ! -f "${SRC}" ]]; then
+  echo "[mac-window-list] Source not found." >&2
   exit 1
 fi
 
-if [[ -f "${OUT}" && "${OUT}" -nt "${SRC}" ]]; then
+if [[ -f "${OUT}" && "${OUT}" -nt "${CORE}" && "${OUT}" -nt "${SRC}" ]]; then
   echo "[mac-window-list] Binary is up to date, skipping compile."
   exit 0
 fi
@@ -32,7 +33,7 @@ mkdir -p "${CACHE_DIR}"
 
 echo "[mac-window-list] Compiling ${SRC} -> ${OUT}"
 if ! CLANG_MODULE_CACHE_PATH="${CACHE_DIR}" swiftc \
-     "${SRC}" -o "${OUT}" -O -target "${TARGET}" -swift-version 5; then
+     "${CORE}" "${SRC}" -o "${OUT}" -O -target "${TARGET}" -swift-version 5; then
   echo "[mac-window-list] swiftc failed." >&2
   echo "[mac-window-list] Install Xcode Command Line Tools: xcode-select --install" >&2
   exit 1

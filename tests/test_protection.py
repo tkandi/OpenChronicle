@@ -4,7 +4,11 @@ from openchronicle.capture.privacy import (
     VisibleWindow,
     WindowInventory,
 )
-from openchronicle.capture.protection import ProtectionState, build_protection_snapshot
+from openchronicle.capture.protection import (
+    ProtectionFailureReason,
+    ProtectionState,
+    build_protection_snapshot,
+)
 from openchronicle.config import CaptureConfig
 
 LEFT = DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True)
@@ -90,3 +94,29 @@ def test_multiple_active_windows_fail_closed() -> None:
 
     assert snapshot.state is ProtectionState.FAILED
     assert snapshot.ax_blocked is True
+
+
+def test_snapshot_classifies_non_inventory_failure_reasons() -> None:
+    duplicate_displays = WindowInventory(
+        windows=(),
+        displays=(LEFT, DisplayInfo(1, ScreenRegion(100, 0, 100, 100), False)),
+    )
+    active_unmapped = WindowInventory(
+        windows=(VisibleWindow("App", "app", "private-active", ScreenRegion(500, 0, 10, 10), True),),
+        displays=(LEFT,),
+    )
+    sensitive_unmapped = WindowInventory(
+        windows=(VisibleWindow("App", "app", "InPrivate", ScreenRegion(500, 0, 10, 10), False),),
+        displays=(LEFT,),
+    )
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+
+    assert build_protection_snapshot(
+        cfg, duplicate_displays, paused=False, generation=11, now=14.0
+    ).failure_reason is ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
+    assert build_protection_snapshot(
+        cfg, active_unmapped, paused=False, generation=12, now=15.0
+    ).failure_reason is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+    assert build_protection_snapshot(
+        cfg, sensitive_unmapped, paused=False, generation=13, now=16.0
+    ).failure_reason is ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED

@@ -9,6 +9,7 @@ import platform
 import re
 import subprocess
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,29 @@ class VisibleWindow:
 class WindowInventory:
     windows: tuple[VisibleWindow, ...]
     displays: tuple[DisplayInfo, ...]
+
+
+class ProtectionFailureReason(StrEnum):
+    INVENTORY_UNAVAILABLE = "inventory_unavailable"
+    HELPER_EXIT = "helper_exit"
+    HELPER_PARSE = "helper_parse"
+    EMPTY_DISPLAYS = "empty_displays"
+    MULTIPLE_ACTIVE_WINDOWS = "multiple_active_windows"
+    INVALID_DISPLAY_INVENTORY = "invalid_display_inventory"
+    ACTIVE_WINDOW_UNMAPPED = "active_window_unmapped"
+    SENSITIVE_WINDOW_UNMAPPED = "sensitive_window_unmapped"
+
+
+@dataclass(frozen=True)
+class WindowListReadResult:
+    raw: dict[str, Any] | None
+    failure_reason: ProtectionFailureReason | None
+
+
+@dataclass(frozen=True)
+class InventoryReadResult:
+    inventory: WindowInventory | None
+    failure_reason: ProtectionFailureReason | None
 
 
 def exact_match(value: str | None, patterns: list[str]) -> bool:
@@ -147,11 +171,10 @@ def sensitive_window_regions(cfg: CaptureConfig) -> list[ScreenRegion] | None:
     return [region for region, _ in matches]
 
 
-def _run_window_list_helper() -> dict[str, Any] | None:
+def _read_window_list_helper() -> WindowListReadResult:
     helper = _resolve_window_list_path()
     if helper is None:
-        logger.warning("screenshot privacy helper unavailable")
-        return None
+        return WindowListReadResult(None, ProtectionFailureReason.INVENTORY_UNAVAILABLE)
 
     try:
         proc = subprocess.run(
@@ -160,38 +183,48 @@ def _run_window_list_helper() -> dict[str, Any] | None:
             text=True,
             timeout=_WINDOW_LIST_TIMEOUT,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("visible-window enumeration failed: %s", exc)
-        return None
+    except (OSError, subprocess.TimeoutExpired):
+        return WindowListReadResult(None, ProtectionFailureReason.INVENTORY_UNAVAILABLE)
     if proc.returncode != 0:
-        logger.warning("visible-window helper exited %d", proc.returncode)
-        return None
+        return WindowListReadResult(None, ProtectionFailureReason.HELPER_EXIT)
 
     try:
         raw = json.loads(proc.stdout)
         if not isinstance(raw, dict):
             raise TypeError("helper output is not an object")
-        return raw
+        return WindowListReadResult(raw, None)
     except (json.JSONDecodeError, TypeError):
-        logger.warning("invalid visible-window helper output")
-        return None
+        return WindowListReadResult(None, ProtectionFailureReason.HELPER_PARSE)
+
+
+def _run_window_list_helper() -> dict[str, Any] | None:
+    """Legacy raw helper view for callers that do not need a failure code."""
+    return _read_window_list_helper().raw
+
+
+def read_window_inventory_result() -> InventoryReadResult:
+    helper_result = _read_window_list_helper()
+    if helper_result.raw is None:
+        return InventoryReadResult(None, helper_result.failure_reason)
+
+    raw = helper_result.raw
+    try:
+        windows = tuple(_parse_visible_window(row) for row in raw["windows"])
+    except (KeyError, TypeError, ValueError):
+        return InventoryReadResult(None, ProtectionFailureReason.HELPER_PARSE)
+    try:
+        displays = tuple(_parse_display(row) for row in raw["displays"])
+    except (KeyError, TypeError, ValueError):
+        return InventoryReadResult(None, ProtectionFailureReason.INVALID_DISPLAY_INVENTORY)
+    if not displays:
+        return InventoryReadResult(None, ProtectionFailureReason.EMPTY_DISPLAYS)
+    if sum(window.is_active for window in windows) > 1:
+        return InventoryReadResult(None, ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS)
+    return InventoryReadResult(WindowInventory(windows=windows, displays=displays), None)
 
 
 def read_window_inventory() -> WindowInventory | None:
-    raw = _run_window_list_helper()
-    if raw is None:
-        return None
-    try:
-        windows = tuple(_parse_visible_window(row) for row in raw["windows"])
-        displays = tuple(_parse_display(row) for row in raw["displays"])
-        if not displays:
-            raise ValueError("display list is empty")
-        if sum(window.is_active for window in windows) > 1:
-            raise ValueError("multiple active windows")
-    except (KeyError, TypeError, ValueError):
-        logger.warning("invalid visible-window helper output")
-        return None
-    return WindowInventory(windows=windows, displays=displays)
+    return read_window_inventory_result().inventory
 
 
 def list_visible_windows() -> list[VisibleWindow] | None:
@@ -242,9 +275,14 @@ def _parse_display(row: Any) -> DisplayInfo:
 
 
 def _maybe_compile(swift_path: Path, binary_path: Path) -> None:
-    if not swift_path.is_file():
+    core_path = swift_path.with_name("mac-window-list-core.swift")
+    if not swift_path.is_file() or not core_path.is_file():
         return
-    if binary_path.is_file() and binary_path.stat().st_mtime >= swift_path.stat().st_mtime:
+    if (
+        binary_path.is_file()
+        and binary_path.stat().st_mtime >= swift_path.stat().st_mtime
+        and binary_path.stat().st_mtime >= core_path.stat().st_mtime
+    ):
         return
 
     cache = Path("/tmp/clang-module-cache")
@@ -257,6 +295,7 @@ def _maybe_compile(swift_path: Path, binary_path: Path) -> None:
         result = subprocess.run(
             [
                 "swiftc",
+                str(core_path),
                 str(swift_path),
                 "-o",
                 str(binary_path),

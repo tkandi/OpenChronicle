@@ -24,3 +24,9 @@ def test_privacy_overlay_sources_are_declared_for_wheel() -> None:
     assert 'resources/mac-privacy-overlay-core.swift' in pyproject
     assert 'resources/mac-privacy-overlay.swift' in pyproject
     assert 'resources/build-mac-privacy-overlay.sh' in pyproject
+
+
+def test_window_list_core_source_is_declared_for_wheel() -> None:
+    pyproject = Path("pyproject.toml").read_text()
+
+    assert 'resources/mac-window-list-core.swift' in pyproject

@@ -64,7 +64,8 @@ func axWindowRecords(
     pid: pid_t,
     appName: String,
     bundleID: String,
-    frontmostPID: pid_t?
+    frontmostPID: pid_t?,
+    onScreenBounds: [WindowBounds]
 ) -> [WindowRecord] {
     let app = AXUIElementCreateApplication(pid)
     guard
@@ -78,13 +79,20 @@ func axWindowRecords(
     for window in axWindows {
         if axBool(window, kAXMinimizedAttribute as String) == true { continue }
         guard
-            let title = axString(window, kAXTitleAttribute as String),
-            !title.isEmpty,
             let position = axPoint(window, kAXPositionAttribute as String),
             let size = axSize(window, kAXSizeAttribute as String),
             size.width > 0,
             size.height > 0
         else { continue }
+
+        let bounds = WindowBounds(
+            left: position.x,
+            top: position.y,
+            width: size.width,
+            height: size.height
+        )
+        guard shouldIncludeAXFallback(bounds, onScreenBounds: onScreenBounds) else { continue }
+        guard let title = axString(window, kAXTitleAttribute as String), !title.isEmpty else { continue }
 
         records.append(WindowRecord(
             app_name: appName,
@@ -100,95 +108,107 @@ func axWindowRecords(
     return records
 }
 
-if #available(macOS 10.15, *), !CGPreflightScreenCaptureAccess() {
-    fputs("Screen Recording permission is not granted\n", stderr)
-    exit(2)
-}
+@main
+enum MacWindowList {
+    static func main() {
+        if #available(macOS 10.15, *), !CGPreflightScreenCaptureAccess() {
+            fputs("Screen Recording permission is not granted\n", stderr)
+            exit(2)
+        }
 
-guard let windowInfo = CGWindowListCopyWindowInfo(
-    [.optionOnScreenOnly, .excludeDesktopElements],
-    kCGNullWindowID
-) as? [[String: Any]] else {
-    fputs("Could not enumerate visible windows\n", stderr)
-    exit(1)
-}
+        guard let windowInfo = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements],
+            kCGNullWindowID
+        ) as? [[String: Any]] else {
+            fputs("Could not enumerate visible windows\n", stderr)
+            exit(1)
+        }
 
-var windows: [WindowRecord] = []
-var visibleApps: [pid_t: (name: String, bundleID: String)] = [:]
-let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
-for info in windowInfo {
-    let alpha = info[kCGWindowAlpha as String] as? Double ?? 0
-    guard alpha > 0 else { continue }
+        var windows: [WindowRecord] = []
+        var visibleApps: [pid_t: (name: String, bundleID: String, bounds: [WindowBounds])] = [:]
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        for info in windowInfo {
+            let alpha = info[kCGWindowAlpha as String] as? Double ?? 0
+            guard alpha > 0 else { continue }
 
-    guard
-        let bounds = info[kCGWindowBounds as String] as? [String: Any],
-        let left = (bounds["X"] as? NSNumber)?.doubleValue,
-        let top = (bounds["Y"] as? NSNumber)?.doubleValue,
-        let width = (bounds["Width"] as? NSNumber)?.doubleValue,
-        let height = (bounds["Height"] as? NSNumber)?.doubleValue,
-        width > 0,
-        height > 0
-    else { continue }
+            guard
+                let bounds = info[kCGWindowBounds as String] as? [String: Any],
+                let left = (bounds["X"] as? NSNumber)?.doubleValue,
+                let top = (bounds["Y"] as? NSNumber)?.doubleValue,
+                let width = (bounds["Width"] as? NSNumber)?.doubleValue,
+                let height = (bounds["Height"] as? NSNumber)?.doubleValue,
+                width > 0,
+                height > 0
+            else { continue }
 
-    let pid = info[kCGWindowOwnerPID as String] as? pid_t ?? 0
-    let app = pid > 0 ? NSRunningApplication(processIdentifier: pid) : nil
-    let appName = info[kCGWindowOwnerName as String] as? String ?? ""
-    let bundleID = app?.bundleIdentifier ?? ""
-    if pid > 0 {
-        visibleApps[pid] = (name: appName, bundleID: bundleID)
+            let pid = info[kCGWindowOwnerPID as String] as? pid_t ?? 0
+            let app = pid > 0 ? NSRunningApplication(processIdentifier: pid) : nil
+            let appName = info[kCGWindowOwnerName as String] as? String ?? ""
+            let bundleID = app?.bundleIdentifier ?? ""
+            if pid > 0 {
+                let bounds = WindowBounds(left: left, top: top, width: width, height: height)
+                if var existing = visibleApps[pid] {
+                    existing.bounds.append(bounds)
+                    visibleApps[pid] = existing
+                } else {
+                    visibleApps[pid] = (name: appName, bundleID: bundleID, bounds: [bounds])
+                }
+            }
+            windows.append(WindowRecord(
+                app_name: appName,
+                bundle_id: bundleID,
+                title: info[kCGWindowName as String] as? String ?? "",
+                left: left,
+                top: top,
+                width: width,
+                height: height,
+                is_active: false
+            ))
+        }
+
+        // CGWindowName can be empty for background browser windows even with Screen Recording
+        // permission. Query only AX window metadata as a fallback; never traverse window contents.
+        for (pid, metadata) in visibleApps {
+            windows.append(contentsOf: axWindowRecords(
+                pid: pid,
+                appName: metadata.name,
+                bundleID: metadata.bundleID,
+                frontmostPID: frontmostPID,
+                onScreenBounds: metadata.bounds
+            ))
+        }
+
+        var displayCount: UInt32 = 0
+        guard CGGetActiveDisplayList(0, nil, &displayCount) == .success else {
+            fputs("Could not enumerate active displays\n", stderr)
+            exit(1)
+        }
+        var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+        guard CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount) == .success else {
+            fputs("Could not enumerate active displays\n", stderr)
+            exit(1)
+        }
+        let displays = displayIDs.prefix(Int(displayCount)).map { displayID in
+            let bounds = CGDisplayBounds(displayID)
+            return DisplayRecord(
+                id: displayID,
+                left: bounds.origin.x,
+                top: bounds.origin.y,
+                width: bounds.width,
+                height: bounds.height,
+                is_primary: CGDisplayIsMain(displayID) != 0
+            )
+        }
+
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(Output(windows: windows, displays: displays))
+            FileHandle.standardOutput.write(data)
+            FileHandle.standardOutput.write(Data("\n".utf8))
+        } catch {
+            fputs("Could not encode window metadata: \(error)\n", stderr)
+            exit(1)
+        }
     }
-    windows.append(WindowRecord(
-        app_name: appName,
-        bundle_id: bundleID,
-        title: info[kCGWindowName as String] as? String ?? "",
-        left: left,
-        top: top,
-        width: width,
-        height: height,
-        is_active: false
-    ))
-}
-
-// CGWindowName can be empty for background browser windows even with Screen Recording
-// permission. Query only AX window metadata as a fallback; never traverse window contents.
-for (pid, metadata) in visibleApps {
-    windows.append(contentsOf: axWindowRecords(
-        pid: pid,
-        appName: metadata.name,
-        bundleID: metadata.bundleID,
-        frontmostPID: frontmostPID
-    ))
-}
-
-var displayCount: UInt32 = 0
-guard CGGetActiveDisplayList(0, nil, &displayCount) == .success else {
-    fputs("Could not enumerate active displays\n", stderr)
-    exit(1)
-}
-var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-guard CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount) == .success else {
-    fputs("Could not enumerate active displays\n", stderr)
-    exit(1)
-}
-let displays = displayIDs.prefix(Int(displayCount)).map { displayID in
-    let bounds = CGDisplayBounds(displayID)
-    return DisplayRecord(
-        id: displayID,
-        left: bounds.origin.x,
-        top: bounds.origin.y,
-        width: bounds.width,
-        height: bounds.height,
-        is_primary: CGDisplayIsMain(displayID) != 0
-    )
-}
-
-do {
-    let encoder = JSONEncoder()
-    encoder.outputFormatting = [.sortedKeys]
-    let data = try encoder.encode(Output(windows: windows, displays: displays))
-    FileHandle.standardOutput.write(data)
-    FileHandle.standardOutput.write(Data("\n".utf8))
-} catch {
-    fputs("Could not encode window metadata: \(error)\n", stderr)
-    exit(1)
 }

@@ -68,7 +68,6 @@ def _build_capture(
     if protection_monitor is not None:
         decision = protection_monitor.decision_for_capture(force=True)
         if decision.snapshot.state is ProtectionState.FAILED:
-            logger.warning("capture skipped: privacy protection failed closed")
             return None
 
     reason = privacy.capture_denylist_reason(cfg, out)
@@ -92,7 +91,6 @@ def _build_capture(
     if decision is not None:
         latest = protection_monitor.decision_for_capture(force=False)
         if latest.snapshot.state is ProtectionState.FAILED:
-            logger.warning("capture skipped: privacy protection failed closed")
             return None
         if (
             latest.snapshot.generation != decision.snapshot.generation

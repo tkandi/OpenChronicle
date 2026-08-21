@@ -8,7 +8,13 @@ from enum import StrEnum
 
 from ..config import CaptureConfig
 from . import privacy
-from .privacy import DisplayInfo, ScreenRegion, VisibleWindow, WindowInventory
+from .privacy import (
+    DisplayInfo,
+    ProtectionFailureReason,
+    ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
+)
 
 SNAPSHOT_FRESH_SECONDS = 0.25
 
@@ -31,6 +37,7 @@ class ProtectionSnapshot:
     active_display_id: int | None
     created_monotonic: float
     fresh_until: float
+    failure_reason: ProtectionFailureReason | None = None
 
     @property
     def protected_regions(self) -> list[ScreenRegion]:
@@ -101,6 +108,7 @@ def build_protection_snapshot(
     paused: bool,
     generation: int,
     now: float,
+    failure_reason: ProtectionFailureReason | None = None,
 ) -> ProtectionSnapshot:
     displays = inventory.displays if inventory is not None else ()
     all_ids = frozenset(display.id for display in displays)
@@ -120,16 +128,25 @@ def build_protection_snapshot(
         not any(_regions_intersect(display.region, region) for display in displays)
         for region in sensitive_regions
     )
-    mapping_failed = (
-        len(active_windows) > 1
-        or (active_window is not None and active_display_id is None)
-        or has_unmapped_sensitive_window
-    )
+    derived_failure_reason = failure_reason
+    if derived_failure_reason is None:
+        if inventory is None:
+            derived_failure_reason = ProtectionFailureReason.INVENTORY_UNAVAILABLE
+        elif not displays:
+            derived_failure_reason = ProtectionFailureReason.EMPTY_DISPLAYS
+        elif not _displays_are_usable(displays):
+            derived_failure_reason = ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
+        elif len(active_windows) > 1:
+            derived_failure_reason = ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS
+        elif active_window is not None and active_display_id is None:
+            derived_failure_reason = ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+        elif has_unmapped_sensitive_window:
+            derived_failure_reason = ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED
 
     if paused:
         state = ProtectionState.PAUSED
         protected_ids = all_ids
-    elif inventory is None or not _displays_are_usable(displays) or mapping_failed:
+    elif derived_failure_reason is not None:
         state = ProtectionState.FAILED
         protected_ids = frozenset()
     else:
@@ -151,4 +168,5 @@ def build_protection_snapshot(
         active_display_id=active_display_id,
         created_monotonic=now,
         fresh_until=now + SNAPSHOT_FRESH_SECONDS,
+        failure_reason=None if paused else derived_failure_reason,
     )

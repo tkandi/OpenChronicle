@@ -52,6 +52,7 @@ packages = ["src/openchronicle"]
 "resources/mac-ax-watcher.swift" = "openchronicle/_bundled/mac-ax-watcher.swift"
 "resources/build-mac-ax-watcher.sh" = "openchronicle/_bundled/build-mac-ax-watcher.sh"
 "resources/mac-window-list.swift" = "openchronicle/_bundled/mac-window-list.swift"
+"resources/mac-window-list-core.swift" = "openchronicle/_bundled/mac-window-list-core.swift"
 "resources/build-mac-window-list.sh" = "openchronicle/_bundled/build-mac-window-list.sh"
 "resources/mac-privacy-overlay-core.swift" = "openchronicle/_bundled/mac-privacy-overlay-core.swift"
 "resources/mac-privacy-overlay.swift" = "openchronicle/_bundled/mac-privacy-overlay.swift"

@@ -9,7 +9,14 @@ from pathlib import Path
 
 import pytest
 
-from openchronicle.capture.privacy import DisplayInfo, ScreenRegion, VisibleWindow, WindowInventory
+from openchronicle.capture.privacy import (
+    DisplayInfo,
+    InventoryReadResult,
+    ProtectionFailureReason,
+    ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
+)
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_monitor import PrivacyProtectionMonitor
 from openchronicle.config import CaptureConfig
@@ -206,6 +213,33 @@ def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory,
     assert decision.indicator_confirmed is True
     assert fake_overlay.snapshots[-1].state is ProtectionState.FAILED
     assert marker not in caplog.text
+
+
+def test_failed_snapshot_logs_one_fixed_reason_without_private_metadata(inventory, fake_overlay) -> None:
+    marker = "private-helper-stderr"
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        inventory_reader=lambda: InventoryReadResult(None, ProtectionFailureReason.HELPER_EXIT),
+    )
+
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
+        decision = monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
+
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert decision.snapshot.failure_reason is ProtectionFailureReason.HELPER_EXIT
+    assert messages == ["privacy protection failed closed: reason=helper_exit"]
+    assert marker not in messages
 
 
 def test_monitor_sanitizes_invalid_window_regex_logs(inventory, fake_overlay, caplog) -> None:
