@@ -303,16 +303,20 @@ def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmatio
 
 
 def test_pause_reader_failure_stays_closed_when_inventory_policy_is_fail_open(
-    inventory, fake_overlay,
+    ac_root, monkeypatch, inventory, fake_overlay,
 ) -> None:
     marker = "private-pause-marker-path"
     pause_available = False
+    pause_path = ac_root / ".paused"
     safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    original_read_bytes = Path.read_bytes
 
-    def read_pause() -> bool:
-        if not pause_available:
+    def read_pause_file(path: Path) -> bytes:
+        if path == pause_path and not pause_available:
             raise OSError(marker)
-        return False
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_pause_file)
 
     cfg = CaptureConfig(
         privacy_indicator_style="pill",
@@ -323,7 +327,6 @@ def test_pause_reader_failure_stays_closed_when_inventory_policy_is_fail_open(
         config_path=Path("/nonexistent/config.toml"),
         overlay=fake_overlay,
         inventory_reader=lambda: safe_inventory,
-        pause_reader=read_pause,
     )
 
     messages: list[str] = []

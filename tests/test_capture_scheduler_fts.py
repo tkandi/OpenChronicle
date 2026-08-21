@@ -576,9 +576,52 @@ def test_inventory_failure_is_fail_open_only_when_configured(
 def test_pause_state_failure_blocks_before_ax_even_when_inventory_is_fail_open(
     ac_root: Path, monkeypatch,
 ) -> None:
+    marker = "private-pause-marker-path"
+    pause_path = ac_root / ".paused"
+    original_read_bytes = Path.read_bytes
+
+    def read_pause_file(path: Path) -> bytes:
+        if path == pause_path:
+            raise OSError(marker)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", read_pause_file)
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
-    monitor = _FakeProtectionMonitor(
-        _failed_decision(reason=ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE)
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(windows=(), displays=displays)
+
+    class Overlay:
+        def __init__(self) -> None:
+            self.snapshots: list[ProtectionSnapshot] = []
+            self.clear_calls = 0
+
+        def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+            self.snapshots.append(snapshot)
+            return True
+
+        def clear(self, _generation: int, timeout: float = 0.5) -> bool:
+            self.clear_calls += 1
+            return True
+
+        def mark_terminal(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    cfg = CaptureConfig(
+        privacy_indicator_style="pill",
+        screenshot_privacy_fail_closed=False,
+    )
+    overlay = Overlay()
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing.toml",
+        overlay=overlay,
+        inventory_reader=lambda: inventory,
     )
     monkeypatch.setattr(
         scheduler_mod.window_meta,
@@ -591,16 +634,40 @@ def test_pause_state_failure_blocks_before_ax_even_when_inventory_is_fail_open(
         lambda **_: (_ for _ in ()).throw(AssertionError("screenshot must not run")),
     )
 
-    out = scheduler_mod._build_capture(
-        CaptureConfig(screenshot_privacy_fail_closed=False),
-        provider,
-        None,
-        protection_monitor=monitor,
-    )
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            None,
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
 
     assert out is None
     assert provider.calls == 0
-    assert monitor.force_calls == [True]
+    assert len(overlay.snapshots) == 1
+    snapshot = overlay.snapshots[0]
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+    assert overlay.clear_calls == 0
+    decision = ProtectionDecision(snapshot=snapshot, indicator_confirmed=True)
+    assert scheduler_mod._decision_is_terminal(cfg, decision)
+    assert scheduler_mod._decision_blocks_ax(cfg, decision)
+    assert messages == [
+        "privacy protection pause read failed: OSError",
+        "privacy protection failed closed: reason=pause_state_unavailable",
+    ]
+    assert marker not in "\n".join(messages)
 
 
 def test_pause_state_failure_during_ax_discards_when_inventory_is_fail_open(

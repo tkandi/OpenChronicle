@@ -81,20 +81,17 @@ def parse_pause_state(raw: bytes) -> CapturePauseState | None:
     )
 
 
-def capture_is_paused(
+def capture_is_paused_strict(
     *,
     pause_path: Path | None = None,
     now: datetime | None = None,
 ) -> bool:
-    """Return whether capture must remain paused, removing a safely expired pause."""
+    """Return whether capture is paused, propagating pause-state read failures."""
     pause_path = pause_path or paths.paused_flag()
     try:
         raw = pause_path.read_bytes()
     except FileNotFoundError:
         return False
-    except OSError as exc:
-        logger.warning("could not read capture pause state; remaining paused: %s", exc)
-        return True
 
     state = parse_pause_state(raw)
     observed_at = now or datetime.now().astimezone()
@@ -106,12 +103,35 @@ def capture_is_paused(
         # evaluating the previous contents.
         if pause_path.read_bytes() != raw:
             return True
+    except FileNotFoundError:
+        return False
+
+    try:
         pause_path.unlink()
     except FileNotFoundError:
         return False
     except OSError as exc:
-        logger.warning("could not clear expired capture pause; remaining paused: %s", exc)
+        logger.warning(
+            "could not clear expired capture pause; remaining paused: %s",
+            type(exc).__name__,
+        )
         return True
 
     logger.info("capture resumed automatically after timed privacy pause")
     return False
+
+
+def capture_is_paused(
+    *,
+    pause_path: Path | None = None,
+    now: datetime | None = None,
+) -> bool:
+    """Return pause policy for compatibility callers, failing closed on read errors."""
+    try:
+        return capture_is_paused_strict(pause_path=pause_path, now=now)
+    except OSError as exc:
+        logger.warning(
+            "capture pause state unavailable; remaining paused: %s",
+            type(exc).__name__,
+        )
+        return True

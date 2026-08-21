@@ -9,7 +9,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .. import config
-from ..capture_pause import capture_is_paused
+from ..capture_pause import capture_is_paused_strict
 from ..config import CaptureConfig
 from ..logger import get
 from .privacy import (
@@ -47,7 +47,7 @@ class PrivacyProtectionMonitor:
         config_path: Path,
         overlay: PrivacyOverlayClient,
         inventory_reader: Callable[[], WindowInventory | InventoryReadResult | None] = read_window_inventory_result,
-        pause_reader: Callable[[], bool] = capture_is_paused,
+        pause_reader: Callable[[], bool] = capture_is_paused_strict,
         watchdog_seconds: float = 1.0,
         before_overlay_call: Callable[[], None] | None = None,
     ) -> None:

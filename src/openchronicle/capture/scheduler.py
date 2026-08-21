@@ -61,7 +61,7 @@ def _build_capture(
     """Build an enriched capture dict in memory. Returns None if capturing is paused."""
     paths.ensure_dirs()
 
-    if capture_is_paused():
+    if protection_monitor is None and capture_is_paused():
         logger.info("capture skipped (paused)")
         return None
 

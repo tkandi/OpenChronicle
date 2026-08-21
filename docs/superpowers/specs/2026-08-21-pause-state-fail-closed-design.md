@@ -39,9 +39,11 @@ When the pause reader raises an exception:
 2. The monitor publishes a `failed` snapshot and requests the yellow failure indicator on
    all displays. If display inventory is unavailable, the overlay helper resolves all
    displays locally.
-3. The scheduler aborts before AX traversal. The post-AX gate applies the same rule if the
-   failure appears during an in-flight capture.
-4. No screenshot or capture JSON is written for that attempt.
+3. The pre-AX gate prevents AX traversal. If a newly unreadable pause state is first
+   discovered by post-AX validation, the scheduler discards the already-read in-memory AX
+   before screenshots, capture JSON persistence, FTS indexing, timeline, memory, or model
+   processing.
+4. No screenshot or downstream artifact is produced for that attempt.
 5. The monitor continues polling. A successful pause read automatically restores the normal
    state derived from the current window inventory.
 
@@ -53,8 +55,9 @@ patch does not broaden fail-closed behavior beyond pause-state uncertainty.
 - A monitor test proves that a pause-reader exception produces
   `pause_state_unavailable`, renders rather than clears the failed overlay, and remains
   unconfirmed until acknowledged.
-- Scheduler tests prove that the initial and post-AX gates abort under
-  `screenshot_privacy_fail_closed = false` without AX, screenshots, or persisted output.
+- Scheduler tests prove that the pre-AX gate does not call the AX provider, while the post-AX
+  gate records one provider call before discarding the already-read in-memory AX. Neither path
+  reaches screenshots, persistence, FTS, timeline, memory, or model processing.
 - Existing inventory fail-open tests remain unchanged and must continue to pass.
 - The full Python and Swift suites, package builds, installed process ownership, and a safe
   blank InPrivate multi-display check are rerun before completion.

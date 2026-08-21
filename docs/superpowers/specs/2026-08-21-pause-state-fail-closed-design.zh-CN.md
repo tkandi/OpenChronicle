@@ -35,9 +35,10 @@
    异常文本。
 2. 发布黄色 `failed` 快照并要求所有屏幕显示失败标识；没有屏幕清单时，由覆盖层 helper
    在本机解析全部屏幕。
-3. 调度器在读取 AX Tree 前终止本次捕获；如果异常发生在捕获过程中，AX 后置复核也会丢弃
-   整个结果。
-4. 本次不截图，也不写入 capture JSON。
+3. AX 前置 gate 会阻止 AX 遍历；如果暂停状态是在 AX 后置复核时才被发现为新近不可读，
+   调度器会丢弃已经读取到内存的 AX，且不会继续截图、持久化 capture JSON、写入 FTS，
+   或进入 timeline、memory 与模型处理。
+4. 本次不会产生截图或任何下游制品。
 5. 监控器继续轮询；暂停状态恢复可读后，自动依据当前窗口清单恢复正常状态。
 
 普通窗口清单失败在明确配置时仍可 fail-open。本补丁不会扩大其他错误的 fail-closed 范围。
@@ -46,8 +47,9 @@
 
 - 监控器测试证明暂停读取异常产生 `pause_state_unavailable`，并在 fail-open 配置下仍渲染
   黄色失败覆盖层而不是清除标识。
-- 调度器测试覆盖 AX 前置和 AX 后置两道检查，证明 `fail_closed = false` 时仍不读取 AX、
-  不截图、不持久化。
+- 调度器测试证明 AX 前置 gate 不调用 AX provider，而 AX 后置 gate 会先记录一次 provider
+  调用，再丢弃已经读取到内存的 AX；两条路径都不会进入截图、持久化、FTS、timeline、
+  memory 或模型处理。
 - 现有 inventory fail-open 回归测试必须继续通过。
 - 完成前重新运行完整 Python/Swift 测试、打包检查、安装后进程链检查和空白 InPrivate
   多屏黑盒测试。

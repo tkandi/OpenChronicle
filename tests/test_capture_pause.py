@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 from openchronicle.capture_pause import capture_is_paused, parse_pause_state
 
@@ -87,3 +89,32 @@ def test_effective_deadline_preserves_full_warning_minute() -> None:
 
     assert state is not None
     assert state.effective_resume_at == armed_at + timedelta(minutes=1)
+
+
+def test_capture_is_paused_fails_closed_with_sanitized_log(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    marker = "private-pause-marker-path"
+    pause_file = tmp_path / ".paused"
+
+    def fail_pause_read(_path: Path) -> bytes:
+        raise OSError(marker)
+
+    monkeypatch.setattr(Path, "read_bytes", fail_pause_read)
+
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
+        assert capture_is_paused(pause_path=pause_file)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
+
+    assert messages == ["capture pause state unavailable; remaining paused: OSError"]
+    assert marker not in "\n".join(messages)
