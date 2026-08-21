@@ -29,6 +29,19 @@ def events_dir() -> Path:
     return root() / "events"
 
 
+def runtime_dir() -> Path:
+    """Private, owner-only runtime files for local daemon/app coordination."""
+    return root() / "runtime"
+
+
+def privacy_diagnostics_socket() -> Path:
+    return runtime_dir() / "privacy-diagnostics.sock"
+
+
+def privacy_diagnostics_guard() -> Path:
+    return runtime_dir() / "privacy-reveal.guard"
+
+
 def model_failure_events_file() -> Path:
     """Append-only handoff from the backend to the native notification host."""
     return events_dir() / "model-failures.jsonl"
@@ -58,3 +71,5 @@ def writer_state() -> Path:
 def ensure_dirs() -> None:
     for d in (root(), memory_dir(), capture_buffer_dir(), logs_dir(), events_dir()):
         d.mkdir(parents=True, exist_ok=True)
+    runtime_dir().mkdir(parents=True, exist_ok=True)
+    os.chmod(runtime_dir(), 0o700)
