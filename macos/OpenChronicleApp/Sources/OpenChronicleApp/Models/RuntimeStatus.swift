@@ -45,6 +45,10 @@ struct RuntimePaths {
   var captureBuffer: URL { root.appendingPathComponent("capture-buffer", isDirectory: true) }
   var logsDirectory: URL { root.appendingPathComponent("logs", isDirectory: true) }
   var eventsDirectory: URL { root.appendingPathComponent("events", isDirectory: true) }
+  var runtimeDirectory: URL { root.appendingPathComponent("runtime", isDirectory: true) }
+  var privacyDiagnosticsSocket: URL {
+    runtimeDirectory.appendingPathComponent("privacy-diagnostics.sock")
+  }
   var captureLog: URL { logsDirectory.appendingPathComponent("capture.log") }
   var appHostLog: URL { logsDirectory.appendingPathComponent("app-host.log") }
   var modelFailureEvents: URL {
