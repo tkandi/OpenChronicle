@@ -227,6 +227,7 @@ private final class IndicatorView: NSView {
     var hasReasons: Bool { !reasons.isEmpty }
     var isReasonExpanded: Bool { revealState.isExpanded && hasReasons }
     var styleForLayout: IndicatorStyle { style }
+    var usesSeparateInputPanel: Bool { style == .border || style == .banner }
 
     func update(
         presentation: IndicatorPresentation,
@@ -283,6 +284,8 @@ private final class IndicatorView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard trigger == .click, hasReasons else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard hitTargetRect.contains(point) else { return }
         onClick?()
     }
 
@@ -497,6 +500,20 @@ private final class IndicatorView: NSView {
     }
 }
 
+private final class IndicatorInputView: NSView {
+    var onClick: (() -> Void)?
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(point) else { return }
+        onClick?()
+    }
+}
+
 typealias OverlayPointerTimerFactory = (
     _ interval: TimeInterval,
     _ tick: @escaping () -> Void
@@ -506,21 +523,27 @@ private let pointerPollInterval: TimeInterval = 0.08
 
 final class PrivacyOverlayController {
     private var panels: [UInt32: PrivacyOverlayPanel] = [:]
+    private var inputPanels: [UInt32: PrivacyOverlayPanel] = [:]
     private var panelScreens: [UInt32: OverlayScreenGeometry] = [:]
     private var cancelPointerTimer: (() -> Void)?
     private let screenProvider: () -> [OverlayScreenGeometry]
     private let panelFactory: () -> PrivacyOverlayPanel
+    private let inputPanelFactory: () -> PrivacyOverlayPanel
     private let pointerProvider: () -> NSPoint
     private let timerFactory: OverlayPointerTimerFactory
 
     init(
         screenProvider: @escaping () -> [OverlayScreenGeometry] = PrivacyOverlayController.systemScreenGeometry,
         panelFactory: @escaping () -> PrivacyOverlayPanel = { PrivacyOverlayPanel(contentRect: .zero) },
+        inputPanelFactory: @escaping () -> PrivacyOverlayPanel = {
+            PrivacyOverlayPanel(contentRect: .zero)
+        },
         pointerProvider: @escaping () -> NSPoint = { NSEvent.mouseLocation },
         timerFactory: @escaping OverlayPointerTimerFactory = PrivacyOverlayController.makePointerTimer
     ) {
         self.screenProvider = screenProvider
         self.panelFactory = panelFactory
+        self.inputPanelFactory = inputPanelFactory
         self.pointerProvider = pointerProvider
         self.timerFactory = timerFactory
     }
@@ -548,6 +571,7 @@ final class PrivacyOverlayController {
         let obsoleteIDs = panels.keys.filter { !displayIDs.contains($0) }
         for id in obsoleteIDs {
             panelScreens.removeValue(forKey: id)
+            removeInputPanel(displayID: id)
             guard let panel = panels.removeValue(forKey: id) else { continue }
             panel.orderOut(nil)
             panel.close()
@@ -589,9 +613,11 @@ final class PrivacyOverlayController {
             panels[display.id] = panel
             panelScreens[display.id] = display
             layoutPanel(displayID: display.id)
+            updateInputState(panel: panel, view: view, pointer: pointerProvider())
             panel.orderFrontRegardless()
             view.displayIfNeeded()
             panel.displayIfNeeded()
+            updateInputPanel(displayID: display.id)
         }
 
         startPointerTimerIfNeeded()
@@ -659,6 +685,7 @@ final class PrivacyOverlayController {
         updateInputState(panel: panel, view: view, pointer: pointerProvider())
         view.displayIfNeeded()
         panel.displayIfNeeded()
+        updateInputPanel(displayID: displayID)
     }
 
     private func pollPointer() {
@@ -684,8 +711,59 @@ final class PrivacyOverlayController {
         view: IndicatorView,
         pointer: NSPoint
     ) {
+        if view.usesSeparateInputPanel {
+            panel.ignoresMouseEvents = true
+            return
+        }
         let inside = pointerIsInside(pointer, panel: panel, view: view)
         panel.ignoresMouseEvents = !(view.trigger == .click && view.hasReasons && inside)
+    }
+
+    private func updateInputPanel(displayID: UInt32) {
+        guard let visualPanel = panels[displayID],
+              let indicatorView = visualPanel.contentView as? IndicatorView,
+              indicatorView.usesSeparateInputPanel,
+              indicatorView.trigger == .click,
+              indicatorView.hasReasons else {
+            removeInputPanel(displayID: displayID)
+            return
+        }
+
+        let target = indicatorView.hitTargetRect
+        guard !target.isEmpty else {
+            removeInputPanel(displayID: displayID)
+            return
+        }
+        let inputPanel = inputPanels[displayID] ?? inputPanelFactory()
+        let inputView: IndicatorInputView
+        if let existing = inputPanel.contentView as? IndicatorInputView {
+            inputView = existing
+        } else {
+            inputView = IndicatorInputView(frame: .zero)
+            inputPanel.contentView = inputView
+        }
+        inputView.onClick = { [weak self] in
+            self?.toggleReason(for: displayID)
+        }
+        inputPanel.ignoresMouseEvents = false
+        inputPanel.setFrame(
+            NSRect(
+                x: visualPanel.frame.minX + target.minX,
+                y: visualPanel.frame.minY + target.minY,
+                width: target.width,
+                height: target.height
+            ),
+            display: true
+        )
+        inputView.frame = inputPanel.contentView?.bounds ?? .zero
+        inputPanels[displayID] = inputPanel
+        inputPanel.orderFrontRegardless()
+    }
+
+    private func removeInputPanel(displayID: UInt32) {
+        guard let inputPanel = inputPanels.removeValue(forKey: displayID) else { return }
+        inputPanel.orderOut(nil)
+        inputPanel.close()
     }
 
     private func pointerIsInside(
@@ -738,10 +816,15 @@ final class PrivacyOverlayController {
 
     private func removeAllPanels() {
         stopPointerTimer()
+        for inputPanel in inputPanels.values {
+            inputPanel.orderOut(nil)
+            inputPanel.close()
+        }
         for panel in panels.values {
             panel.orderOut(nil)
             panel.close()
         }
+        inputPanels.removeAll()
         panels.removeAll()
         panelScreens.removeAll()
     }

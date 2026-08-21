@@ -733,11 +733,37 @@ def test_close_waits_for_active_render_before_closing_transport(snapshot) -> Non
 
 
 def test_resolver_accepts_executable_environment_override(monkeypatch, tmp_path: Path) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+    ):
+        (tmp_path / name).write_text(name)
     helper = _helper_script(tmp_path, "")
     monkeypatch.setattr("openchronicle.capture.privacy_overlay.platform.system", lambda: "Darwin")
     monkeypatch.setenv("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER", str(helper))
 
     assert _resolve_overlay_path() == helper.resolve()
+
+
+def test_resolver_rejects_source_free_executable_environment_override(
+    monkeypatch, tmp_path: Path
+) -> None:
+    helper = _helper_script(tmp_path, "")
+
+    def missing_package_files(_: str):
+        raise ModuleNotFoundError
+
+    monkeypatch.setattr("openchronicle.capture.privacy_overlay.platform.system", lambda: "Darwin")
+    monkeypatch.setenv("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER", str(helper))
+    monkeypatch.setattr(importlib.resources, "files", missing_package_files)
+    monkeypatch.setattr(
+        privacy_overlay,
+        "__file__",
+        str(tmp_path / "src/openchronicle/capture/privacy_overlay.py"),
+    )
+
+    assert _resolve_overlay_path() is None
 
 
 def test_resolver_rejects_stale_binary_when_recompile_fails(monkeypatch, tmp_path: Path) -> None:

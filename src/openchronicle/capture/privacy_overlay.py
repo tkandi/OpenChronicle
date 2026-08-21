@@ -124,15 +124,7 @@ def _usable_overlay_binary(binary_path: Path) -> Path | None:
     reason_path = parent / "mac-privacy-overlay-reason.swift"
     core_path = parent / "mac-privacy-overlay-core.swift"
     main_path = parent / "mac-privacy-overlay.swift"
-    try:
-        reason_exists = reason_path.is_file()
-        core_exists = core_path.is_file()
-        main_exists = main_path.is_file()
-    except OSError:
-        return None
-    if reason_exists or core_exists or main_exists:
-        return _maybe_compile_overlay(reason_path, core_path, main_path, binary_path)
-    return binary_path if _is_executable(binary_path) else None
+    return _maybe_compile_overlay(reason_path, core_path, main_path, binary_path)
 
 
 def _resolve_overlay_path() -> Path | None:

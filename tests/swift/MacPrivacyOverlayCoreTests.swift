@@ -45,7 +45,9 @@ enum MacPrivacyOverlayCoreTests {
 
         testControllerRendering()
         testHoverStaysMouseThrough()
+        testCompactClickKeepsTargetSizedVisualPanel()
         testClickUsesOnlyIndicatorHitTarget()
+        testFullScreenVisualPanelNeverConsumesStaleOutsideClick()
         testBannerUsesOnlyCornerHitTarget()
         testAlwaysStaysExpandedAndMouseThrough()
         testDiagnosticsModeIgnoresWireReasons()
@@ -234,12 +236,79 @@ enum MacPrivacyOverlayCoreTests {
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
             visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
         )
+        let visualPanel = RecordingPanel(contentRect: .zero)
+        let inputPanel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { visualPanel },
+            inputPanelFactory: { inputPanel },
+            pointerProvider: { NSPoint(x: 400, y: 300) },
+            timerFactory: { _, _ in {} }
+        )
+
+        controller.apply(reasonCommand(trigger: .click, style: .border)) { rendered in
+            precondition(rendered)
+        }
+        precondition(visualPanel.frame == screen.frame)
+        precondition(visualPanel.ignoresMouseEvents)
+        precondition(!inputPanel.ignoresMouseEvents)
+        let compactFrame = inputPanel.frame
+        precondition(compactFrame.width < screen.frame.width)
+        precondition(compactFrame.height < screen.frame.height)
+
+        let event = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: compactFrame.width / 2, y: compactFrame.height / 2),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: inputPanel.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        )!
+        inputPanel.contentView?.mouseDown(with: event)
+        let expandedFrame = inputPanel.frame
+        precondition(expandedFrame.width > compactFrame.width)
+        precondition(visualPanel.ignoresMouseEvents)
+
+        let collapseEvent = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: expandedFrame.width / 2, y: expandedFrame.height / 2),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: inputPanel.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 1
+        )!
+        inputPanel.contentView?.mouseDown(with: collapseEvent)
+        precondition(inputPanel.frame == compactFrame)
+        precondition(visualPanel.ignoresMouseEvents)
+        precondition(!visualPanel.canBecomeKey)
+        precondition(!visualPanel.canBecomeMain)
+        precondition(!inputPanel.canBecomeKey)
+        precondition(!inputPanel.canBecomeMain)
+    }
+
+    private static func testCompactClickKeepsTargetSizedVisualPanel() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
         let panel = RecordingPanel(contentRect: .zero)
-        var pointer = NSPoint(x: 400, y: 300)
+        var pointer = NSPoint(x: -100, y: -100)
         var tick: (() -> Void)?
+        var inputPanelStarts = 0
         let controller = PrivacyOverlayController(
             screenProvider: { [screen] },
             panelFactory: { panel },
+            inputPanelFactory: {
+                inputPanelStarts += 1
+                return RecordingPanel(contentRect: .zero)
+            },
             pointerProvider: { pointer },
             timerFactory: { _, handler in
                 tick = handler
@@ -247,19 +316,19 @@ enum MacPrivacyOverlayCoreTests {
             }
         )
 
-        controller.apply(reasonCommand(trigger: .click, style: .border)) { rendered in
+        controller.apply(reasonCommand(trigger: .click, style: .pill)) { rendered in
             precondition(rendered)
         }
-        precondition(panel.frame == screen.frame)
+        let compactFrame = panel.frame
+        precondition(inputPanelStarts == 0)
         precondition(panel.ignoresMouseEvents)
 
-        pointer = NSPoint(x: 740, y: 27)
+        pointer = NSPoint(x: compactFrame.midX, y: compactFrame.midY)
         tick?()
         precondition(!panel.ignoresMouseEvents)
-
         let event = NSEvent.mouseEvent(
             with: .leftMouseDown,
-            location: pointer,
+            location: NSPoint(x: compactFrame.width / 2, y: compactFrame.height / 2),
             modifierFlags: [],
             timestamp: 0,
             windowNumber: panel.windowNumber,
@@ -269,17 +338,8 @@ enum MacPrivacyOverlayCoreTests {
             pressure: 1
         )!
         panel.contentView?.mouseDown(with: event)
-        precondition(!panel.ignoresMouseEvents)
-
-        pointer = NSPoint(x: 740, y: 70)
-        tick?()
-        precondition(!panel.ignoresMouseEvents)
-        panel.contentView?.mouseDown(with: event)
-        precondition(panel.ignoresMouseEvents)
-
-        pointer = NSPoint(x: 400, y: 300)
-        tick?()
-        precondition(panel.ignoresMouseEvents)
+        precondition(panel.frame.width == 340)
+        precondition(inputPanelStarts == 0)
         precondition(!panel.canBecomeKey)
         precondition(!panel.canBecomeMain)
     }
@@ -308,37 +368,94 @@ enum MacPrivacyOverlayCoreTests {
         precondition(!panel.canBecomeMain)
     }
 
+    private static func testFullScreenVisualPanelNeverConsumesStaleOutsideClick() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let visualPanel = RecordingPanel(contentRect: .zero)
+        let inputPanel = RecordingPanel(contentRect: .zero)
+        var pointer = NSPoint(x: 740, y: 27)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { visualPanel },
+            inputPanelFactory: { inputPanel },
+            pointerProvider: { pointer },
+            timerFactory: { _, _ in {} }
+        )
+
+        controller.apply(reasonCommand(trigger: .click, style: .border)) { rendered in
+            precondition(rendered)
+        }
+        precondition(visualPanel.frame == screen.frame)
+        precondition(visualPanel.ignoresMouseEvents)
+        precondition(!inputPanel.ignoresMouseEvents)
+        precondition(!inputPanel.canBecomeKey)
+        precondition(!inputPanel.canBecomeMain)
+        let compactInputFrame = inputPanel.frame
+        precondition(compactInputFrame.width < screen.frame.width)
+        precondition(compactInputFrame.height < screen.frame.height)
+
+        let insideEvent = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: compactInputFrame.width / 2, y: compactInputFrame.height / 2),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: inputPanel.windowNumber,
+            context: nil,
+            eventNumber: 1,
+            clickCount: 1,
+            pressure: 1
+        )!
+        inputPanel.contentView?.mouseDown(with: insideEvent)
+        let expandedInputFrame = inputPanel.frame
+        precondition(expandedInputFrame.height > compactInputFrame.height)
+        precondition(visualPanel.ignoresMouseEvents)
+
+        pointer = NSPoint(x: 400, y: 300)
+        precondition(!expandedInputFrame.contains(pointer))
+        let outsideEvent = NSEvent.mouseEvent(
+            with: .leftMouseDown,
+            location: NSPoint(x: -20, y: -20),
+            modifierFlags: [],
+            timestamp: 0,
+            windowNumber: inputPanel.windowNumber,
+            context: nil,
+            eventNumber: 2,
+            clickCount: 1,
+            pressure: 1
+        )!
+        inputPanel.contentView?.mouseDown(with: outsideEvent)
+        precondition(inputPanel.frame == expandedInputFrame)
+        precondition(visualPanel.ignoresMouseEvents)
+    }
+
     private static func testBannerUsesOnlyCornerHitTarget() {
         let screen = OverlayScreenGeometry(
             id: 1,
             frame: NSRect(x: 0, y: 0, width: 800, height: 600),
             visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
         )
-        let panel = RecordingPanel(contentRect: .zero)
-        var pointer = NSPoint(x: 100, y: 585)
-        var tick: (() -> Void)?
+        let visualPanel = RecordingPanel(contentRect: .zero)
+        let inputPanel = RecordingPanel(contentRect: .zero)
         let controller = PrivacyOverlayController(
             screenProvider: { [screen] },
-            panelFactory: { panel },
-            pointerProvider: { pointer },
-            timerFactory: { _, handler in
-                tick = handler
-                return {}
-            }
+            panelFactory: { visualPanel },
+            inputPanelFactory: { inputPanel },
+            pointerProvider: { NSPoint(x: 100, y: 585) },
+            timerFactory: { _, _ in {} }
         )
 
         controller.apply(reasonCommand(trigger: .click, style: .banner)) { rendered in
             precondition(rendered)
         }
-        precondition(panel.ignoresMouseEvents)
-
-        pointer = NSPoint(x: 740, y: 585)
-        tick?()
-        precondition(!panel.ignoresMouseEvents)
-
-        pointer = NSPoint(x: 100, y: 585)
-        tick?()
-        precondition(panel.ignoresMouseEvents)
+        precondition(visualPanel.frame == screen.frame)
+        precondition(visualPanel.ignoresMouseEvents)
+        precondition(!inputPanel.ignoresMouseEvents)
+        precondition(inputPanel.frame.width < screen.frame.width)
+        precondition(inputPanel.frame.height == 30)
+        precondition(!inputPanel.frame.contains(NSPoint(x: 100, y: 585)))
     }
 
     private static func testPointerTimerStopsWhenOverlayClears() {
