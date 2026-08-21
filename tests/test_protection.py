@@ -204,6 +204,34 @@ def test_unknown_title_protects_only_the_mode_mapped_displays(
     assert snapshot.failure_reason is None
 
 
+def test_empty_title_patterns_do_not_protect_an_unknown_title() -> None:
+    snapshot = build_protection_snapshot(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            deny_window_title_patterns=[""],
+        ),
+        WindowInventory(
+            windows=(
+                VisibleWindow(
+                    "Browser",
+                    "browser",
+                    "",
+                    RIGHT.region,
+                    title_available=False,
+                ),
+            ),
+            displays=(LEFT, RIGHT),
+        ),
+        paused=False,
+        generation=42,
+        now=3.0,
+    )
+
+    assert snapshot.state is ProtectionState.INACTIVE
+    assert snapshot.protected_display_ids == frozenset()
+    assert snapshot.reasons_for_display(2) == ()
+
+
 def test_unmapped_unknown_title_does_not_fail_the_complete_inventory() -> None:
     inventory = WindowInventory(
         windows=(

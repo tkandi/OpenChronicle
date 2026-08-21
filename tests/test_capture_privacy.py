@@ -84,6 +84,17 @@ def test_unknown_window_title_has_no_invented_title_rule_or_value() -> None:
     assert matches[0].window_title is None
 
 
+def test_unknown_window_title_with_only_empty_patterns_has_no_match() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=[""])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(app="Browser", bundle="com.example.browser", title="", title_available=False),
+    )
+
+    assert matches == ()
+
+
 def test_privacy_mode_off_preserves_every_foreground_denylist_field() -> None:
     cases = [
         (CaptureConfig(screenshot_privacy_mode="off", deny_app_names=["PrivateApp"]), {
