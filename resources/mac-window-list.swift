@@ -3,6 +3,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import Darwin
 import Foundation
 
 struct DisplayRecord: Codable {
@@ -30,6 +31,36 @@ struct Output: Codable {
     let displays: [DisplayRecord]
 }
 
+private struct CGWindowSource {
+    let metadata: OnScreenCGWindow
+    let appName: String
+    let bundleID: String
+}
+
+private typealias AXUIElementGetWindowFunction = @convention(c) (
+    AXUIElement,
+    UnsafeMutablePointer<CGWindowID>
+) -> AXError
+
+private let windowIdentityFrameworkPaths = [
+    "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices",
+    "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/"
+        + "HIServices.framework/HIServices",
+]
+
+private func resolveAXUIElementGetWindow() -> AXUIElementGetWindowFunction? {
+    for path in windowIdentityFrameworkPaths {
+        guard let handle = dlopen(path, RTLD_NOW | RTLD_LOCAL) else { continue }
+        guard let symbol = dlsym(handle, "_AXUIElementGetWindow") else {
+            dlclose(handle)
+            continue
+        }
+        // Keep the framework handle open for the helper's short process lifetime.
+        return unsafeBitCast(symbol, to: AXUIElementGetWindowFunction.self)
+    }
+    return nil
+}
+
 func axAttribute(_ element: AXUIElement, _ attribute: String) -> CFTypeRef? {
     var value: CFTypeRef?
     let error = AXUIElementCopyAttributeValue(element, attribute as CFString, &value)
@@ -44,29 +75,12 @@ func axBool(_ element: AXUIElement, _ attribute: String) -> Bool? {
     return axAttribute(element, attribute) as? Bool
 }
 
-func axPoint(_ element: AXUIElement, _ attribute: String) -> CGPoint? {
-    guard let raw = axAttribute(element, attribute) else { return nil }
-    let value = raw as! AXValue
-    guard AXValueGetType(value) == .cgPoint else { return nil }
-    var point = CGPoint.zero
-    return AXValueGetValue(value, .cgPoint, &point) ? point : nil
-}
-
-func axSize(_ element: AXUIElement, _ attribute: String) -> CGSize? {
-    guard let raw = axAttribute(element, attribute) else { return nil }
-    let value = raw as! AXValue
-    guard AXValueGetType(value) == .cgSize else { return nil }
-    var size = CGSize.zero
-    return AXValueGetValue(value, .cgSize, &size) ? size : nil
-}
-
-func axWindowRecords(
+private func axWindowMetadata(
     pid: pid_t,
-    appName: String,
-    bundleID: String,
     frontmostPID: pid_t?,
-    onScreenBounds: [WindowBounds]
-) -> [WindowRecord] {
+    titleFallbackWindowIDs: Set<CGWindowID>,
+    getWindowID: AXUIElementGetWindowFunction
+) -> [AXWindowMetadata] {
     let app = AXUIElementCreateApplication(pid)
     guard
         let rawWindows = axAttribute(app, kAXWindowsAttribute as String),
@@ -75,34 +89,22 @@ func axWindowRecords(
 
     let focusedWindow = axAttribute(app, kAXFocusedWindowAttribute as String)
 
-    var records: [WindowRecord] = []
+    var records: [AXWindowMetadata] = []
     for window in axWindows {
         if axBool(window, kAXMinimizedAttribute as String) == true { continue }
-        guard
-            let position = axPoint(window, kAXPositionAttribute as String),
-            let size = axSize(window, kAXSizeAttribute as String),
-            size.width > 0,
-            size.height > 0
-        else { continue }
-
-        let bounds = WindowBounds(
-            left: position.x,
-            top: position.y,
-            width: size.width,
-            height: size.height
-        )
-        guard shouldIncludeAXFallback(bounds, onScreenBounds: onScreenBounds) else { continue }
-        guard let title = axString(window, kAXTitleAttribute as String), !title.isEmpty else { continue }
-
-        records.append(WindowRecord(
-            app_name: appName,
-            bundle_id: bundleID,
+        var resolvedWindowID = kCGNullWindowID
+        let identityError = getWindowID(window, &resolvedWindowID)
+        let windowID = identityError == .success && resolvedWindowID != kCGNullWindowID
+            ? resolvedWindowID
+            : nil
+        let title = windowID.map { titleFallbackWindowIDs.contains($0) } == true
+            ? axString(window, kAXTitleAttribute as String)
+            : nil
+        records.append(AXWindowMetadata(
+            windowID: windowID,
+            ownerPID: pid,
             title: title,
-            left: position.x,
-            top: position.y,
-            width: size.width,
-            height: size.height,
-            is_active: pid == frontmostPID && focusedWindow.map { CFEqual(window, $0) } == true
+            isFocused: pid == frontmostPID && focusedWindow.map { CFEqual(window, $0) } == true
         ))
     }
     return records
@@ -124,14 +126,22 @@ enum MacWindowList {
             exit(1)
         }
 
-        var windows: [WindowRecord] = []
-        var visibleApps: [pid_t: (name: String, bundleID: String, bounds: [WindowBounds])] = [:]
+        guard let getWindowID = resolveAXUIElementGetWindow() else {
+            fputs("Could not resolve window identity API\n", stderr)
+            exit(3)
+        }
+
+        var cgSources: [CGWindowSource] = []
+        var visiblePIDs = Set<pid_t>()
+        var titleFallbackWindowIDs: [pid_t: Set<CGWindowID>] = [:]
         let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         for info in windowInfo {
             let alpha = info[kCGWindowAlpha as String] as? Double ?? 0
             guard alpha > 0 else { continue }
 
             guard
+                let layer = info[kCGWindowLayer as String] as? NSNumber,
+                layer.intValue == 0,
                 let bounds = info[kCGWindowBounds as String] as? [String: Any],
                 let left = (bounds["X"] as? NSNumber)?.doubleValue,
                 let top = (bounds["Y"] as? NSNumber)?.doubleValue,
@@ -141,41 +151,65 @@ enum MacWindowList {
                 height > 0
             else { continue }
 
-            let pid = info[kCGWindowOwnerPID as String] as? pid_t ?? 0
+            let rawPID = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value ?? 0
+            let pid = rawPID > 0 ? rawPID : 0
+            let windowID = (info[kCGWindowNumber as String] as? NSNumber).flatMap { value in
+                let identifier = value.uint32Value
+                return identifier == kCGNullWindowID ? nil : identifier
+            }
             let app = pid > 0 ? NSRunningApplication(processIdentifier: pid) : nil
             let appName = info[kCGWindowOwnerName as String] as? String ?? ""
             let bundleID = app?.bundleIdentifier ?? ""
+            let title = info[kCGWindowName as String] as? String ?? ""
+            let metadata = OnScreenCGWindow(
+                windowID: windowID,
+                ownerPID: pid,
+                layer: layer.intValue,
+                bounds: WindowBounds(left: left, top: top, width: width, height: height),
+                title: title
+            )
+            cgSources.append(CGWindowSource(
+                metadata: metadata,
+                appName: appName,
+                bundleID: bundleID
+            ))
             if pid > 0 {
-                let bounds = WindowBounds(left: left, top: top, width: width, height: height)
-                if var existing = visibleApps[pid] {
-                    existing.bounds.append(bounds)
-                    visibleApps[pid] = existing
-                } else {
-                    visibleApps[pid] = (name: appName, bundleID: bundleID, bounds: [bounds])
-                }
+                visiblePIDs.insert(pid)
             }
-            windows.append(WindowRecord(
-                app_name: appName,
-                bundle_id: bundleID,
-                title: info[kCGWindowName as String] as? String ?? "",
-                left: left,
-                top: top,
-                width: width,
-                height: height,
-                is_active: false
+            if title.isEmpty, let windowID, pid > 0 {
+                titleFallbackWindowIDs[pid, default: []].insert(windowID)
+            }
+        }
+
+        var axWindows: [AXWindowMetadata] = []
+        for pid in visiblePIDs.sorted() {
+            axWindows.append(contentsOf: axWindowMetadata(
+                pid: pid,
+                frontmostPID: frontmostPID,
+                titleFallbackWindowIDs: titleFallbackWindowIDs[pid] ?? [],
+                getWindowID: getWindowID
             ))
         }
 
-        // CGWindowName can be empty for background browser windows even with Screen Recording
-        // permission. Query only AX window metadata as a fallback; never traverse window contents.
-        for (pid, metadata) in visibleApps {
-            windows.append(contentsOf: axWindowRecords(
-                pid: pid,
-                appName: metadata.name,
-                bundleID: metadata.bundleID,
-                frontmostPID: frontmostPID,
-                onScreenBounds: metadata.bounds
-            ))
+        let cgWindows = cgSources.map(\.metadata)
+        guard let resolvedMetadata = resolvedWindowMetadata(
+            cgWindows: cgWindows,
+            axWindows: axWindows
+        ) else {
+            fputs("Could not resolve visible window metadata\n", stderr)
+            exit(3)
+        }
+        let windows = zip(cgSources, resolvedMetadata).map { source, resolved in
+            WindowRecord(
+                app_name: source.appName,
+                bundle_id: source.bundleID,
+                title: resolved.title,
+                left: source.metadata.bounds.left,
+                top: source.metadata.bounds.top,
+                width: source.metadata.bounds.width,
+                height: source.metadata.bounds.height,
+                is_active: resolved.isActive
+            )
         }
 
         var displayCount: UInt32 = 0
@@ -207,7 +241,7 @@ enum MacWindowList {
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data("\n".utf8))
         } catch {
-            fputs("Could not encode window metadata: \(error)\n", stderr)
+            fputs("Could not encode window metadata\n", stderr)
             exit(1)
         }
     }
