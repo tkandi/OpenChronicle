@@ -303,7 +303,7 @@ def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmatio
 
 
 def test_pause_reader_failure_stays_closed_when_inventory_policy_is_fail_open(
-    inventory, fake_overlay, caplog,
+    inventory, fake_overlay,
 ) -> None:
     marker = "private-pause-marker-path"
     pause_available = False
@@ -326,22 +326,35 @@ def test_pause_reader_failure_stays_closed_when_inventory_policy_is_fail_open(
         pause_reader=read_pause,
     )
 
-    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
         decision = monitor.decision_for_capture(force=True)
 
-    assert decision.snapshot.state is ProtectionState.FAILED
-    assert (
-        decision.snapshot.failure_reason
-        is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
-    )
-    assert decision.indicator_confirmed is True
-    assert fake_overlay.render_calls == 1
-    assert fake_overlay.clear_calls == 0
-    assert "privacy protection failed closed: reason=pause_state_unavailable" in caplog.text
-    assert marker not in caplog.text
+        assert decision.snapshot.state is ProtectionState.FAILED
+        assert (
+            decision.snapshot.failure_reason
+            is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+        )
+        assert decision.indicator_confirmed is True
+        assert fake_overlay.render_calls == 1
+        assert fake_overlay.clear_calls == 0
+        assert messages == [
+            "privacy protection pause read failed: OSError",
+            "privacy protection failed closed: reason=pause_state_unavailable",
+        ]
+        assert marker not in "\n".join(messages)
 
-    pause_available = True
-    recovered = monitor.decision_for_capture(force=True)
+        pause_available = True
+        recovered = monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
 
     assert recovered.snapshot.state is ProtectionState.INACTIVE
     assert fake_overlay.clear_calls == 1
