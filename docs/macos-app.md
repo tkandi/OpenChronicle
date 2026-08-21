@@ -212,6 +212,10 @@ false`, an inventory failure clears stale overlays and allows an unprotected
 capture without claiming visual confirmation; the default `true` policy aborts
 the complete tick and shows yellow when the helper can render it.
 
+`screenshot_privacy_fail_closed = false` applies only to window/display inventory
+failures. If the pause state cannot be read, OpenChronicle shows the yellow failed
+indicator and aborts the complete capture regardless of this setting.
+
 Before relying on the setting in daily use, perform this manual acceptance on
 empty privacy windows after an explicit reinstall: verify `separate` and `all`
 across two displays; move a privacy window between displays; pause and resume;

@@ -87,7 +87,10 @@ display, but it must never permit a screenshot that a newer decision would block
 denylist but disables the background window inventory and indicator. With the background guard
 enabled, `screenshot_privacy_fail_closed = false` permits an unprotected capture after a genuine
 inventory failure; stale indicators are cleared and the decision is never presented as visually
-confirmed. The approved default remains `skip-monitor` with fail-closed enabled.
+confirmed. `screenshot_privacy_fail_closed = false` applies only to window/display inventory
+failures. If the pause state cannot be read, OpenChronicle shows the yellow failed indicator and
+aborts the complete capture regardless of this setting. The approved default remains
+`skip-monitor` with fail-closed enabled.
 
 ## Security semantics
 
@@ -190,7 +193,8 @@ Before any AX traversal:
 2. Send the snapshot to the overlay helper.
 3. If the active window is on a marked display, omit AX traversal and all derived S1 content.
 4. If the snapshot is `paused`, omit the complete capture regardless of inventory or capture
-   options.
+   options. If the pause state cannot be read, treat it as a yellow failed state and omit the
+   complete capture regardless of `screenshot_privacy_fail_closed`.
 5. If the snapshot is `failed` and fail-closed is enabled, omit both AX and screenshot capture.
 
 Before each screenshot attempt, refresh again if the snapshot is no longer fresh. If a
@@ -215,7 +219,9 @@ Privacy enumeration failure produces a `failed` snapshot. Under the default fail
 it hides stale green overlays, displays the yellow state, and aborts the complete capture. If
 display enumeration is unavailable, the helper shows the warning on every `NSScreen` it can
 discover itself. Under explicit fail-open policy it instead clears stale overlays and permits
-capture without visual confirmation.
+capture without visual confirmation. `screenshot_privacy_fail_closed = false` applies only to
+window/display inventory failures. If the pause state cannot be read, OpenChronicle shows the
+yellow failed indicator and aborts the complete capture regardless of this setting.
 
 If the overlay process disconnects, the daemon invalidates the last acknowledgement and
 restarts it with bounded backoff. A required but unacknowledged overlay continues to block
@@ -260,6 +266,8 @@ config editor and normalized to `pill` by the regular config loader as a final f
 - Config hot reload updates only the indicator style.
 - Event-during-AX and event-during-refresh epochs cannot reuse a pre-event decision.
 - Privacy mode `off` and explicit inventory fail-open preserve their legacy control semantics.
+- An unreadable pause state remains fail-closed when
+  `screenshot_privacy_fail_closed = false`, with a yellow failed indicator.
 
 ### Swift tests and build checks
 

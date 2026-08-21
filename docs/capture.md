@@ -63,6 +63,10 @@ remain active. On a genuine inventory failure,
 leaves visual confirmation false; no yellow "screenshot disabled" state is
 shown because capture is not disabled.
 
+`screenshot_privacy_fail_closed = false` applies only to window/display inventory
+failures. If the pause state cannot be read, OpenChronicle shows the yellow failed
+indicator and aborts the complete capture regardless of this setting.
+
 This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
 
 ## Privacy protection indicators

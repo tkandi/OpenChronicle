@@ -66,7 +66,7 @@ privacy_indicator_style = "pill"
 
 denylist 窗口关闭、最小化或移动到另一块显示器后，下一份保护快照会撤下或移动标识。旧快照可以在很短时间内造成额外保护，但绝不能允许一张会被较新决策阻止的截图通过。
 
-`screenshot_privacy_mode = "off"` 保留前台 app、bundle、标题、URL 和文本 denylist，但关闭后台窗口 inventory 与标识。后台保护启用时，`screenshot_privacy_fail_closed = false` 允许在真实 inventory 故障后执行一次无后台保护的采集；系统会清除旧标识，并且不会把该决策声明为已获得视觉确认。批准的默认值仍为 `skip-monitor` 加 fail closed。
+`screenshot_privacy_mode = "off"` 保留前台 app、bundle、标题、URL 和文本 denylist，但关闭后台窗口 inventory 与标识。后台保护启用时，`screenshot_privacy_fail_closed = false` 允许在真实 inventory 故障后执行一次无后台保护的采集；系统会清除旧标识，并且不会把该决策声明为已获得视觉确认。`screenshot_privacy_fail_closed = false` 只适用于窗口/display inventory 失败。暂停状态不可读时，无论该设置为何值，OpenChronicle 都显示黄色失败标识并终止整次捕获。批准的默认值仍为 `skip-monitor` 加 fail closed。
 
 ## 安全语义
 
@@ -137,7 +137,7 @@ Python 通过 stdin 发送逐行 JSON 命令。只有在主线程完成对应 pa
 1. 强制执行一次新的隐私扫描并生成下一份快照。
 2. 将快照发送给浮层 helper。
 3. 如果活动窗口位于被标记的显示器，省略 AX 遍历和所有派生 S1 内容。
-4. 如果快照状态为 `paused`，无论 inventory、截图或 AX 是否可用，都省略整次采集。
+4. 如果快照状态为 `paused`，无论 inventory、截图或 AX 是否可用，都省略整次采集。暂停状态不可读时，将其视为黄色失败状态；无论 `screenshot_privacy_fail_closed` 为何值，都省略整次采集。
 5. 如果快照状态为 `failed` 且启用 fail closed，同时省略 AX 和截图采集。
 
 每次截图前，如果快照已经不够新，则再次刷新。隐私状态激活且标识已启用时，等待对应 generation 的确认，然后只采集该快照明确允许的目标。
@@ -150,7 +150,7 @@ inventory 失败且 `screenshot_privacy_fail_closed = false` 时，monitor 会�
 
 monitor 独立于采集调度器检查结构化暂停状态。因此即使正常采集任务已经跳过，暂停标识仍然保持可见。
 
-隐私枚举失败时生成 `failed` 快照。默认 fail-closed 策略会隐藏过期绿色浮层、显示黄色状态并终止整次采集；如果无法枚举显示器，helper 会在自身能够发现的每个 `NSScreen` 上显示警告。显式 fail-open 策略则清除旧浮层并允许无视觉确认的采集。
+隐私枚举失败时生成 `failed` 快照。默认 fail-closed 策略会隐藏过期绿色浮层、显示黄色状态并终止整次采集；如果无法枚举显示器，helper 会在自身能够发现的每个 `NSScreen` 上显示警告。显式 fail-open 策略则清除旧浮层并允许无视觉确认的采集。`screenshot_privacy_fail_closed = false` 只适用于窗口/display inventory 失败。暂停状态不可读时，无论该设置为何值，OpenChronicle 都显示黄色失败标识并终止整次捕获。
 
 浮层进程断开连接后，daemon 会使上一次确认失效，并采用有上限的退避策略重启它。需要显示但尚未获得确认时，截图继续被阻止。由于已经失败的浮层进程无法显示自己的警告，这种情况下不会出现标识；标识缺失表示保护状态没有得到视觉确认。
 
@@ -184,6 +184,7 @@ daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_sty
 - 配置热加载只更新标识样式。
 - 刷新期间和 AX 期间到达的事件不能复用事件前决策。
 - `off` 模式与显式 inventory fail-open 保留原有控制语义。
+- 暂停状态不可读时，即使 `screenshot_privacy_fail_closed = false` 也保持 fail closed，并显示黄色失败标识。
 
 ### Swift 测试与构建检查
 
