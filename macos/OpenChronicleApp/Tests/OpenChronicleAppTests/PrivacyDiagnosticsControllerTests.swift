@@ -8,6 +8,14 @@ private enum FakeTransportError: Error {
   case sendFailed
 }
 
+private final class WeakReference {
+  weak var value: AnyObject?
+
+  init(_ value: AnyObject?) {
+    self.value = value
+  }
+}
+
 private final class FakePrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
   var onMessage: ((ProtectionDiagnosticsWireMessage) -> Void)?
   var onDisconnect: ((Error?) -> Void)?
@@ -168,6 +176,56 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertFalse(controller.showsExactValues)
     XCTAssertNil(controller.displayDiagnostics.first?.reasons.last?.windowTitle)
     XCTAssertEqual(transport.sent.count, requestCount)
+  }
+
+  func testPageLeaveDiscardsExactCandidateBeforeRelease() {
+    let marker = "page-leave-private-marker"
+    let (controller, transport) = makeExactController(
+      confirmedOn: 2,
+      exactValue: marker
+    )
+    let candidate = WeakReference(controller.debugExactCandidate)
+    XCTAssertNotNil(candidate.value)
+    XCTAssertTrue(controller.debugRetainsExactValue(marker))
+    var discardedBeforeRelease = false
+    transport.onSend = { request in
+      if request.action == .releaseExact {
+        discardedBeforeRelease =
+          controller.debugExactCandidate == nil
+          && !controller.debugRetainsExactValue(marker)
+          && controller.displayDiagnostics.allSatisfy {
+            $0.reasons.allSatisfy { $0.windowTitle == nil && $0.rule == nil }
+          }
+      }
+    }
+
+    controller.setPageVisible(false)
+
+    XCTAssertTrue(discardedBeforeRelease)
+    XCTAssertNil(candidate.value)
+    XCTAssertFalse(controller.debugRetainsExactValue(marker))
+  }
+
+  func testDisconnectDiscardsExactCandidateWithoutRelease() {
+    let marker = "disconnect-private-marker"
+    let (controller, transport) = makeExactController(
+      confirmedOn: 2,
+      exactValue: marker
+    )
+    let candidate = WeakReference(controller.debugExactCandidate)
+    let requestCount = transport.sent.count
+
+    transport.disconnect()
+
+    XCTAssertNil(candidate.value)
+    XCTAssertNil(controller.debugExactCandidate)
+    XCTAssertFalse(controller.debugRetainsExactValue(marker))
+    XCTAssertEqual(transport.sent.count, requestCount)
+    XCTAssertTrue(
+      controller.displayDiagnostics.allSatisfy {
+        $0.reasons.allSatisfy { $0.windowTitle == nil && $0.rule == nil }
+      }
+    )
   }
 
   func testPageLeaveHidesBeforeSendingRelease() {
@@ -343,6 +401,32 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertTrue(controller.showsExactValues)
   }
 
+  func testMoveDiscardsExactCandidateBeforeMoveRequest() {
+    let marker = "move-private-marker"
+    let (controller, transport) = makeExactController(
+      confirmedOn: 1,
+      exactValue: marker
+    )
+    let candidate = WeakReference(controller.debugExactCandidate)
+    var discardedBeforeMove = false
+    transport.onSend = { request in
+      if request.action == .moveExact {
+        discardedBeforeMove =
+          controller.debugExactCandidate == nil
+          && !controller.debugRetainsExactValue(marker)
+          && controller.displayDiagnostics.allSatisfy {
+            $0.reasons.allSatisfy { $0.windowTitle == nil && $0.rule == nil }
+          }
+      }
+    }
+
+    controller.setDisplay(2)
+
+    XCTAssertTrue(discardedBeforeMove)
+    XCTAssertNil(candidate.value)
+    XCTAssertFalse(controller.debugRetainsExactValue(marker))
+  }
+
   func testSnapshotWithoutDiagnosticsSelfProtectionStaysRedacted() {
     let transport = FakePrivacyDiagnosticsTransport()
     let controller = makeController(transport: transport, detail: .exact)
@@ -400,6 +484,67 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertEqual(scheduler.delays, [])
   }
 
+  func testShutdownDiscardsExactCandidateBeforeReleaseAndClose() {
+    let marker = "shutdown-private-marker"
+    let (controller, transport) = makeExactController(
+      confirmedOn: 2,
+      exactValue: marker
+    )
+    let candidate = WeakReference(controller.debugExactCandidate)
+    var discardedBeforeRelease = false
+    transport.onSend = { request in
+      if request.action == .releaseExact {
+        discardedBeforeRelease =
+          controller.debugExactCandidate == nil
+          && !controller.debugRetainsExactValue(marker)
+          && controller.displayDiagnostics.isEmpty
+          && controller.globalReasons.isEmpty
+      }
+    }
+
+    controller.shutdown()
+
+    XCTAssertTrue(discardedBeforeRelease)
+    XCTAssertNil(candidate.value)
+    XCTAssertNil(controller.debugExactCandidate)
+    XCTAssertFalse(controller.debugRetainsExactValue(marker))
+  }
+
+  func testReauthorizationRequiresFreshSnapshotAtProtectedGeneration() {
+    let oldMarker = "stale-private-marker"
+    let freshMarker = "fresh-private-marker"
+    let (controller, transport) = makeExactController(
+      confirmedOn: 2,
+      exactValue: oldMarker
+    )
+    controller.setPageVisible(false)
+    controller.setPageVisible(true)
+    XCTAssertEqual(transport.sent.last?.action, .releaseExact)
+    transport.deliverRelease(id: "lease-1")
+    XCTAssertEqual(transport.sent.last?.action, .acquireExact)
+    transport.deliverLease(id: "lease-2", displayID: 2, protectedGeneration: 50)
+
+    XCTAssertFalse(controller.showsExactValues)
+    XCTAssertNil(controller.debugExactCandidate)
+    transport.deliverSnapshot(
+      generation: 49,
+      exact: true,
+      exactValue: oldMarker
+    )
+    XCTAssertFalse(controller.showsExactValues)
+    XCTAssertNil(controller.debugExactCandidate)
+    XCTAssertFalse(controller.debugRetainsExactValue(oldMarker))
+
+    transport.deliverSnapshot(
+      generation: 50,
+      exact: true,
+      exactValue: freshMarker
+    )
+    XCTAssertTrue(controller.showsExactValues)
+    XCTAssertTrue(controller.debugRetainsExactValue(freshMarker))
+    XCTAssertFalse(controller.debugRetainsExactValue(oldMarker))
+  }
+
   func testShutdownAfterDisconnectUsesCleanupConnectionToReleaseKnownLease() {
     let scheduler = ReconnectSchedulerRecorder()
     let first = FakePrivacyDiagnosticsTransport()
@@ -447,6 +592,7 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
 
   private func makeExactController(
     confirmedOn displayID: Int,
+    exactValue: String = "Private window title",
     reconnectScheduler: @escaping PrivacyDiagnosticsReconnectScheduler =
       PrivacyDiagnosticsController.defaultReconnectScheduler
   ) -> (PrivacyDiagnosticsController, FakePrivacyDiagnosticsTransport) {
@@ -466,7 +612,8 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     transport.deliverSnapshot(
       generation: 42,
       exact: true,
-      displayID: displayID
+      displayID: displayID,
+      exactValue: exactValue
     )
     return (controller, transport)
   }

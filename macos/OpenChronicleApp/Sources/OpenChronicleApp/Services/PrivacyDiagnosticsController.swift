@@ -26,6 +26,14 @@ final class PrivacyDiagnosticsController: ObservableObject {
     case release(leaseID: String, reacquire: Bool)
   }
 
+  private final class ExactSnapshotCandidate {
+    let snapshot: ProtectionDiagnosticsSnapshot
+
+    init(snapshot: ProtectionDiagnosticsSnapshot) {
+      self.snapshot = snapshot
+    }
+  }
+
   private let transportFactory: () -> PrivacyDiagnosticsTransport
   private let displayModeProvider: () -> PrivacyReasonDisplayOption
   private let detailProvider: () -> PrivacyReasonDetailOption
@@ -43,7 +51,7 @@ final class PrivacyDiagnosticsController: ObservableObject {
   private var exactRequested = false
   private var stopped = false
 
-  private var latestSnapshot: ProtectionDiagnosticsSnapshot?
+  private var latestExactCandidate: ExactSnapshotCandidate?
   private var latestCategorySnapshot: ProtectionDiagnosticsSnapshot?
   private var leaseID: String?
   private var leaseDisplayID: Int?
@@ -151,8 +159,25 @@ final class PrivacyDiagnosticsController: ObservableObject {
     bestEffortRelease(connectForCleanup: true)
     closeConnection()
     clearLeaseState()
-    latestSnapshot = nil
     latestCategorySnapshot = nil
+  }
+
+  var debugExactCandidate: AnyObject? {
+    latestExactCandidate
+  }
+
+  func debugRetainsExactValue(_ marker: String) -> Bool {
+    let internalSnapshots = [latestExactCandidate?.snapshot, latestCategorySnapshot]
+      .compactMap { $0 }
+    let internalReasons = internalSnapshots.flatMap { snapshot in
+      snapshot.reasons + snapshot.displays.flatMap(\.reasons)
+    }
+    let reasons = internalReasons + globalReasons + displayDiagnostics.flatMap(\.reasons)
+    return reasons.contains { reason in
+      [reason.appName, reason.bundleID, reason.windowTitle, reason.rule]
+        .compactMap { $0 }
+        .contains(marker)
+    }
   }
 
   private var shouldSubscribe: Bool {
@@ -271,8 +296,10 @@ final class PrivacyDiagnosticsController: ObservableObject {
     lastErrorCode = nil
     switch message {
     case .snapshot(let snapshot):
-      latestSnapshot = snapshot
       latestCategorySnapshot = snapshot.categoryOnly()
+      latestExactCandidate = canAuthorizeExactSnapshot(snapshot)
+        ? ExactSnapshotCandidate(snapshot: snapshot)
+        : nil
       publishLatestSnapshot()
     case .lease(let leaseID, let displayID, let protectedGeneration, let released):
       handleLease(
@@ -422,25 +449,26 @@ final class PrivacyDiagnosticsController: ObservableObject {
       return
     }
 
-    guard canPublishExactSnapshot, let latestSnapshot else {
+    guard let candidate = latestExactCandidate,
+      canAuthorizeExactSnapshot(candidate.snapshot)
+    else {
       publish(categorySnapshot, exact: false)
       return
     }
-    publish(latestSnapshot.sanitizedForPublication(), exact: true)
+    publish(candidate.snapshot.sanitizedForPublication(), exact: true)
   }
 
-  private var canPublishExactSnapshot: Bool {
+  private func canAuthorizeExactSnapshot(_ snapshot: ProtectionDiagnosticsSnapshot) -> Bool {
     guard shouldRequestExact,
-      let latestSnapshot,
       let leaseID,
       !leaseID.isEmpty,
       let displayID = currentDisplayID,
       leaseDisplayID == displayID,
       leaseConnectionGeneration == connectionGeneration,
       let protectedGeneration,
-      latestSnapshot.generation >= protectedGeneration,
-      latestSnapshot.diagnosticsGuardActive,
-      let display = latestSnapshot.displays.first(where: { $0.id == displayID }),
+      snapshot.generation >= protectedGeneration,
+      snapshot.diagnosticsGuardActive,
+      let display = snapshot.displays.first(where: { $0.id == displayID }),
       display.screenshotBlocked,
       display.reasons.contains(where: { $0.code == .diagnosticsReveal })
     else {
@@ -456,6 +484,7 @@ final class PrivacyDiagnosticsController: ObservableObject {
   }
 
   private func hideExactSynchronously(clearPublishedModels: Bool) {
+    latestExactCandidate = nil
     protectedGeneration = nil
     showsExactValues = false
     if clearPublishedModels {
