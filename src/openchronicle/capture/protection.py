@@ -36,7 +36,8 @@ def failure_requires_fail_closed(
     snapshot: ProtectionSnapshot,
 ) -> bool:
     return snapshot.state is ProtectionState.FAILED and (
-        snapshot.diagnostics_guard_invalid
+        snapshot.diagnostics_guard_active
+        or snapshot.diagnostics_guard_invalid
         or cfg.screenshot_privacy_fail_closed
         or snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
     )
@@ -60,6 +61,7 @@ class ProtectionSnapshot:
     reason_trigger: str = "hover"
     display_reasons: DisplayProtectionReasons = field(default_factory=DisplayProtectionReasons)
     diagnostics_guard_invalid: bool = False
+    diagnostics_guard_active: bool = False
 
     @property
     def protected_regions(self) -> list[ScreenRegion]:
@@ -139,6 +141,15 @@ def build_protection_snapshot(
 ) -> ProtectionSnapshot:
     displays = inventory.displays if inventory is not None else ()
     all_ids = frozenset(display.id for display in displays)
+    requested_diagnostic_ids = frozenset(diagnostic_display_ids)
+    diagnostics_guard_active = diagnostics_guard_invalid or bool(requested_diagnostic_ids)
+    diagnostics_guard_unmapped = (
+        bool(requested_diagnostic_ids)
+        and inventory is not None
+        and _displays_are_usable(displays)
+        and not requested_diagnostic_ids <= all_ids
+    )
+    effective_guard_invalid = diagnostics_guard_invalid or diagnostics_guard_unmapped
     active_windows = tuple(window for window in inventory.windows if window.is_active) if inventory else ()
     active_window = active_windows[0] if len(active_windows) == 1 else None
     active_display_id = _display_for_active_window(active_window, displays)
@@ -181,7 +192,7 @@ def build_protection_snapshot(
         elif has_unmapped_sensitive_window:
             derived_failure_reason = ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED
 
-    if diagnostics_guard_invalid:
+    if effective_guard_invalid:
         state = ProtectionState.FAILED
         protected_ids = all_ids
     elif paused:
@@ -196,7 +207,7 @@ def build_protection_snapshot(
             for window, _matches in sensitive_windows
             for display in displays
             if _regions_intersect(display.region, window.region)
-        ) | (frozenset(diagnostic_display_ids) & all_ids)
+        ) | (requested_diagnostic_ids & all_ids)
         state = ProtectionState.PROTECTED if matched_ids else ProtectionState.INACTIVE
         protected_ids = all_ids if matched_ids and cfg.screenshot_monitor == "all" else matched_ids
 
@@ -222,7 +233,7 @@ def build_protection_snapshot(
                 for match in matches
             )
 
-    diagnostic_ids = frozenset(diagnostic_display_ids) & all_ids
+    diagnostic_ids = requested_diagnostic_ids & all_ids
     reasons.extend(
         ProtectionReason(ProtectionReasonCode.DIAGNOSTICS_REVEAL, display_id)
         for display_id in sorted(diagnostic_ids)
@@ -243,7 +254,7 @@ def build_protection_snapshot(
             for display in displays
             if display.id not in direct_reason_display_ids
         )
-    if diagnostics_guard_invalid:
+    if effective_guard_invalid:
         reasons.append(
             ProtectionReason(
                 ProtectionReasonCode.DIAGNOSTICS_GUARD_INVALID,
@@ -252,7 +263,7 @@ def build_protection_snapshot(
         )
     if paused:
         reasons.append(pause_reason or ProtectionReason(ProtectionReasonCode.MANUAL_PAUSE, None))
-    elif derived_failure_reason is not None and not diagnostics_guard_invalid:
+    elif derived_failure_reason is not None and not effective_guard_invalid:
         reasons.append(
             ProtectionReason(ProtectionReasonCode(derived_failure_reason.value), display_id=None)
         )
@@ -273,5 +284,6 @@ def build_protection_snapshot(
         reason_detail=cfg.privacy_reason_detail,
         reason_trigger=cfg.privacy_reason_trigger,
         display_reasons=DisplayProtectionReasons.from_reasons(reasons),
-        diagnostics_guard_invalid=diagnostics_guard_invalid,
+        diagnostics_guard_invalid=effective_guard_invalid,
+        diagnostics_guard_active=diagnostics_guard_active,
     )

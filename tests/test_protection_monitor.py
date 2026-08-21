@@ -17,8 +17,15 @@ from openchronicle.capture.privacy import (
     VisibleWindow,
     WindowInventory,
 )
-from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsGuardSnapshot
-from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
+from openchronicle.capture.privacy_diagnostics_guard import (
+    DiagnosticsGuardSnapshot,
+    DiagnosticsLeaseManager,
+)
+from openchronicle.capture.protection import (
+    ProtectionSnapshot,
+    ProtectionState,
+    failure_requires_fail_closed,
+)
 from openchronicle.capture.protection_monitor import (
     PrivacyProtectionMonitor,
     ProtectionDecision,
@@ -99,16 +106,20 @@ def make_monitor(
     overlay: FakeOverlay,
     style: str = "pill",
     config_path: Path | None = None,
-    inventory_reader: Callable[[], WindowInventory | None] | None = None,
+    inventory_reader: Callable[
+        [], WindowInventory | InventoryReadResult | None
+    ] | None = None,
     pause_reader: Callable[[], bool] | None = None,
     watchdog_seconds: float = 0.01,
     diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
     decision_listener: Callable[[ProtectionDecision], None] | None = None,
+    fail_closed: bool = True,
 ) -> PrivacyProtectionMonitor:
     cfg = CaptureConfig(
         screenshot_monitor="separate",
         privacy_indicator_style=style,
         deny_window_title_patterns=["InPrivate"],
+        screenshot_privacy_fail_closed=fail_closed,
     )
     return PrivacyProtectionMonitor(
         cfg,
@@ -237,6 +248,98 @@ def test_invalid_or_unreadable_diagnostics_guard_fails_closed(
     assert decision.snapshot.protected_display_ids == frozenset({1, 2})
     assert decision.snapshot.diagnostics_guard_invalid is True
     assert marker not in " ".join(reason.code.value for reason in decision.snapshot.display_reasons.reasons)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        ProtectionFailureReason.HELPER_EXIT,
+    ],
+)
+@pytest.mark.parametrize("cleanup", ["release", "prune"])
+def test_real_active_guard_keeps_inventory_failure_closed_until_safe_cleanup(
+    tmp_path: Path,
+    inventory: WindowInventory,
+    fake_overlay: FakeOverlay,
+    reason: ProtectionFailureReason,
+    cleanup: str,
+) -> None:
+    process_alive = True
+    manager = DiagnosticsLeaseManager(
+        tmp_path / "privacy-reveal.guard",
+        process_alive=lambda _pid: process_alive,
+    )
+    manager.load()
+    lease = manager.acquire(pid=os.getpid(), display_id=2)
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        inventory_reader=lambda: InventoryReadResult(None, reason),
+        diagnostics_guard_reader=manager.snapshot,
+        fail_closed=False,
+    )
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+
+    protected = monitor.decision_for_capture(force=True)
+
+    assert protected.snapshot.state is ProtectionState.FAILED
+    assert protected.snapshot.failure_reason is reason
+    assert protected.snapshot.diagnostics_guard_active is True
+    assert protected.snapshot.diagnostics_guard_invalid is False
+    assert protected.snapshot.protected_regions == []
+    assert failure_requires_fail_closed(cfg, protected.snapshot) is True
+    assert [item.code for item in protected.snapshot.reasons_for_display(None)] == [
+        ProtectionReasonCode(reason.value)
+    ]
+
+    if cleanup == "release":
+        manager.release(lease.lease_id, pid=os.getpid())
+    else:
+        process_alive = False
+        manager.prune_dead()
+    recovered = monitor.decision_for_capture(force=True)
+
+    assert recovered.snapshot.state is ProtectionState.FAILED
+    assert recovered.snapshot.diagnostics_guard_active is False
+    assert failure_requires_fail_closed(cfg, recovered.snapshot) is False
+
+
+def test_real_guard_display_missing_from_valid_inventory_fails_closed_globally(
+    tmp_path: Path,
+    inventory: WindowInventory,
+    fake_overlay: FakeOverlay,
+) -> None:
+    manager = DiagnosticsLeaseManager(
+        tmp_path / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    lease = manager.acquire(pid=os.getpid(), display_id=99)
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    monitor = make_monitor(
+        inventory=safe_inventory,
+        overlay=fake_overlay,
+        diagnostics_guard_reader=manager.snapshot,
+        fail_closed=False,
+    )
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+
+    protected = monitor.decision_for_capture(force=True)
+
+    assert protected.snapshot.state is ProtectionState.FAILED
+    assert protected.snapshot.diagnostics_guard_active is True
+    assert protected.snapshot.diagnostics_guard_invalid is True
+    assert protected.snapshot.protected_display_ids == frozenset({1, 2})
+    assert failure_requires_fail_closed(cfg, protected.snapshot) is True
+    assert [item.code for item in protected.snapshot.reasons_for_display(None)] == [
+        ProtectionReasonCode.DIAGNOSTICS_GUARD_INVALID
+    ]
+
+    manager.release(lease.lease_id, pid=os.getpid())
+    recovered = monitor.decision_for_capture(force=True)
+    assert recovered.snapshot.state is ProtectionState.INACTIVE
+    assert recovered.snapshot.diagnostics_guard_active is False
 
 
 def test_listener_exception_is_sanitized_and_does_not_stop_monitor(

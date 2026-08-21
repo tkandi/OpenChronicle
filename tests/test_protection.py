@@ -171,6 +171,64 @@ def test_invalid_diagnostics_guard_forces_global_fail_closed_protection() -> Non
     ]
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        ProtectionFailureReason.HELPER_EXIT,
+    ],
+)
+def test_active_diagnostics_guard_keeps_inventory_failure_globally_closed(
+    reason: ProtectionFailureReason,
+) -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    snapshot = build_protection_snapshot(
+        cfg,
+        None,
+        paused=False,
+        generation=43,
+        now=3.0,
+        failure_reason=reason,
+        diagnostic_display_ids=frozenset({2}),
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.diagnostics_guard_active is True
+    assert snapshot.diagnostics_guard_invalid is False
+    assert snapshot.protected_display_ids == frozenset()
+    assert snapshot.protected_regions == []
+    assert snapshot.ax_blocked is True
+    assert failure_requires_fail_closed(cfg, snapshot) is True
+    assert [item.code for item in snapshot.reasons_for_display(None)] == [
+        ProtectionReasonCode(reason.value)
+    ]
+
+
+def test_unmapped_active_diagnostics_guard_fails_closed_on_all_known_displays() -> None:
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        screenshot_privacy_fail_closed=False,
+    )
+    snapshot = build_protection_snapshot(
+        cfg,
+        WindowInventory(windows=(), displays=(LEFT, RIGHT)),
+        paused=False,
+        generation=44,
+        now=4.0,
+        diagnostic_display_ids=frozenset({99}),
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.diagnostics_guard_active is True
+    assert snapshot.diagnostics_guard_invalid is True
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.protected_regions == [LEFT.region, RIGHT.region]
+    assert failure_requires_fail_closed(cfg, snapshot) is True
+    assert [item.code for item in snapshot.reasons_for_display(None)] == [
+        ProtectionReasonCode.DIAGNOSTICS_GUARD_INVALID
+    ]
+
+
 def test_paused_snapshot_blocks_ax_without_inventory() -> None:
     snapshot = build_protection_snapshot(
         CaptureConfig(),

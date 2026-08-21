@@ -16,16 +16,25 @@ from pathlib import Path
 import pytest
 
 from openchronicle.capture import privacy_diagnostics as diagnostics_mod
-from openchronicle.capture.privacy import DisplayInfo, ScreenRegion
+from openchronicle.capture.privacy import (
+    DisplayInfo,
+    InventoryReadResult,
+    ProtectionFailureReason,
+    ScreenRegion,
+)
 from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
 from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsLeaseManager
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
-from openchronicle.capture.protection_monitor import ProtectionDecision
+from openchronicle.capture.protection_monitor import (
+    PrivacyProtectionMonitor,
+    ProtectionDecision,
+)
 from openchronicle.capture.protection_reason import (
     DisplayProtectionReasons,
     ProtectionReason,
     ProtectionReasonCode,
 )
+from openchronicle.config import CaptureConfig
 
 _MAX_LINE_BYTES = 64 * 1024
 
@@ -55,6 +64,20 @@ class FakeProtectionCallbacks:
         if self.wait_observer is not None:
             self.wait_observer(display_id)
         return self.confirmed_generation if self.confirmed else None
+
+
+class _AlwaysConfirmedOverlay:
+    def render(self, _snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+        return True
+
+    def clear(self, _generation: int, timeout: float = 0.5) -> bool:
+        return True
+
+    def mark_terminal(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
 
 
 def _read_message(client: socket.socket) -> dict[str, object]:
@@ -151,7 +174,7 @@ def _start_test_server(
     original_cwd = Path.cwd()
     os.chdir(tmp_path)
     runtime_dir = Path("runtime")
-    runtime_dir.mkdir(mode=0o700)
+    runtime_dir.mkdir(mode=0o700, exist_ok=True)
     runtime_dir.chmod(0o700)
     callbacks = callbacks or FakeProtectionCallbacks()
     manager = manager or DiagnosticsLeaseManager(
@@ -211,6 +234,62 @@ def test_category_subscription_never_contains_exact_values(tmp_path: Path) -> No
         assert marker not in json.dumps(response)
     finally:
         _stop_test_server(server)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        ProtectionFailureReason.HELPER_EXIT,
+    ],
+)
+def test_active_guard_inventory_failure_publishes_fixed_category_diagnostics(
+    tmp_path: Path,
+    reason: ProtectionFailureReason,
+) -> None:
+    manager = DiagnosticsLeaseManager(
+        tmp_path / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    manager.acquire(pid=os.getpid(), display_id=2)
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=tmp_path / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: InventoryReadResult(None, reason),
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+    )
+    decision = monitor.decision_for_capture(force=True)
+    server = _start_test_server(tmp_path, manager=manager, decision=decision)
+    try:
+        response = _round_trip(
+            server.socket_path,
+            {"schema_version": 1, "action": "subscribe"},
+        )
+        denied = _round_trip(
+            server.socket_path,
+            {"schema_version": 1, "action": "subscribe", "detail": "exact"},
+        )
+
+        assert response["type"] == "snapshot"
+        assert response["state"] == "failed"
+        assert response["diagnostics_guard_active"] is True
+        assert response["displays"] == []
+        assert response["reasons"] == [
+            {"code": reason.value, "display_id": None}
+        ]
+        assert set(response["reasons"][0]) == {"code", "display_id"}
+        assert denied == {
+            "schema_version": 1,
+            "type": "error",
+            "code": "lease_required",
+        }
+    finally:
+        _stop_test_server(server)
+        monitor.stop()
 
 
 def test_created_at_is_stored_publish_time_in_rfc3339_utc(tmp_path: Path) -> None:

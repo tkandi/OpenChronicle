@@ -741,6 +741,7 @@ class PrivacyDiagnosticsServer:
             "generation": snapshot.generation,
             "state": snapshot.state.value,
             "indicator_confirmed": decision.indicator_confirmed,
+            "diagnostics_guard_active": snapshot.diagnostics_guard_active,
             "created_at": created_at,
             "reasons": [
                 reason.to_payload(detail)

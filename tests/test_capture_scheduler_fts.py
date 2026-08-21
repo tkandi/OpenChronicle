@@ -16,6 +16,7 @@ from openchronicle.capture import window_meta
 from openchronicle.capture.ax_models import AXCaptureResult
 from openchronicle.capture.privacy import (
     DisplayInfo,
+    InventoryReadResult,
     ProtectionFailureReason,
     ScreenRegion,
     VisibleWindow,
@@ -718,6 +719,160 @@ def test_inventory_failure_is_fail_open_only_when_configured(
         None,
         protection_monitor=monitor,
     )
+
+    assert out is not None
+    assert provider.calls == 1
+    assert len(screenshot_calls) == 1
+    assert screenshot_calls[0]["blocked_regions"] == []
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        ProtectionFailureReason.HELPER_EXIT,
+    ],
+)
+def test_real_active_guard_makes_fail_open_inventory_failure_terminal_before_io(
+    ac_root: Path,
+    monkeypatch,
+    reason: ProtectionFailureReason,
+) -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    manager = DiagnosticsLeaseManager(
+        ac_root / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    manager.acquire(pid=os.getpid(), display_id=2)
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: InventoryReadResult(None, reason),
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+    )
+    provider = _FakeProvider(raw_json=None)
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+    )
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert out is None
+    assert provider.calls == 0
+    assert screenshot_calls == []
+
+
+def test_real_unmapped_guard_display_is_terminal_before_ax_or_screenshot(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(windows=(), displays=displays)
+    manager = DiagnosticsLeaseManager(
+        ac_root / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    manager.acquire(pid=os.getpid(), display_id=99)
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+    )
+    provider = _FakeProvider(raw_json=None)
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+    )
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert out is None
+    assert provider.calls == 0
+    assert screenshot_calls == []
+
+
+def test_real_monitor_without_guard_preserves_configured_inventory_fail_open(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    manager = DiagnosticsLeaseManager(
+        ac_root / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: InventoryReadResult(
+            None,
+            ProtectionFailureReason.HELPER_EXIT,
+        ),
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+    )
+    provider = _FakeProvider(raw_json=None)
+    screenshot_calls: list[dict] = []
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+    )
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
 
     assert out is not None
     assert provider.calls == 1
