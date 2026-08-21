@@ -13,6 +13,9 @@ from . import paths
 PRIVACY_INDICATOR_STYLES = frozenset(
     {"off", "border", "shield", "pill", "quiet-shield", "banner"}
 )
+PRIVACY_REASON_DISPLAY_MODES = frozenset({"overlay", "diagnostics", "hybrid"})
+PRIVACY_REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
+PRIVACY_REASON_TRIGGERS = frozenset({"always", "hover", "click"})
 
 
 def _str_list(value: Any) -> list[str]:
@@ -37,6 +40,9 @@ class ModelConfig:
 @dataclass
 class CaptureConfig:
     privacy_indicator_style: str = "pill"
+    privacy_reason_display: str = "hybrid"
+    privacy_reason_detail: str = "exact"
+    privacy_reason_trigger: str = "hover"
     # Event-driven capture knobs
     event_driven: bool = True  # consume mac-ax-watcher events
     heartbeat_minutes: int = 10  # periodic capture even without events
@@ -79,6 +85,18 @@ class CaptureConfig:
             indicator_style
             if indicator_style in PRIVACY_INDICATOR_STYLES
             else "pill"
+        )
+        reason_display = str(self.privacy_reason_display or "hybrid").strip().lower()
+        self.privacy_reason_display = (
+            reason_display if reason_display in PRIVACY_REASON_DISPLAY_MODES else "hybrid"
+        )
+        reason_detail = str(self.privacy_reason_detail or "exact").strip().lower()
+        self.privacy_reason_detail = (
+            reason_detail if reason_detail in PRIVACY_REASON_DETAIL_MODES else "exact"
+        )
+        reason_trigger = str(self.privacy_reason_trigger or "hover").strip().lower()
+        self.privacy_reason_trigger = (
+            reason_trigger if reason_trigger in PRIVACY_REASON_TRIGGERS else "hover"
         )
         mode = str(self.screenshot_monitor or "primary").strip().lower()
         self.screenshot_monitor = mode if mode in {"primary", "all", "separate"} else "primary"
@@ -290,6 +308,9 @@ screenshot_monitor = "primary"          # "primary" (legacy single monitor), "al
 screenshot_privacy_mode = "skip-monitor" # skip monitors containing any visible app/bundle/title denylist match
 screenshot_privacy_fail_closed = true    # if window/display inventory fails, abort the capture tick
 privacy_indicator_style = "pill"       # off, border, shield, pill, quiet-shield, or banner
+privacy_reason_display = "hybrid"      # overlay, diagnostics, or hybrid
+privacy_reason_detail = "exact"        # category, exact, or tiered
+privacy_reason_trigger = "hover"       # always, hover, or click
 screenshot_max_width = 1920
 screenshot_jpeg_quality = 80
 ax_depth = 100                # Electron apps (Claude Desktop, VS Code, Slack) have deep DOM; 8 only reaches the chrome

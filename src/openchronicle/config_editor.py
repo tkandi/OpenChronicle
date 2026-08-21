@@ -57,6 +57,9 @@ EDITABLE_PATHS = {
     "capture.screenshot_privacy_mode",
     "capture.screenshot_privacy_fail_closed",
     "capture.privacy_indicator_style",
+    "capture.privacy_reason_display",
+    "capture.privacy_reason_detail",
+    "capture.privacy_reason_trigger",
     "capture.buffer_retention_hours",
     "capture.screenshot_retention_hours",
     "capture.buffer_max_mb",
@@ -220,6 +223,45 @@ def validate_mapping(raw: dict[str, Any]) -> None:
             "capture.privacy_indicator_style must be off, border, shield, pill, "
             "quiet-shield, or banner"
         )
+    reason_display = _require_type(
+        capture,
+        "privacy_reason_display",
+        str,
+        "capture.privacy_reason_display",
+    )
+    if (
+        reason_display is not None
+        and reason_display.lower() not in config_mod.PRIVACY_REASON_DISPLAY_MODES
+    ):
+        raise ConfigEditorError(
+            "capture.privacy_reason_display must be overlay, diagnostics, or hybrid"
+        )
+    reason_detail = _require_type(
+        capture,
+        "privacy_reason_detail",
+        str,
+        "capture.privacy_reason_detail",
+    )
+    if (
+        reason_detail is not None
+        and reason_detail.lower() not in config_mod.PRIVACY_REASON_DETAIL_MODES
+    ):
+        raise ConfigEditorError(
+            "capture.privacy_reason_detail must be category, exact, or tiered"
+        )
+    reason_trigger = _require_type(
+        capture,
+        "privacy_reason_trigger",
+        str,
+        "capture.privacy_reason_trigger",
+    )
+    if (
+        reason_trigger is not None
+        and reason_trigger.lower() not in config_mod.PRIVACY_REASON_TRIGGERS
+    ):
+        raise ConfigEditorError(
+            "capture.privacy_reason_trigger must be always, hover, or click"
+        )
     for key in (
         "deny_app_names",
         "deny_bundle_ids",
@@ -378,6 +420,9 @@ def snapshot_payload(path: Path) -> dict[str, Any]:
                         cfg.capture.screenshot_privacy_fail_closed
                     ),
                     "privacy_indicator_style": cfg.capture.privacy_indicator_style,
+                    "privacy_reason_display": cfg.capture.privacy_reason_display,
+                    "privacy_reason_detail": cfg.capture.privacy_reason_detail,
+                    "privacy_reason_trigger": cfg.capture.privacy_reason_trigger,
                     "screenshot_jpeg_quality": cfg.capture.screenshot_jpeg_quality,
                     "privacy_counts": {
                         field: len(getattr(cfg.capture, field))

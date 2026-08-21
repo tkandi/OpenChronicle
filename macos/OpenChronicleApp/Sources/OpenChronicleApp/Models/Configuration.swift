@@ -62,6 +62,9 @@ struct CaptureConfigurationValue: Decodable, Equatable {
   let screenshotPrivacyFailClosed: Bool
   let screenshotJPEGQuality: Int
   let privacyIndicatorStyle: String?
+  let privacyReasonDisplay: String?
+  let privacyReasonDetail: String?
+  let privacyReasonTrigger: String?
   let privacyCounts: [String: Int]?
 
   enum CodingKeys: String, CodingKey {
@@ -76,6 +79,9 @@ struct CaptureConfigurationValue: Decodable, Equatable {
     case screenshotPrivacyFailClosed = "screenshot_privacy_fail_closed"
     case screenshotJPEGQuality = "screenshot_jpeg_quality"
     case privacyIndicatorStyle = "privacy_indicator_style"
+    case privacyReasonDisplay = "privacy_reason_display"
+    case privacyReasonDetail = "privacy_reason_detail"
+    case privacyReasonTrigger = "privacy_reason_trigger"
     case privacyCounts = "privacy_counts"
   }
 
@@ -160,6 +166,9 @@ struct ConfigurationDraft: Equatable {
   var screenshotPrivacyMode: String
   var screenshotPrivacyFailClosed: Bool
   var privacyIndicatorStyle: String
+  var privacyReasonDisplay: String
+  var privacyReasonDetail: String
+  var privacyReasonTrigger: String
   var bufferRetentionHours: Int
   var screenshotRetentionHours: Int
   var bufferMaxMB: Int
@@ -202,6 +211,15 @@ struct ConfigurationDraft: Equatable {
     privacyIndicatorStyle = PrivacyIndicatorStyleOption(
       rawValue: values.capture.privacyIndicatorStyle ?? ""
     )?.rawValue ?? PrivacyIndicatorStyleOption.defaultStyle.rawValue
+    privacyReasonDisplay = PrivacyReasonDisplayOption(
+      rawValue: values.capture.privacyReasonDisplay ?? ""
+    )?.rawValue ?? PrivacyReasonDisplayOption.defaultValue.rawValue
+    privacyReasonDetail = PrivacyReasonDetailOption(
+      rawValue: values.capture.privacyReasonDetail ?? ""
+    )?.rawValue ?? PrivacyReasonDetailOption.defaultValue.rawValue
+    privacyReasonTrigger = PrivacyReasonTriggerOption(
+      rawValue: values.capture.privacyReasonTrigger ?? ""
+    )?.rawValue ?? PrivacyReasonTriggerOption.defaultValue.rawValue
     bufferRetentionHours = values.capture.bufferRetentionHours
     screenshotRetentionHours = values.capture.screenshotRetentionHours
     bufferMaxMB = values.capture.bufferMaxMB
@@ -302,6 +320,24 @@ struct ConfigurationDraft: Equatable {
       "capture.privacy_indicator_style",
       privacyIndicatorStyle,
       original.privacyIndicatorStyle
+    )
+    add(
+      &updates,
+      "capture.privacy_reason_display",
+      privacyReasonDisplay,
+      original.privacyReasonDisplay
+    )
+    add(
+      &updates,
+      "capture.privacy_reason_detail",
+      privacyReasonDetail,
+      original.privacyReasonDetail
+    )
+    add(
+      &updates,
+      "capture.privacy_reason_trigger",
+      privacyReasonTrigger,
+      original.privacyReasonTrigger
     )
     add(
       &updates,

@@ -108,6 +108,38 @@ def test_capture_privacy_indicator_style_config(tmp_path: Path) -> None:
     assert config.load(tmp_path / "missing.toml").capture.privacy_indicator_style == "pill"
 
 
+def test_privacy_reason_settings_default_and_normalize(tmp_path: Path) -> None:
+    missing = config.load(tmp_path / "missing.toml").capture
+    assert (
+        missing.privacy_reason_display,
+        missing.privacy_reason_detail,
+        missing.privacy_reason_trigger,
+    ) == ("hybrid", "exact", "hover")
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[capture]\nprivacy_reason_display="OVERLAY"\n'
+        'privacy_reason_detail="CATEGORY"\nprivacy_reason_trigger="CLICK"\n'
+    )
+    capture = config.load(path).capture
+    assert (
+        capture.privacy_reason_display,
+        capture.privacy_reason_detail,
+        capture.privacy_reason_trigger,
+    ) == ("overlay", "category", "click")
+
+    path.write_text(
+        '[capture]\nprivacy_reason_display="bad"\n'
+        'privacy_reason_detail="bad"\nprivacy_reason_trigger="bad"\n'
+    )
+    capture = config.load(path).capture
+    assert (
+        capture.privacy_reason_display,
+        capture.privacy_reason_detail,
+        capture.privacy_reason_trigger,
+    ) == ("hybrid", "exact", "hover")
+
+
 def test_write_default_creates_file(tmp_path: Path) -> None:
     p = tmp_path / "config.toml"
     assert config.write_default_if_missing(p)

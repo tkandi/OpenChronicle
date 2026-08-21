@@ -43,6 +43,8 @@ final class ConfigurationTests: XCTestCase {
           "screenshot_monitor": "separate", "screenshot_privacy_mode": "skip-monitor",
           "screenshot_privacy_fail_closed": true, "screenshot_jpeg_quality": 80,
           "privacy_indicator_style": "pill",
+          "privacy_reason_display": "hybrid", "privacy_reason_detail": "exact",
+          "privacy_reason_trigger": "hover",
           "privacy_counts": {
             "deny_app_names": 1, "deny_bundle_ids": 0,
             "deny_window_title_patterns": 1, "deny_url_patterns": 0,
@@ -104,6 +106,25 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(updates["capture.privacy_indicator_style"] as? String, "border")
   }
 
+  func testPrivacyReasonSettingsEmitOnlyChangedPaths() throws {
+    let snapshot = try JSONDecoder().decode(
+      ConfigurationSnapshot.self,
+      from: Data(snapshotPayload(path: "/tmp/config.toml").utf8)
+    )
+    let original = try XCTUnwrap(ConfigurationDraft(snapshot: snapshot))
+    var edited = original
+    edited.privacyReasonDisplay = "diagnostics"
+    edited.privacyReasonDetail = "category"
+    edited.privacyReasonTrigger = "click"
+
+    let updates = edited.updates(comparedTo: original)
+
+    XCTAssertEqual(updates.count, 3)
+    XCTAssertEqual(updates["capture.privacy_reason_display"] as? String, "diagnostics")
+    XCTAssertEqual(updates["capture.privacy_reason_detail"] as? String, "category")
+    XCTAssertEqual(updates["capture.privacy_reason_trigger"] as? String, "click")
+  }
+
   func testPrivacyIndicatorStyleDefaultsForMissingAndUnknownSnapshotValues() throws {
     let payload = snapshotPayload(path: "/tmp/config.toml")
     let missing = payload.replacingOccurrences(
@@ -124,6 +145,28 @@ final class ConfigurationTests: XCTestCase {
         try XCTUnwrap(ConfigurationDraft(snapshot: snapshot)).privacyIndicatorStyle,
         "pill"
       )
+    }
+  }
+
+  func testPrivacyReasonSettingsDefaultForMissingAndUnknownSnapshotValues() throws {
+    let payload = snapshotPayload(path: "/tmp/config.toml")
+    let missing = payload
+      .replacingOccurrences(of: "          \"privacy_reason_display\": \"hybrid\", \"privacy_reason_detail\": \"exact\",\n", with: "")
+      .replacingOccurrences(of: "          \"privacy_reason_trigger\": \"hover\",\n", with: "")
+    let unknown = payload
+      .replacingOccurrences(of: "\"privacy_reason_display\": \"hybrid\"", with: "\"privacy_reason_display\": \"future-display\"")
+      .replacingOccurrences(of: "\"privacy_reason_detail\": \"exact\"", with: "\"privacy_reason_detail\": \"future-detail\"")
+      .replacingOccurrences(of: "\"privacy_reason_trigger\": \"hover\"", with: "\"privacy_reason_trigger\": \"future-trigger\"")
+
+    for variant in [missing, unknown] {
+      let snapshot = try JSONDecoder().decode(
+        ConfigurationSnapshot.self,
+        from: Data(variant.utf8)
+      )
+      let draft = try XCTUnwrap(ConfigurationDraft(snapshot: snapshot))
+      XCTAssertEqual(draft.privacyReasonDisplay, "hybrid")
+      XCTAssertEqual(draft.privacyReasonDetail, "exact")
+      XCTAssertEqual(draft.privacyReasonTrigger, "hover")
     }
   }
 

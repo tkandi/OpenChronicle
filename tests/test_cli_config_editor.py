@@ -69,6 +69,56 @@ def test_config_indicator_style_is_editable_and_validated(ac_root: Path) -> None
     assert "privacy_indicator_style" in payload["error"]
 
 
+def test_privacy_reason_settings_patch_and_validate(ac_root: Path) -> None:
+    path = ac_root / "config.toml"
+    path.write_text("[capture]\nprivacy_reason_display = \"hybrid\"\n")
+    runner = CliRunner()
+    _, snapshot = _invoke_json(runner, ["config", "--json"])
+    capture = snapshot["values"]["capture"]
+    assert (
+        capture["privacy_reason_display"],
+        capture["privacy_reason_detail"],
+        capture["privacy_reason_trigger"],
+    ) == ("hybrid", "exact", "hover")
+
+    for path_name, value in (
+        ("capture.privacy_reason_display", "diagnostics"),
+        ("capture.privacy_reason_detail", "category"),
+        ("capture.privacy_reason_trigger", "click"),
+    ):
+        result, payload = _invoke_json(
+            runner,
+            ["config", "--patch-json"],
+            {
+                "expected_sha256": snapshot["sha256"],
+                "updates": {path_name: value},
+            },
+        )
+        assert result.exit_code == 0, result.output
+        assert payload["changed"] is True
+        snapshot = _invoke_json(runner, ["config", "--json"])[1]
+
+    parsed = tomllib.loads(path.read_text())
+    assert parsed["capture"] == {
+        "privacy_reason_display": "diagnostics",
+        "privacy_reason_detail": "category",
+        "privacy_reason_trigger": "click",
+    }
+
+    for field in (
+        "privacy_reason_display",
+        "privacy_reason_detail",
+        "privacy_reason_trigger",
+    ):
+        result, payload = _invoke_json(
+            runner,
+            ["config", "--validate-json"],
+            {"content": f'[capture]\n{field} = "invalid"\n'},
+        )
+        assert result.exit_code == 2
+        assert payload["error"].startswith(f"capture.{field} ")
+
+
 def test_config_privacy_json_is_explicit_and_still_omits_api_keys(ac_root: Path) -> None:
     secret = "sk-local-secret-that-must-not-leak"
     private_rule = "private.example.com"
