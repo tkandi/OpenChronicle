@@ -19,7 +19,12 @@ from .privacy import (
     read_window_inventory_result,
 )
 from .privacy_overlay import PrivacyOverlayClient
-from .protection import ProtectionSnapshot, ProtectionState, build_protection_snapshot
+from .protection import (
+    ProtectionSnapshot,
+    ProtectionState,
+    build_protection_snapshot,
+    failure_requires_fail_closed,
+)
 
 logger = get("openchronicle.capture")
 _MONITOR_JOIN_TIMEOUT = 0.25
@@ -203,7 +208,7 @@ class PrivacyProtectionMonitor:
             paused = self._pause_reader()
         except Exception as exc:  # A pause-read failure must not allow capture.
             logger.warning("privacy protection pause read failed: %s", type(exc).__name__)
-            return False, None, ProtectionFailureReason.INVENTORY_UNAVAILABLE
+            return False, None, ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
         try:
             result = self._inventory_reader()
         except Exception:  # Inventory metadata and exception text must never be logged.
@@ -227,7 +232,7 @@ class PrivacyProtectionMonitor:
         try:
             if (
                 snapshot.state is ProtectionState.FAILED
-                and not self._cfg.screenshot_privacy_fail_closed
+                and not failure_requires_fail_closed(self._cfg, snapshot)
             ):
                 if snapshot.indicator_style == "off":
                     self._overlay.render(snapshot)
@@ -245,11 +250,12 @@ class PrivacyProtectionMonitor:
         if snapshot.state is not ProtectionState.FAILED or snapshot.failure_reason is None:
             self._last_logged_failure = None
             return
-        key = (snapshot.failure_reason, self._cfg.screenshot_privacy_fail_closed)
+        requires_fail_closed = failure_requires_fail_closed(self._cfg, snapshot)
+        key = (snapshot.failure_reason, requires_fail_closed)
         if key == self._last_logged_failure:
             return
         self._last_logged_failure = key
-        if self._cfg.screenshot_privacy_fail_closed:
+        if requires_fail_closed:
             logger.warning(
                 "privacy protection failed closed: reason=%s",
                 snapshot.failure_reason.value,

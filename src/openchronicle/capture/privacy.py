@@ -54,6 +54,7 @@ class WindowInventory:
 
 
 class ProtectionFailureReason(StrEnum):
+    PAUSE_STATE_UNAVAILABLE = "pause_state_unavailable"
     INVENTORY_UNAVAILABLE = "inventory_unavailable"
     HELPER_EXIT = "helper_exit"
     HELPER_PARSE = "helper_parse"

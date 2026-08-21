@@ -26,6 +26,16 @@ class ProtectionState(StrEnum):
     FAILED = "failed"
 
 
+def failure_requires_fail_closed(
+    cfg: CaptureConfig,
+    snapshot: ProtectionSnapshot,
+) -> bool:
+    return snapshot.state is ProtectionState.FAILED and (
+        cfg.screenshot_privacy_fail_closed
+        or snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+    )
+
+
 @dataclass(frozen=True)
 class ProtectionSnapshot:
     generation: int

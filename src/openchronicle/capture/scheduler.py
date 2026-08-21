@@ -21,7 +21,7 @@ from ..logger import get
 from ..store import fts as fts_store
 from . import ax_capture, privacy, s1_parser, screenshot, window_meta
 from .event_dispatcher import EventDispatcher
-from .protection import ProtectionState
+from .protection import ProtectionState, failure_requires_fail_closed
 from .protection_monitor import PrivacyProtectionMonitor, ProtectionDecision
 from .watcher import AXWatcherProcess
 
@@ -29,17 +29,18 @@ logger = get("openchronicle.capture")
 
 
 def _decision_is_terminal(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
-    state = decision.snapshot.state
-    return state is ProtectionState.PAUSED or (
-        state is ProtectionState.FAILED and cfg.screenshot_privacy_fail_closed
+    snapshot = decision.snapshot
+    return snapshot.state is ProtectionState.PAUSED or failure_requires_fail_closed(
+        cfg, snapshot
     )
 
 
 def _decision_blocks_ax(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
+    snapshot = decision.snapshot
     return (
-        decision.snapshot.state is not ProtectionState.FAILED
-        or cfg.screenshot_privacy_fail_closed
-    ) and decision.snapshot.ax_blocked
+        snapshot.state is not ProtectionState.FAILED
+        or failure_requires_fail_closed(cfg, snapshot)
+    ) and snapshot.ax_blocked
 
 
 def _now_iso() -> str:

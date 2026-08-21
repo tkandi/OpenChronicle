@@ -10,11 +10,40 @@ from openchronicle.capture.protection import (
     ProtectionFailureReason,
     ProtectionState,
     build_protection_snapshot,
+    failure_requires_fail_closed,
 )
 from openchronicle.config import CaptureConfig
 
 LEFT = DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True)
 RIGHT = DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False)
+
+
+@pytest.mark.parametrize(
+    ("reason", "configured_fail_closed", "expected"),
+    [
+        (ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE, False, True),
+        (ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE, True, True),
+        (ProtectionFailureReason.INVENTORY_UNAVAILABLE, False, False),
+        (ProtectionFailureReason.INVENTORY_UNAVAILABLE, True, True),
+    ],
+)
+def test_failure_policy_distinguishes_pause_state_from_inventory(
+    reason: ProtectionFailureReason,
+    configured_fail_closed: bool,
+    expected: bool,
+) -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=configured_fail_closed)
+    snapshot = build_protection_snapshot(
+        cfg,
+        None,
+        paused=False,
+        generation=90,
+        now=20.0,
+        failure_reason=reason,
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert failure_requires_fail_closed(cfg, snapshot) is expected
 
 
 def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:

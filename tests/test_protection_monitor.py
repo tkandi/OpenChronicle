@@ -302,6 +302,51 @@ def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmatio
     assert fake_overlay.clear_generations == [decision.snapshot.generation]
 
 
+def test_pause_reader_failure_stays_closed_when_inventory_policy_is_fail_open(
+    inventory, fake_overlay, caplog,
+) -> None:
+    marker = "private-pause-marker-path"
+    pause_available = False
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+
+    def read_pause() -> bool:
+        if not pause_available:
+            raise OSError(marker)
+        return False
+
+    cfg = CaptureConfig(
+        privacy_indicator_style="pill",
+        screenshot_privacy_fail_closed=False,
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: safe_inventory,
+        pause_reader=read_pause,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+        decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert (
+        decision.snapshot.failure_reason
+        is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+    )
+    assert decision.indicator_confirmed is True
+    assert fake_overlay.render_calls == 1
+    assert fake_overlay.clear_calls == 0
+    assert "privacy protection failed closed: reason=pause_state_unavailable" in caplog.text
+    assert marker not in caplog.text
+
+    pause_available = True
+    recovered = monitor.decision_for_capture(force=True)
+
+    assert recovered.snapshot.state is ProtectionState.INACTIVE
+    assert fake_overlay.clear_calls == 1
+
+
 def test_failed_snapshot_logs_one_fixed_reason_without_private_metadata(inventory, fake_overlay) -> None:
     marker = "private-helper-stderr"
     monitor = make_monitor(

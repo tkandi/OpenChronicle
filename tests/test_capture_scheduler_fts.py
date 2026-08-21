@@ -15,6 +15,7 @@ from openchronicle.capture import window_meta
 from openchronicle.capture.ax_models import AXCaptureResult
 from openchronicle.capture.privacy import (
     DisplayInfo,
+    ProtectionFailureReason,
     ScreenRegion,
     VisibleWindow,
     WindowInventory,
@@ -85,6 +86,7 @@ def _protection_decision(
     protected_ids: set[int],
     confirmed: bool,
     fresh: bool = True,
+    failure_reason: ProtectionFailureReason | None = None,
 ) -> ProtectionDecision:
     now = time.monotonic()
     displays = (
@@ -101,17 +103,23 @@ def _protection_decision(
         active_display_id=active_display_id,
         created_monotonic=now,
         fresh_until=now + 1.0 if fresh else now - 1.0,
+        failure_reason=failure_reason,
     )
     return ProtectionDecision(snapshot=snapshot, indicator_confirmed=confirmed)
 
 
-def _failed_decision() -> ProtectionDecision:
+def _failed_decision(
+    *,
+    reason: ProtectionFailureReason = ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+    generation: int = 21,
+) -> ProtectionDecision:
     return _protection_decision(
-        generation=21,
+        generation=generation,
         state=ProtectionState.FAILED,
         active_display_id=None,
         protected_ids=set(),
         confirmed=True,
+        failure_reason=reason,
     )
 
 
@@ -563,6 +571,73 @@ def test_inventory_failure_is_fail_open_only_when_configured(
     assert provider.calls == 1
     assert len(screenshot_calls) == 1
     assert screenshot_calls[0]["blocked_regions"] == []
+
+
+def test_pause_state_failure_blocks_before_ax_even_when_inventory_is_fail_open(
+    ac_root: Path, monkeypatch,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    monitor = _FakeProtectionMonitor(
+        _failed_decision(reason=ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE)
+    )
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(AssertionError("screenshot must not run")),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(screenshot_privacy_fail_closed=False),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert provider.calls == 0
+    assert monitor.force_calls == [True]
+
+
+def test_pause_state_failure_during_ax_discards_when_inventory_is_fail_open(
+    ac_root: Path, monkeypatch,
+) -> None:
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    monitor = _FakeProtectionMonitor(
+        _protection_decision(
+            generation=70,
+            active_display_id=1,
+            protected_ids={2},
+            confirmed=True,
+        ),
+        _failed_decision(
+            reason=ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE,
+            generation=71,
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            include_screenshot=False,
+            screenshot_privacy_fail_closed=False,
+        ),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert provider.calls == 1
+    assert monitor.force_calls == [True, False]
 
 
 def test_post_ax_validation_that_newly_blocks_ax_discards_whole_capture(
