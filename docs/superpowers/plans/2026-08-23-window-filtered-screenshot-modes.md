@@ -148,6 +148,20 @@ ID, geometry, image, or output-completeness failure returns `None` without parti
 - Consumes protected window IDs/regions and filtered screenshot backend.
 - Produces safe mode selection: filtered capture or current skip-monitor fallback.
 
+Every native overlay acknowledgement includes `window_ids: [UInt32]`. After rendering, the helper
+returns every visible indicator and input-panel window ID for that exact generation; successful
+clear/`off` acknowledgements use an empty list. Python accepts only positive unique IDs and carries
+them in `ProtectionDecision.indicator_window_ids` without persistence or logging. A non-`off`
+protected indicator without a non-empty exact-generation ID set cannot authorize filtered capture.
+
+For `mask-window` and `exclude-window`, inventory/protection failure is screenshot-fail-closed even
+when the legacy `screenshot_privacy_fail_closed` option is false. A direct capture without a
+protection monitor must run the existing visible-window check and can only use skip-monitor; it may
+never call ordinary unblocked `mss`. After a filtered helper succeeds, force one fresh protection
+decision before persistence. If protected IDs/regions, display inventory, window-filter eligibility,
+or overlay IDs changed, discard the filtered frames and use the latest decision's skip-monitor
+fallback; never persist stale filtered frames.
+
 - [ ] Write RED tests for overlay acknowledgement window IDs, monitor creation in both new modes,
   and every fallback condition.
 - [ ] Integrate filtered capture only for complete rule-matched window decisions.
@@ -155,6 +169,8 @@ ID, geometry, image, or output-completeness failure returns `None` without parti
   source-exclude it; a non-`off` indicator without complete IDs falls back to `skip-monitor`.
 - [ ] Prove diagnostics/pause/failure/unconfirmed/missing-ID/helper-error paths never call unfiltered
   protected-monitor capture.
+- [ ] Prove direct captures without a monitor and post-helper protection changes fail closed or use
+  the latest skip-monitor regions without persisting stale frames.
 - [ ] Run focused integration/boundary tests and commit.
 
 ### Task 6: Full Verification, Packaging, Installation, And Live Acceptance
