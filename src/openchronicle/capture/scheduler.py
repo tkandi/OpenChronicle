@@ -141,6 +141,26 @@ def _fallback_regions_are_valid(decision: ProtectionDecision) -> bool:
     return not snapshot.protected_display_ids and not snapshot.protected_regions
 
 
+def _grab_current_monitor_screenshots(
+    cfg: CaptureConfig,
+    decision: ProtectionDecision,
+) -> list[screenshot.Screenshot]:
+    snapshot = decision.snapshot
+    if snapshot.state is ProtectionState.FAILED:
+        blocked_regions: list[privacy.ScreenRegion] = []
+    elif snapshot.indicator_style != "off" and not decision.indicator_confirmed:
+        logger.warning("screenshot skipped: privacy indicator not confirmed")
+        return []
+    else:
+        blocked_regions = snapshot.protected_regions
+    return screenshot.grab_many(
+        monitor_mode=cfg.screenshot_monitor,
+        max_width=cfg.screenshot_max_width,
+        jpeg_quality=cfg.screenshot_jpeg_quality,
+        blocked_regions=blocked_regions,
+    )
+
+
 def _grab_fresh_skip_monitor_fallback(
     cfg: CaptureConfig,
     protection_monitor: PrivacyProtectionMonitor,
@@ -268,7 +288,10 @@ def _build_capture(
                 jpeg_quality=cfg.screenshot_jpeg_quality,
                 blocked_regions=blocked_regions,
             )
-        elif _filtered_capture_is_eligible(cfg, decision):
+        elif (
+            cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES
+            and _filtered_capture_is_eligible(cfg, decision)
+        ):
             authorization = _filtered_authorization_key(decision)
             shots = screenshot.grab_filtered_many(
                 monitor_mode=cfg.screenshot_monitor,
@@ -306,7 +329,7 @@ def _build_capture(
                         return None
                     shots, latest = fallback
                 decision = latest
-        else:
+        elif cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES:
             fallback = _grab_fresh_skip_monitor_fallback(
                 cfg,
                 protection_monitor,
@@ -315,6 +338,8 @@ def _build_capture(
             if fallback is None:
                 return None
             shots, decision = fallback
+        else:
+            shots = _grab_current_monitor_screenshots(cfg, decision)
         if shots:
             shot_dicts = [screenshot.to_dict(shot) for shot in shots]
             if cfg.screenshot_monitor == "separate":

@@ -677,7 +677,7 @@ def test_diagnostics_guard_in_all_mode_skips_virtual_desktop_screenshot(
     assert "screenshots" not in out
 
 
-def test_unconfirmed_indicator_uses_protected_region_screenshot_fallback(
+def test_skip_monitor_unconfirmed_indicator_keeps_legacy_no_screenshot_behavior(
     ac_root: Path, monkeypatch,
 ) -> None:
     monitor = _FakeProtectionMonitor(
@@ -688,11 +688,10 @@ def test_unconfirmed_indicator_uses_protected_region_screenshot_fallback(
         "active_window",
         lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
     )
-    screenshot_calls: list[dict[str, object]] = []
     monkeypatch.setattr(
         scheduler_mod.screenshot,
         "grab_many",
-        lambda **kwargs: screenshot_calls.append(kwargs) or [],
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("mss must not run")),
     )
 
     out = scheduler_mod._build_capture(
@@ -704,7 +703,7 @@ def test_unconfirmed_indicator_uses_protected_region_screenshot_fallback(
 
     assert out is not None
     assert "screenshot" not in out
-    assert screenshot_calls[0]["blocked_regions"] == [ScreenRegion(100, 0, 100, 100)]
+    assert monitor.force_calls == [True, False]
 
 
 def test_failed_protection_snapshot_writes_nothing(
@@ -791,6 +790,7 @@ def test_inventory_failure_is_fail_open_only_when_configured(
     assert provider.calls == 1
     assert len(screenshot_calls) == 1
     assert screenshot_calls[0]["blocked_regions"] == []
+    assert monitor.force_calls == [True, False]
 
 
 @pytest.mark.parametrize(
@@ -1474,9 +1474,112 @@ def test_post_ax_validation_uses_latest_generation_confirmation_and_regions(
     )
 
     assert out is not None
-    assert monitor.force_calls[:2] == [True, False]
-    assert monitor.force_calls[2:] == [True, True]
+    assert monitor.force_calls == [True, False]
     assert screenshot_calls[0]["blocked_regions"] == [ScreenRegion(0, 0, 100, 100)]
+
+
+def test_skip_monitor_keeps_safe_shot_when_only_filtered_authorization_fields_change(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = _filtered_decision(generation=80)
+    current = _filtered_decision(
+        generation=81,
+        indicator_window_ids=(8,),
+        protected_window_ids=frozenset({74}),
+        protected_window_regions=(ScreenRegion(115, 15, 60, 60),),
+        window_filterable=False,
+    )
+    future = _filtered_decision(
+        generation=82,
+        indicator_window_ids=(),
+        protected_window_ids=frozenset({75}),
+        protected_window_regions=(ScreenRegion(120, 20, 50, 50),),
+        window_filterable=True,
+    )
+    assert current.snapshot.protected_regions == future.snapshot.protected_regions
+    monitor = _FakeProtectionMonitor(initial, current, future)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("filtered helper must not run")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: calls.append(kwargs) or [_shot("SKIP-SAFE")],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="skip-monitor",
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert out["screenshot"]["image_base64"] == "SKIP-SAFE"
+    assert calls[0]["blocked_regions"] == current.snapshot.protected_regions
+    assert monitor.force_calls == [True, False]
+
+
+def test_guard_only_off_keeps_safe_shot_when_filtered_authorization_fields_change(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    initial = _filtered_decision(
+        generation=90,
+        diagnostics_guard_active=True,
+        window_filterable=False,
+    )
+    current = _filtered_decision(
+        generation=91,
+        diagnostics_guard_active=True,
+        indicator_window_ids=(8,),
+        protected_window_ids=frozenset({74}),
+        protected_window_regions=(ScreenRegion(115, 15, 60, 60),),
+        window_filterable=False,
+    )
+    future = _filtered_decision(
+        generation=92,
+        diagnostics_guard_active=True,
+        indicator_window_ids=(),
+        protected_window_ids=frozenset({75}),
+        protected_window_regions=(ScreenRegion(120, 20, 50, 50),),
+        window_filterable=False,
+    )
+    assert current.snapshot.protected_regions == future.snapshot.protected_regions
+    monitor = _FakeProtectionMonitor(initial, current, future)
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("filtered helper must not run")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: calls.append(kwargs) or [_shot("GUARD-SAFE")],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="off",
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert out["screenshot"]["image_base64"] == "GUARD-SAFE"
+    assert calls[0]["blocked_regions"] == current.snapshot.protected_regions
+    assert monitor.force_calls == [True, False]
 
 
 @pytest.mark.parametrize("monitor_mode", ["separate", "all", "primary"])

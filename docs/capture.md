@@ -84,10 +84,13 @@ indicator must report every indicator and input-panel window ID. Indicator
 style `off` needs no overlay IDs. Diagnostics protection, unknown titles,
 missing or duplicate IDs, an unavailable helper, or any other incomplete
 decision falls back to `skip-monitor` using the latest protected display
-regions. Before `mss`, the monitor is forced to publish a fresh, non-terminal
-decision with complete protected display regions. After `mss`, another forced
-decision must have identical authorization semantics or the fallback frames are
-discarded. The protected display is never captured by unblocked `mss`.
+regions. For `mask-window` and `exclude-window` fallback, the monitor is forced
+to publish a fresh, non-terminal decision with complete protected display
+regions before `mss`. After `mss`, another forced decision must have identical
+authorization semantics or the fallback frames are discarded. Native
+`skip-monitor` and diagnostics guard-only `off` capture preserve their legacy
+current-decision behavior and do not compare window-filtering-only fields. The
+protected display is never captured by unblocked `mss`.
 
 After a filtered helper returns, OpenChronicle forces a fresh protection
 decision before keeping the image. A change to protected windows or bounds,
