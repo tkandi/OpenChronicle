@@ -176,6 +176,47 @@ final class WindowScreenObserverTests: XCTestCase {
     }
   }
 
+  func testWindowCloseDisablesDiagnosticsBeforeReopenRepublishesDisplay() {
+    let window = NSWindow(
+      contentRect: CGRect(x: 10, y: 10, width: 80, height: 80),
+      styleMask: [.titled],
+      backing: .buffered,
+      defer: false
+    )
+    let screens = [
+      WindowScreenGeometry(displayID: 1, frame: CGRect(x: 0, y: 0, width: 100, height: 100))
+    ]
+    var events: [String] = []
+    let coordinator = WindowScreenObserver.Coordinator(
+      onDisplayChange: { displayID in
+        events.append("display:\(displayID.map(String.init) ?? "nil")")
+      },
+      onWindowVisibilityChange: { visible in
+        events.append("visible:\(visible)")
+      },
+      screenGeometryProvider: { screens },
+      windowFrameProvider: { _ in CGRect(x: 10, y: 10, width: 80, height: 80) }
+    )
+
+    coordinator.attach(to: window)
+    XCTAssertEqual(events, ["display:1"])
+    events.removeAll()
+
+    NotificationCenter.default.post(name: NSWindow.willCloseNotification, object: window)
+    XCTAssertEqual(events, ["visible:false", "display:nil"])
+
+    events.removeAll()
+    NotificationCenter.default.post(name: NSWindow.didMoveNotification, object: window)
+    XCTAssertTrue(events.isEmpty)
+
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+    XCTAssertEqual(events, ["display:1", "visible:true"])
+
+    events.removeAll()
+    NotificationCenter.default.post(name: NSWindow.didBecomeKeyNotification, object: window)
+    XCTAssertTrue(events.isEmpty)
+  }
+
   func testWindowReplacementAndDetachRejectStaleCallbacks() {
     let first = NSWindow(
       contentRect: CGRect(x: 0, y: 0, width: 80, height: 80),

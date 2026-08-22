@@ -208,9 +208,14 @@ struct ProtectionDiagnosticsView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .overlay(alignment: .topLeading) {
-      WindowScreenObserver { displayID in
-        controller.setDisplay(displayID.map(Int.init))
-      }
+      WindowScreenObserver(
+        onDisplayChange: { displayID in
+          controller.setDisplay(displayID.map(Int.init))
+        },
+        onWindowVisibilityChange: { visible in
+          controller.setPageVisible(visible)
+        }
+      )
       .frame(width: 1, height: 1)
       .allowsHitTesting(false)
       .accessibilityHidden(true)
@@ -520,9 +525,21 @@ typealias WindowFrameProvider = @MainActor (NSWindow) -> CGRect
 
 struct WindowScreenObserver: NSViewRepresentable {
   let onDisplayChange: (UInt32?) -> Void
+  let onWindowVisibilityChange: (Bool) -> Void
+
+  init(
+    onDisplayChange: @escaping (UInt32?) -> Void,
+    onWindowVisibilityChange: @escaping (Bool) -> Void = { _ in }
+  ) {
+    self.onDisplayChange = onDisplayChange
+    self.onWindowVisibilityChange = onWindowVisibilityChange
+  }
 
   func makeCoordinator() -> Coordinator {
-    Coordinator(onDisplayChange: onDisplayChange)
+    Coordinator(
+      onDisplayChange: onDisplayChange,
+      onWindowVisibilityChange: onWindowVisibilityChange
+    )
   }
 
   func makeNSView(context: Context) -> ScreenObserverView {
@@ -535,6 +552,7 @@ struct WindowScreenObserver: NSViewRepresentable {
 
   func updateNSView(_ nsView: ScreenObserverView, context: Context) {
     context.coordinator.onDisplayChange = onDisplayChange
+    context.coordinator.onWindowVisibilityChange = onWindowVisibilityChange
     context.coordinator.attach(to: nsView.window)
   }
 
@@ -548,6 +566,7 @@ struct WindowScreenObserver: NSViewRepresentable {
     private static let settleDelay: TimeInterval = 0.15
 
     var onDisplayChange: (UInt32?) -> Void
+    var onWindowVisibilityChange: (Bool) -> Void
     private let screenGeometryProvider: () -> [WindowScreenGeometry]
     private let windowFrameProvider: WindowFrameProvider
     private let settleScheduler: WindowScreenSettleScheduler
@@ -557,9 +576,11 @@ struct WindowScreenObserver: NSViewRepresentable {
     private var settleGeneration = 0
     private var isMoving = false
     private var isLiveResizing = false
+    private var isWindowClosed = false
 
     init(
       onDisplayChange: @escaping (UInt32?) -> Void,
+      onWindowVisibilityChange: @escaping (Bool) -> Void = { _ in },
       screenGeometryProvider: @escaping () -> [WindowScreenGeometry] = {
         NSScreen.screens.map { screen in
           let number = screen.deviceDescription[
@@ -585,6 +606,7 @@ struct WindowScreenObserver: NSViewRepresentable {
       }
     ) {
       self.onDisplayChange = onDisplayChange
+      self.onWindowVisibilityChange = onWindowVisibilityChange
       self.screenGeometryProvider = screenGeometryProvider
       self.windowFrameProvider = windowFrameProvider
       self.settleScheduler = settleScheduler
@@ -595,7 +617,14 @@ struct WindowScreenObserver: NSViewRepresentable {
       detach()
       self.window = window
       if let window {
+        isWindowClosed = false
         observeFrameChanges(of: window)
+        observe(NSWindow.willCloseNotification, #selector(windowWillClose(_:)), window: window)
+        observe(
+          NSWindow.didBecomeKeyNotification,
+          #selector(windowDidBecomeKey(_:)),
+          window: window
+        )
         observe(NSWindow.willMoveNotification, #selector(windowWillMove(_:)), window: window)
         observe(NSWindow.didMoveNotification, #selector(windowDidMove(_:)), window: window)
         observe(
@@ -631,6 +660,7 @@ struct WindowScreenObserver: NSViewRepresentable {
       window = nil
       isMoving = false
       isLiveResizing = false
+      isWindowClosed = false
       if hadWindow {
         onDisplayChange(nil)
       }
@@ -649,7 +679,9 @@ struct WindowScreenObserver: NSViewRepresentable {
       frameObservation = window.observe(\.frame, options: [.prior, .new]) {
         [weak self, weak window] _, change in
         MainActor.assumeIsolated {
-          guard let self, let window, self.window === window else { return }
+          guard let self, let window, self.window === window, !self.isWindowClosed else {
+            return
+          }
           if change.isPrior {
             self.concealAndCancelSettle()
           } else if self.isMoving || self.isLiveResizing {
@@ -661,26 +693,43 @@ struct WindowScreenObserver: NSViewRepresentable {
       }
     }
 
+    @objc private func windowWillClose(_ notification: Notification) {
+      guard currentWindow(from: notification) != nil, !isWindowClosed else { return }
+      isWindowClosed = true
+      isMoving = false
+      isLiveResizing = false
+      cancelPendingSettle()
+      onWindowVisibilityChange(false)
+      onDisplayChange(nil)
+    }
+
+    @objc private func windowDidBecomeKey(_ notification: Notification) {
+      guard let window = currentWindow(from: notification), isWindowClosed else { return }
+      isWindowClosed = false
+      publishDisplayID(for: window)
+      onWindowVisibilityChange(true)
+    }
+
     @objc private func windowWillMove(_ notification: Notification) {
-      guard currentWindow(from: notification) != nil else { return }
+      guard currentWindow(from: notification) != nil, !isWindowClosed else { return }
       isMoving = true
       concealAndCancelSettle()
     }
 
     @objc private func windowDidMove(_ notification: Notification) {
-      guard let window = currentWindow(from: notification) else { return }
+      guard let window = currentWindow(from: notification), !isWindowClosed else { return }
       isMoving = false
       concealAndScheduleSettle(for: window)
     }
 
     @objc private func windowWillStartLiveResize(_ notification: Notification) {
-      guard currentWindow(from: notification) != nil else { return }
+      guard currentWindow(from: notification) != nil, !isWindowClosed else { return }
       isLiveResizing = true
       concealAndCancelSettle()
     }
 
     @objc private func windowDidResize(_ notification: Notification) {
-      guard let window = currentWindow(from: notification) else { return }
+      guard let window = currentWindow(from: notification), !isWindowClosed else { return }
       if isLiveResizing {
         concealAndCancelSettle()
       } else {
@@ -689,13 +738,13 @@ struct WindowScreenObserver: NSViewRepresentable {
     }
 
     @objc private func windowDidEndLiveResize(_ notification: Notification) {
-      guard let window = currentWindow(from: notification) else { return }
+      guard let window = currentWindow(from: notification), !isWindowClosed else { return }
       isLiveResizing = false
       concealAndScheduleSettle(for: window)
     }
 
     @objc private func windowDidChangeScreen(_ notification: Notification) {
-      guard let window = currentWindow(from: notification) else { return }
+      guard let window = currentWindow(from: notification), !isWindowClosed else { return }
       if isMoving || isLiveResizing {
         concealAndCancelSettle()
       } else {
@@ -740,6 +789,7 @@ struct WindowScreenObserver: NSViewRepresentable {
     }
 
     private func publishDisplayID(for window: NSWindow) {
+      guard !isWindowClosed else { return }
       onDisplayChange(
         WindowDisplaySelection.singleIntersectingDisplayID(
           windowFrame: windowFrameProvider(window),
