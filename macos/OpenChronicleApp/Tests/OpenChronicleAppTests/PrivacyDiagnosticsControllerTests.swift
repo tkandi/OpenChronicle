@@ -5,6 +5,8 @@ import XCTest
 @testable import OpenChronicleApp
 
 private enum FakeTransportError: Error {
+  case connectFailed
+  case flushFailed
   case sendFailed
 }
 
@@ -20,14 +22,33 @@ private final class FakePrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport
   var onMessage: ((ProtectionDiagnosticsWireMessage) -> Void)?
   var onDisconnect: ((Error?) -> Void)?
   private(set) var connectCount = 0
+  private(set) var connectTimeouts: [TimeInterval] = []
   private(set) var closeCount = 0
   private(set) var flushCount = 0
+  private(set) var flushTimeouts: [TimeInterval] = []
   private(set) var sent: [PrivacyDiagnosticsRequest] = []
+  var connectDelay: TimeInterval = 0
+  var failsConnect = false
+  var failsFlush = false
   var failingActions: Set<PrivacyDiagnosticsAction> = []
+  var flushDelay: TimeInterval = 0
+  var onConnect: (() -> Void)?
   var onSend: ((PrivacyDiagnosticsRequest) -> Void)?
 
   func connect() throws {
     connectCount += 1
+    onConnect?()
+    if failsConnect {
+      throw FakeTransportError.connectFailed
+    }
+  }
+
+  func connect(timeout: TimeInterval) throws {
+    connectTimeouts.append(timeout)
+    if connectDelay > 0 {
+      Thread.sleep(forTimeInterval: connectDelay)
+    }
+    try connect()
   }
 
   func send(_ request: PrivacyDiagnosticsRequest) throws {
@@ -44,6 +65,13 @@ private final class FakePrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport
 
   func flushPendingWrites(timeout: TimeInterval) throws {
     flushCount += 1
+    flushTimeouts.append(timeout)
+    if flushDelay > 0 {
+      Thread.sleep(forTimeInterval: flushDelay)
+    }
+    if failsFlush {
+      throw FakeTransportError.flushFailed
+    }
   }
 
   func deliverLease(
@@ -278,6 +306,105 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertEqual(cleanup.flushCount, 1)
     XCTAssertEqual(cleanup.closeCount, 1)
     XCTAssertEqual(scheduler.delays, [0.25])
+  }
+
+  func testPageLeaveBeforeDisconnectCallbackFallsBackAfterDeadTransportSendFails() {
+    let marker = "dead-transport-private-marker"
+    let first = FakePrivacyDiagnosticsTransport()
+    first.failingActions = [.releaseExact]
+    let cleanup = FakePrivacyDiagnosticsTransport()
+    var transports = [first, cleanup]
+    let controller = PrivacyDiagnosticsController(
+      transportFactory: { transports.removeFirst() },
+      displayModeProvider: { .hybrid },
+      detailProvider: { .exact },
+      pidProvider: { 123 }
+    )
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    first.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+    first.deliverSnapshot(generation: 42, exact: true, exactValue: marker)
+    XCTAssertTrue(controller.debugRetainsExactValue(marker))
+
+    var exactDiscardedBeforeFirstSend = false
+    first.onSend = { request in
+      guard request.action == .releaseExact else { return }
+      exactDiscardedBeforeFirstSend =
+        controller.debugExactCandidate == nil
+        && !controller.debugRetainsExactValue(marker)
+        && !controller.showsExactValues
+    }
+    var exactDiscardedBeforeCleanupConnect = false
+    cleanup.onConnect = {
+      exactDiscardedBeforeCleanupConnect =
+        controller.debugExactCandidate == nil
+        && !controller.debugRetainsExactValue(marker)
+        && !controller.showsExactValues
+    }
+
+    controller.setPageVisible(false)
+
+    XCTAssertTrue(exactDiscardedBeforeFirstSend)
+    XCTAssertTrue(exactDiscardedBeforeCleanupConnect)
+    XCTAssertEqual(cleanup.connectCount, 1)
+    XCTAssertEqual(cleanup.sent, [.releaseExact(pid: 123, leaseID: "lease-1")])
+    XCTAssertEqual(cleanup.flushCount, 1)
+    XCTAssertEqual(cleanup.closeCount, 1)
+    XCTAssertEqual(first.closeCount, 1)
+  }
+
+  func testPageLeaveFallsBackWhenExistingTransportFlushFails() {
+    let first = FakePrivacyDiagnosticsTransport()
+    first.failsFlush = true
+    let cleanup = FakePrivacyDiagnosticsTransport()
+    var transports = [first, cleanup]
+    let controller = PrivacyDiagnosticsController(
+      transportFactory: { transports.removeFirst() },
+      displayModeProvider: { .hybrid },
+      detailProvider: { .exact },
+      pidProvider: { 123 }
+    )
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    first.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+
+    controller.setPageVisible(false)
+
+    XCTAssertEqual(first.sent.last, .releaseExact(pid: 123, leaseID: "lease-1"))
+    XCTAssertEqual(first.flushCount, 1)
+    XCTAssertEqual(cleanup.connectCount, 1)
+    XCTAssertEqual(cleanup.sent, [.releaseExact(pid: 123, leaseID: "lease-1")])
+    XCTAssertEqual(cleanup.flushCount, 1)
+    XCTAssertEqual(cleanup.closeCount, 1)
+  }
+
+  func testCleanupConnectAndFlushShareOneDeadline() throws {
+    let first = FakePrivacyDiagnosticsTransport()
+    first.failsFlush = true
+    first.flushDelay = 0.04
+    let cleanup = FakePrivacyDiagnosticsTransport()
+    cleanup.connectDelay = 0.04
+    var transports = [first, cleanup]
+    let controller = PrivacyDiagnosticsController(
+      transportFactory: { transports.removeFirst() },
+      displayModeProvider: { .hybrid },
+      detailProvider: { .exact },
+      pidProvider: { 123 }
+    )
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    first.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+
+    controller.setPageVisible(false)
+
+    let firstFlushBudget = try XCTUnwrap(first.flushTimeouts.first)
+    let cleanupConnectBudget = try XCTUnwrap(cleanup.connectTimeouts.first)
+    let cleanupFlushBudget = try XCTUnwrap(cleanup.flushTimeouts.first)
+    XCTAssertLessThanOrEqual(firstFlushBudget, 0.25)
+    XCTAssertGreaterThan(firstFlushBudget, 0)
+    XCTAssertLessThan(cleanupConnectBudget, firstFlushBudget - 0.02)
+    XCTAssertLessThan(cleanupFlushBudget, cleanupConnectBudget - 0.02)
+    XCTAssertGreaterThan(cleanupFlushBudget, 0)
   }
 
   func testPageLeaveHidesBeforeSendingRelease() {
@@ -627,6 +754,32 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertEqual(scheduler.delays, [0.25])
   }
 
+  func testShutdownRetainsLeaseStateWhenCleanupConnectionFails() {
+    let scheduler = ReconnectSchedulerRecorder()
+    let first = FakePrivacyDiagnosticsTransport()
+    let cleanup = FakePrivacyDiagnosticsTransport()
+    cleanup.failsConnect = true
+    var transports = [first, cleanup]
+    let controller = PrivacyDiagnosticsController(
+      transportFactory: { transports.removeFirst() },
+      displayModeProvider: { .hybrid },
+      detailProvider: { .exact },
+      pidProvider: { 123 },
+      reconnectScheduler: scheduler.schedule
+    )
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    first.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+    first.disconnect()
+
+    controller.shutdown()
+
+    XCTAssertEqual(controller.debugLeaseID, "lease-1")
+    XCTAssertEqual(cleanup.connectCount, 1)
+    XCTAssertEqual(cleanup.sent, [])
+    XCTAssertEqual(cleanup.closeCount, 1)
+  }
+
   private func makeController(
     transport: FakePrivacyDiagnosticsTransport,
     detail: PrivacyReasonDetailOption,
@@ -888,6 +1041,49 @@ final class UnixPrivacyDiagnosticsTransportTests: XCTestCase {
         "lease_id": "lease-1",
       ]
     )
+  }
+
+  func testTimedConnectSucceedsWithNonblockingUnixSocket() throws {
+    let fixture = try UnixSocketFixture()
+    defer { fixture.close() }
+    fixture.acceptOne { _, _ in }
+    let transport = UnixPrivacyDiagnosticsTransport(socketURL: fixture.socketURL)
+    defer { transport.close() }
+
+    try transport.connect(timeout: 0.25)
+
+    let flags = try XCTUnwrap(transport.debugDescriptorFlags)
+    XCTAssertNotEqual(flags & O_NONBLOCK, 0)
+    try transport.send(.subscribe(detail: .category))
+    try transport.flushPendingWrites(timeout: 0.25)
+  }
+
+  func testConnectionPollTimesOutWithinItsBudget() throws {
+    var descriptors = [Int32](repeating: -1, count: 2)
+    XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
+    defer {
+      Darwin.close(descriptors[0])
+      Darwin.close(descriptors[1])
+    }
+    let flags = Darwin.fcntl(descriptors[0], F_GETFL)
+    XCTAssertGreaterThanOrEqual(flags, 0)
+    XCTAssertEqual(Darwin.fcntl(descriptors[0], F_SETFL, flags | O_NONBLOCK), 0)
+    var buffer = [UInt8](repeating: 0, count: 4096)
+    while Darwin.write(descriptors[0], &buffer, buffer.count) > 0 {}
+    XCTAssertTrue(errno == EAGAIN || errno == EWOULDBLOCK)
+
+    let started = ProcessInfo.processInfo.systemUptime
+    XCTAssertThrowsError(
+      try UnixPrivacyDiagnosticsTransport.waitForConnection(
+        descriptor: descriptors[0],
+        timeout: 0.02
+      )
+    ) { error in
+      XCTAssertEqual(error as? PrivacyDiagnosticsTransportError, .connectionFailed)
+    }
+    let elapsed = ProcessInfo.processInfo.systemUptime - started
+    XCTAssertGreaterThanOrEqual(elapsed, 0.01)
+    XCTAssertLessThan(elapsed, 0.25)
   }
 }
 

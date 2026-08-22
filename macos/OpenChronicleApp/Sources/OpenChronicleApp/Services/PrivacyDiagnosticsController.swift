@@ -9,7 +9,7 @@ typealias PrivacyDiagnosticsReconnectScheduler = (
 
 @MainActor
 final class PrivacyDiagnosticsController: ObservableObject {
-  private static let cleanupFlushTimeout: TimeInterval = 0.25
+  private static let cleanupTimeout: TimeInterval = 0.25
 
   nonisolated(unsafe) static let defaultReconnectScheduler: PrivacyDiagnosticsReconnectScheduler = {
     delay,
@@ -158,14 +158,20 @@ final class PrivacyDiagnosticsController: ObservableObject {
     exactRequested = false
     cancelReconnect()
     hideExactSynchronously(clearPublishedModels: true)
-    bestEffortRelease(connectForCleanup: true)
+    let releaseSent = bestEffortRelease(connectForCleanup: true)
     closeConnection()
-    clearLeaseState()
+    if releaseSent {
+      clearLeaseState()
+    }
     latestCategorySnapshot = nil
   }
 
   var debugExactCandidate: AnyObject? {
     latestExactCandidate
+  }
+
+  var debugLeaseID: String? {
+    leaseID
   }
 
   func debugRetainsExactValue(_ marker: String) -> Bool {
@@ -502,27 +508,40 @@ final class PrivacyDiagnosticsController: ObservableObject {
   }
 
   private func releaseAndCloseConnection() {
-    bestEffortRelease(connectForCleanup: true)
+    _ = bestEffortRelease(connectForCleanup: true)
     closeConnection()
   }
 
-  private func bestEffortRelease(connectForCleanup: Bool) {
-    guard let leaseID else { return }
+  private func bestEffortRelease(connectForCleanup: Bool) -> Bool {
+    guard let leaseID else { return true }
+    let deadline = DispatchTime.now() + Self.cleanupTimeout
     if let transport {
-      try? transport.send(.releaseExact(pid: pidProvider(), leaseID: leaseID))
-      try? transport.flushPendingWrites(timeout: Self.cleanupFlushTimeout)
-      return
+      do {
+        try transport.send(.releaseExact(pid: pidProvider(), leaseID: leaseID))
+        guard let timeout = Self.remainingTime(until: deadline) else { return false }
+        try transport.flushPendingWrites(timeout: timeout)
+        return true
+      } catch {}
     }
-    guard connectForCleanup else { return }
+    guard connectForCleanup else { return false }
     let cleanupTransport = transportFactory()
     defer { cleanupTransport.close() }
     do {
-      try cleanupTransport.connect()
+      guard let connectTimeout = Self.remainingTime(until: deadline) else { return false }
+      try cleanupTransport.connect(timeout: connectTimeout)
       try cleanupTransport.send(.releaseExact(pid: pidProvider(), leaseID: leaseID))
-      try cleanupTransport.flushPendingWrites(timeout: Self.cleanupFlushTimeout)
+      guard let flushTimeout = Self.remainingTime(until: deadline) else { return false }
+      try cleanupTransport.flushPendingWrites(timeout: flushTimeout)
+      return true
     } catch {
-      return
+      return false
     }
+  }
+
+  private static func remainingTime(until deadline: DispatchTime) -> TimeInterval? {
+    let now = DispatchTime.now().uptimeNanoseconds
+    guard now < deadline.uptimeNanoseconds else { return nil }
+    return Double(deadline.uptimeNanoseconds - now) / 1_000_000_000
   }
 
   private func closeConnection() {

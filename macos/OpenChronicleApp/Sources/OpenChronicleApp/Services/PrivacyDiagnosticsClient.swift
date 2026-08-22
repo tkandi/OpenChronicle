@@ -112,6 +112,7 @@ protocol PrivacyDiagnosticsTransport: AnyObject {
   var onMessage: ((ProtectionDiagnosticsWireMessage) -> Void)? { get set }
   var onDisconnect: ((Error?) -> Void)? { get set }
   func connect() throws
+  func connect(timeout: TimeInterval) throws
   func send(_ request: PrivacyDiagnosticsRequest) throws
   func flushPendingWrites(timeout: TimeInterval) throws
   func close()
@@ -132,6 +133,7 @@ enum PrivacyDiagnosticsTransportError: String, Error, LocalizedError {
 }
 
 final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
+  private static let defaultConnectionTimeout: TimeInterval = 1.0
   private static let maximumLineBytes = 64 * 1024
   private static let maximumQueuedMessages = 8
   private static let maximumQueuedBytes = 4 * maximumLineBytes
@@ -171,7 +173,11 @@ final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
   }
 
   func connect() throws {
-    let socketDescriptor = try Self.openSocket(path: socketURL.path)
+    try connect(timeout: Self.defaultConnectionTimeout)
+  }
+
+  func connect(timeout: TimeInterval) throws {
+    let socketDescriptor = try Self.openSocket(path: socketURL.path, timeout: timeout)
     do {
       try ioQueue.sync {
         guard descriptor < 0 else {
@@ -197,6 +203,14 @@ final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
     } catch {
       Darwin.close(socketDescriptor)
       throw error
+    }
+  }
+
+  var debugDescriptorFlags: Int32? {
+    ioQueue.sync {
+      guard descriptor >= 0 else { return nil }
+      let flags = Darwin.fcntl(descriptor, F_GETFL)
+      return flags >= 0 ? flags : nil
     }
   }
 
@@ -404,7 +418,56 @@ final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
     }
   }
 
-  private static func openSocket(path: String) throws -> Int32 {
+  static func waitForConnection(descriptor: Int32, timeout: TimeInterval) throws {
+    let deadline = DispatchTime.now() + max(0.0, timeout)
+    while true {
+      let now = DispatchTime.now().uptimeNanoseconds
+      guard now < deadline.uptimeNanoseconds else {
+        throw PrivacyDiagnosticsTransportError.connectionFailed
+      }
+      let remaining = deadline.uptimeNanoseconds - now
+      let roundedMilliseconds =
+        remaining / 1_000_000 + (remaining % 1_000_000 == 0 ? 0 : 1)
+      let timeoutMilliseconds = Int32(
+        min(UInt64(Int32.max), max(1, roundedMilliseconds))
+      )
+      var writable = pollfd(fd: descriptor, events: Int16(POLLOUT), revents: 0)
+      let result = Darwin.poll(&writable, 1, timeoutMilliseconds)
+      if result == 0 {
+        throw PrivacyDiagnosticsTransportError.connectionFailed
+      }
+      if result < 0 {
+        if errno == EINTR { continue }
+        throw PrivacyDiagnosticsTransportError.connectionFailed
+      }
+
+      var socketError: Int32 = 0
+      var socketErrorSize = socklen_t(MemoryLayout<Int32>.size)
+      while Darwin.getsockopt(
+        descriptor,
+        SOL_SOCKET,
+        SO_ERROR,
+        &socketError,
+        &socketErrorSize
+      ) != 0 {
+        if errno == EINTR,
+          DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds
+        {
+          continue
+        }
+        throw PrivacyDiagnosticsTransportError.connectionFailed
+      }
+      if socketError == 0 || socketError == EISCONN { return }
+      if socketError == EINPROGRESS || socketError == EALREADY || socketError == EINTR
+        || socketError == EAGAIN || socketError == EWOULDBLOCK
+      {
+        continue
+      }
+      throw PrivacyDiagnosticsTransportError.connectionFailed
+    }
+  }
+
+  private static func openSocket(path: String, timeout: TimeInterval) throws -> Int32 {
     let pathBytes = Array(path.utf8CString)
     var address = sockaddr_un()
     guard pathBytes.count <= MemoryLayout.size(ofValue: address.sun_path) else {
@@ -416,6 +479,32 @@ final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
       throw PrivacyDiagnosticsTransportError.connectionFailed
     }
 
+    var shouldClose = true
+    defer {
+      if shouldClose {
+        Darwin.close(socketDescriptor)
+      }
+    }
+
+    var noSignal: Int32 = 1
+    guard
+      Darwin.setsockopt(
+        socketDescriptor,
+        SOL_SOCKET,
+        SO_NOSIGPIPE,
+        &noSignal,
+        socklen_t(MemoryLayout<Int32>.size)
+      ) == 0
+    else {
+      throw PrivacyDiagnosticsTransportError.connectionFailed
+    }
+    let currentFlags = Darwin.fcntl(socketDescriptor, F_GETFL)
+    guard currentFlags >= 0,
+      Darwin.fcntl(socketDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0
+    else {
+      throw PrivacyDiagnosticsTransportError.connectionFailed
+    }
+
     address.sun_family = sa_family_t(AF_UNIX)
     address.sun_len = UInt8(MemoryLayout<sockaddr_un>.size)
     withUnsafeMutablePointer(to: &address.sun_path.0) { destination in
@@ -424,35 +513,50 @@ final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
       }
     }
 
-    let connected = withUnsafePointer(to: &address) { pointer in
-      pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-        Darwin.connect(
-          socketDescriptor,
-          $0,
-          socklen_t(MemoryLayout<sockaddr_un>.size)
-        )
+    let deadline = DispatchTime.now() + max(0.0, timeout)
+    while true {
+      let connected = withUnsafePointer(to: &address) { pointer in
+        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+          Darwin.connect(
+            socketDescriptor,
+            $0,
+            socklen_t(MemoryLayout<sockaddr_un>.size)
+          )
+        }
       }
-    }
-    guard connected == 0 else {
-      Darwin.close(socketDescriptor)
+      if connected == 0 || errno == EISCONN { break }
+      if errno == EINTR {
+        guard DispatchTime.now().uptimeNanoseconds < deadline.uptimeNanoseconds else {
+          throw PrivacyDiagnosticsTransportError.connectionFailed
+        }
+        continue
+      }
+      if errno == EINPROGRESS || errno == EALREADY {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline.uptimeNanoseconds else {
+          throw PrivacyDiagnosticsTransportError.connectionFailed
+        }
+        try waitForConnection(
+          descriptor: socketDescriptor,
+          timeout: Double(deadline.uptimeNanoseconds - now) / 1_000_000_000
+        )
+        break
+      }
+      if errno == EAGAIN || errno == EWOULDBLOCK {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline.uptimeNanoseconds else {
+          throw PrivacyDiagnosticsTransportError.connectionFailed
+        }
+        var retry = pollfd(fd: socketDescriptor, events: Int16(POLLOUT), revents: 0)
+        let retryResult = Darwin.poll(&retry, 1, 1)
+        if retryResult < 0, errno != EINTR {
+          throw PrivacyDiagnosticsTransportError.connectionFailed
+        }
+        continue
+      }
       throw PrivacyDiagnosticsTransportError.connectionFailed
     }
-
-    var noSignal: Int32 = 1
-    _ = Darwin.setsockopt(
-      socketDescriptor,
-      SOL_SOCKET,
-      SO_NOSIGPIPE,
-      &noSignal,
-      socklen_t(MemoryLayout<Int32>.size)
-    )
-    let currentFlags = Darwin.fcntl(socketDescriptor, F_GETFL)
-    guard currentFlags >= 0,
-      Darwin.fcntl(socketDescriptor, F_SETFL, currentFlags | O_NONBLOCK) == 0
-    else {
-      Darwin.close(socketDescriptor)
-      throw PrivacyDiagnosticsTransportError.connectionFailed
-    }
+    shouldClose = false
     return socketDescriptor
   }
 }
