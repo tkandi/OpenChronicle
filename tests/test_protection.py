@@ -137,6 +137,121 @@ def test_missing_or_duplicate_ids_cannot_authorize_window_filtering(
     assert snapshot.window_filterable is False
 
 
+def test_id_shared_with_non_sensitive_window_cannot_authorize_window_filtering() -> None:
+    protected_region = ScreenRegion(0, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Private Browser",
+                "private",
+                "Private",
+                protected_region,
+                window_id=73,
+            ),
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(110, 0, 80, 90), window_id=73),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Private Browser"]),
+        inventory,
+        paused=False,
+        generation=10,
+        now=13.0,
+    )
+
+    assert snapshot.protected_window_ids == frozenset({73})
+    assert snapshot.protected_window_regions == (protected_region,)
+    assert snapshot.window_filterable is False
+
+
+def test_unknown_title_rule_protects_display_without_authorizing_window_filtering() -> None:
+    region = ScreenRegion(0, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Private Browser",
+                "private",
+                "",
+                region,
+                title_available=False,
+                window_id=73,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["Private"]),
+        inventory,
+        paused=False,
+        generation=11,
+        now=14.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({1})
+    assert snapshot.protected_window_ids == frozenset()
+    assert snapshot.protected_window_regions == ()
+    assert snapshot.window_filterable is False
+
+
+def test_explicit_app_rule_can_authorize_window_with_unknown_title() -> None:
+    region = ScreenRegion(0, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Private Browser",
+                "private",
+                "",
+                region,
+                title_available=False,
+                window_id=73,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(
+            deny_app_names=["Private Browser"],
+            deny_window_title_patterns=["Private"],
+        ),
+        inventory,
+        paused=False,
+        generation=12,
+        now=15.0,
+    )
+
+    assert snapshot.protected_window_ids == frozenset({73})
+    assert snapshot.protected_window_regions == (region,)
+    assert snapshot.window_filterable is True
+
+
+@pytest.mark.parametrize("window_id", [0, -1, True, 0x1_0000_0000])
+def test_invalid_direct_window_ids_cannot_authorize_window_filtering(window_id: object) -> None:
+    region = ScreenRegion(0, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Private Browser", "private", "Private", region, window_id=window_id),  # type: ignore[arg-type]
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Private Browser"]),
+        inventory,
+        paused=False,
+        generation=13,
+        now=16.0,
+    )
+
+    assert snapshot.protected_window_ids == frozenset()
+    assert snapshot.protected_window_regions == (region,)
+    assert snapshot.window_filterable is False
+
+
 @pytest.mark.parametrize(
     ("paused", "failure_reason", "diagnostic_display_ids"),
     [

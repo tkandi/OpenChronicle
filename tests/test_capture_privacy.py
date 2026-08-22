@@ -64,7 +64,7 @@ def test_visible_window_parses_only_positive_integer_window_ids() -> None:
     assert privacy._parse_visible_window({**row, "window_id": 73}).window_id == 73
     assert privacy._parse_visible_window(row).window_id is None
 
-    for invalid_id in (0, -1, 1.0, True, "73"):
+    for invalid_id in (0, -1, 1.0, True, "73", 0x1_0000_0000):
         with pytest.raises((TypeError, ValueError)):
             privacy._parse_visible_window({**row, "window_id": invalid_id})
 

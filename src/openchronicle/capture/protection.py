@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -22,6 +23,13 @@ from .protection_reason import (
 )
 
 SNAPSHOT_FRESH_SECONDS = 0.25
+_DIRECT_WINDOW_RULE_CODES = frozenset(
+    {
+        ProtectionReasonCode.APP_RULE,
+        ProtectionReasonCode.BUNDLE_RULE,
+        ProtectionReasonCode.WINDOW_TITLE_RULE,
+    }
+)
 
 
 class ProtectionState(StrEnum):
@@ -117,6 +125,12 @@ def _displays_are_usable(displays: tuple[DisplayInfo, ...]) -> bool:
     return bool(displays) and len({display.id for display in displays}) == len(displays) and all(
         _display_is_usable(display) for display in displays
     )
+
+
+def _usable_window_id(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 0xFFFFFFFF:
+        return value
+    return None
 
 
 def _display_for_active_window(
@@ -281,18 +295,29 @@ def build_protection_snapshot(
             ProtectionReason(ProtectionReasonCode(derived_failure_reason.value), display_id=None)
         )
 
-    protected_window_regions = tuple(window.region for window, _matches in sensitive_windows)
-    window_ids = tuple(window.window_id for window, _matches in sensitive_windows)
+    direct_window_matches = tuple(
+        (window, matches)
+        for window, matches in sensitive_windows
+        if any(match.kind in _DIRECT_WINDOW_RULE_CODES for match in matches)
+    )
+    protected_window_regions = tuple(window.region for window, _matches in direct_window_matches)
+    window_ids = tuple(window.window_id for window, _matches in direct_window_matches)
     protected_window_ids = frozenset(
         window_id
         for window_id in window_ids
-        if isinstance(window_id, int) and not isinstance(window_id, bool) and 0 < window_id <= 0xFFFFFFFF
+        if _usable_window_id(window_id) is not None
+    )
+    inventory_window_id_counts = Counter(
+        window_id
+        for window in (inventory.windows if inventory is not None else ())
+        if (window_id := _usable_window_id(window.window_id)) is not None
     )
     window_filterable = (
         state is ProtectionState.PROTECTED
-        and bool(sensitive_windows)
+        and bool(direct_window_matches)
         and not diagnostics_guard_active
         and len(protected_window_ids) == len(window_ids)
+        and all(inventory_window_id_counts[window_id] == 1 for window_id in protected_window_ids)
     )
 
     return ProtectionSnapshot(
