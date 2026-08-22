@@ -19,7 +19,8 @@ Swift standalone harnesses.
 - Missing/ambiguous display or window identity always falls back to skip-monitor.
 - Diagnostics guards, pause/failure states, and unconfirmed indicators always use full-monitor
   fail-closed behavior.
-- Window IDs remain memory-only and never enter persisted/model/MCP/log payloads.
+- Protected and privacy-overlay window IDs remain memory-only and never enter
+  persisted/model/MCP/log payloads.
 - New ScreenCaptureKit modes require macOS 14+; older systems safely fall back.
 
 ---
@@ -79,11 +80,12 @@ Swift standalone harnesses.
 - Test: `tests/test_runtime_dependencies.py`
 
 **Interfaces:**
-- Consumes NDJSON/JSON command schema version 1 with display/window IDs.
+- Consumes NDJSON/JSON command schema version 1 with display IDs, source-excluded protected/overlay
+  window IDs, and per-display output dimensions.
 - Produces JSON response schema version 1 with PNG images and display geometry, or fixed error code.
 
-- [ ] Write pure Swift RED tests for command validation, target resolution, missing/duplicate IDs,
-  unsupported OS, and response bounds.
+- [ ] Write pure Swift RED tests for command validation, target resolution, missing/duplicate
+  display or excluded-window IDs, output dimensions, unsupported OS, and response bounds.
 - [ ] Implement the pure resolver and fixed wire protocol.
 - [ ] Implement macOS 14+ ScreenCaptureKit capture using `SCContentFilter(display:excludingWindows:)`
   and `SCScreenshotManager.captureImage`; encode PNG with ImageIO.
@@ -101,6 +103,8 @@ Swift standalone harnesses.
 **Interfaces:**
 - Produces: `grab_filtered_many(...) -> list[Screenshot] | None`
 - `None` means safe filtered capture unavailable and requires skip-monitor fallback.
+- Consumes the already-authorized union of protected and confirmed overlay window IDs; Python never
+  receives pixels from either class of window.
 
 - [ ] Write RED tests with a fake helper response for PNG decoding, opaque masks, coordinate scaling,
   separate/primary/all outputs, stitching, missing displays/windows, invalid images, and timeout.
@@ -113,10 +117,15 @@ Swift standalone harnesses.
 ### Task 5: Scheduler Integration And Fail-Closed Fallback
 
 **Files:**
+- Modify: `resources/mac-privacy-overlay-core.swift`
+- Modify: `resources/mac-privacy-overlay.swift`
+- Modify: `src/openchronicle/capture/privacy_overlay.py`
 - Modify: `src/openchronicle/capture/protection_monitor.py`
 - Modify: `src/openchronicle/daemon.py`
 - Modify: `src/openchronicle/capture/scheduler.py`
 - Modify: `docs/capture.md`
+- Test: `tests/swift/MacPrivacyOverlayCoreTests.swift`
+- Test: `tests/test_privacy_overlay.py`
 - Test: `tests/test_daemon_protection.py`
 - Test: `tests/test_capture_scheduler_fts.py`
 - Test: `tests/test_privacy_reason_boundaries.py`
@@ -125,8 +134,11 @@ Swift standalone harnesses.
 - Consumes protected window IDs/regions and filtered screenshot backend.
 - Produces safe mode selection: filtered capture or current skip-monitor fallback.
 
-- [ ] Write RED tests for monitor creation in both new modes and every fallback condition.
+- [ ] Write RED tests for overlay acknowledgement window IDs, monitor creation in both new modes,
+  and every fallback condition.
 - [ ] Integrate filtered capture only for complete rule-matched window decisions.
+- [ ] Pass every rendered overlay/input-panel window ID through the in-memory decision and
+  source-exclude it; a non-`off` indicator without complete IDs falls back to `skip-monitor`.
 - [ ] Prove diagnostics/pause/failure/unconfirmed/missing-ID/helper-error paths never call unfiltered
   protected-monitor capture.
 - [ ] Run focused integration/boundary tests and commit.

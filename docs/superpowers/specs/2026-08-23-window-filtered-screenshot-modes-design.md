@@ -24,9 +24,10 @@ default to `skip-monitor`.
 The current `mss` path remains unchanged for `off`, `skip-monitor`, and any capture without matched
 windows. New window-filtered modes use a bundled Swift helper based on ScreenCaptureKit:
 
-1. Python sends requested display IDs, protected CG window IDs, and capture dimensions to the helper.
+1. Python sends requested display IDs, protected CG window IDs, confirmed privacy-overlay window
+   IDs, and capture dimensions to the helper.
 2. The helper retrieves `SCShareableContent` with onscreen windows only.
-3. Every requested display and protected window ID must resolve exactly once.
+3. Every requested display and excluded window ID must resolve exactly once.
 4. For each display, the helper creates `SCContentFilter(display:excludingWindows:)` and uses
    `SCScreenshotManager.captureImage` to capture one source-filtered frame.
 5. The helper returns one lossless PNG per physical display plus display bounds and pixel dimensions.
@@ -50,6 +51,12 @@ Only rule-matched visible windows contribute IDs and mask regions. The snapshot 
 in memory for the immediate screenshot decision. IDs and mask regions are not written to capture
 JSON, FTS, logs, timeline, memory, model input, or MCP responses.
 
+The native privacy overlay can reveal exact app, title, and rule details. A confirmed overlay
+acknowledgement therefore also returns the CG window IDs of every rendered indicator/input panel.
+Those IDs remain in the in-memory `ProtectionDecision` and are source-excluded with the protected
+windows. With a non-`off` indicator, missing or unresolved overlay IDs make window filtering
+ineligible and force the `skip-monitor` fallback.
+
 Window-filtered capture is authorized only when every protected region comes from one or more valid,
 uniquely mapped protected window IDs. Diagnostics display leases, pause states, inventory failures,
 unknown mappings, and indicator failures are never authorized for window filtering.
@@ -63,6 +70,8 @@ For `mask-window` and `exclude-window`, any of these conditions falls back to th
 - missing Screen Recording permission;
 - helper launch, timeout, parse, or image decode failure;
 - a requested display or protected window ID missing from `SCShareableContent`;
+- a confirmed non-`off` privacy overlay missing window IDs, or any overlay ID missing from
+  `SCShareableContent`;
 - duplicate/invalid IDs or inconsistent bounds;
 - pause, diagnostics guard, inventory failure, unmapped window, or unconfirmed indicator;
 - any filtered display missing from the helper response.
