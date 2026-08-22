@@ -47,4 +47,3 @@ show the title that actually matched.
 - Full Python, Swift, helper protocol, arm64/x86_64, wheel, and signed App verification.
 - Live Edge test: blank InPrivate -> Google -> another app foreground -> close window. Protection
   must persist until close, then clear.
-

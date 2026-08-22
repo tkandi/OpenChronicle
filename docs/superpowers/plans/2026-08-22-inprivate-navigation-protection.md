@@ -129,4 +129,3 @@ and `bash scripts/install-macos-app.sh`, then confirm one healthy App-owned proc
 Use a fresh no-content Edge InPrivate window. Verify protection for `about:blank`, Google, the same
 window in the background, and release after closing it. Query category-only diagnostics and inspect
 only structural capture fields.
-
