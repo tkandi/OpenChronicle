@@ -63,6 +63,11 @@ private func windowIdentity(ownerPID: Int32, windowID: UInt32?) -> WindowIdentit
     return WindowIdentity(ownerPID: ownerPID, windowID: windowID)
 }
 
+func windowRecordID(from source: OnScreenCGWindow) -> UInt32? {
+    guard let windowID = source.windowID, windowID > 0 else { return nil }
+    return windowID
+}
+
 func resolveAXWindowMatches(
     cgWindows: [OnScreenCGWindow],
     axWindows: [AXWindowMetadata]

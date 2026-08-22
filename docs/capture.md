@@ -36,10 +36,17 @@ Privacy denylist checks can short-circuit this flow:
   protected window. In `all` mode, one protected display omits the complete
   virtual desktop image.
 - **`mask-window`** uses the macOS 14 or newer ScreenCaptureKit helper to
-  exclude protected windows and OpenChronicle's own indicator windows at the
-  source, then paints the protected window bounds gray in the returned image.
+  resolve protected windows and OpenChronicle's own indicator windows to unique
+  owning applications, exclude those complete applications at the source, then
+  paint the protected window bounds gray in the returned image.
 - **`exclude-window`** uses the same source exclusion but leaves the pixels
   behind the excluded window visible instead of adding a gray mask.
+
+Application-level exclusion intentionally removes every window owned by a
+protected or overlay application, including otherwise normal windows, sheets,
+menus, popovers, and floating panels. If any requested window has no unique,
+valid owning application, filtered capture returns a fixed error and uses the
+safe fallback; it never weakens the filter to window-ID-only exclusion.
 
 The daemon runs the normal protection monitor for `skip-monitor`,
 `mask-window`, and `exclude-window`. It starts an `off`-mode monitor only when
@@ -67,9 +74,11 @@ never treating an unknown title as allowed. Genuine helper exit, JSON parse, or
 display-inventory failures still produce a fixed-code `failed` decision.
 
 Menus, popovers, and non-layer-0 floating panels are not independently treated
-as protected full-display windows by their titles. Protection can still apply
-when an app or bundle denylist independently matches an inventoried normal
-window or the foreground window. The helper never traverses background AX trees
+as protected full-display windows by their titles. Once a normal protected
+window resolves to an owning application, however, filtered capture excludes
+all of that application's auxiliary windows at the source. Protection can also
+apply when an app or bundle denylist independently matches an inventoried
+normal window or the foreground window. The helper never traverses background AX trees
 or reads their controls and contents. In `separate` mode, only monitors
 intersecting a denied inventoried window are skipped. In `all` mode, any denied
 inventoried window skips the full virtual-desktop screenshot when the
@@ -82,18 +91,26 @@ the display inventory and protected window IDs/bounds must be filterable, the
 same-generation indicator acknowledgement must be confirmed, and a visible
 indicator must report every indicator and input-panel window ID. Indicator
 style `off` needs no overlay IDs. Diagnostics protection, unknown titles,
-missing or duplicate IDs, an unavailable helper, or any other incomplete
-decision falls back to `skip-monitor` using the latest protected display
-regions. For `mask-window` and `exclude-window` fallback, the monitor is forced
+missing or duplicate protected IDs, an unavailable helper, or another
+non-indicator incomplete decision falls back to `skip-monitor` using the latest
+protected display regions. An unconfirmed non-`off` indicator, including a
+failed inactive clear, stops before `mss`. For `mask-window` and
+`exclude-window` fallback, the monitor is forced
 to publish a fresh, non-terminal decision with complete protected display
-regions before `mss`. After `mss`, another forced decision must have identical
+regions and a confirmed non-`off` indicator before `mss`. After `mss`, another
+forced decision must still confirm the indicator and have identical
 authorization semantics or the fallback frames are discarded. Native
 `skip-monitor` and diagnostics guard-only `off` capture preserve their legacy
 current-decision behavior and do not compare window-filtering-only fields. The
 protected display is never captured by unblocked `mss`.
 
-After a filtered helper returns, OpenChronicle forces a fresh protection
-decision before keeping the image. A change to protected windows or bounds,
+The Swift helper fingerprints all shareable displays and every on-screen window
+(window ID, owner PID, finite frame, and title) before capture, reloads the
+complete shareable inventory after all display captures, and compares the two
+before PNG encoding or stdout. Any change returns a fixed `content_changed`
+error, so no PNG bytes cross the helper boundary. After a successful helper
+response, OpenChronicle also forces a fresh protection decision before keeping
+the image. A change to protected windows or bounds,
 display IDs or bounds, filtering eligibility, or overlay IDs discards the
 filtered frames and applies the latest skip-monitor decision. A terminal
 decision keeps no stale screenshot or capture.
@@ -116,7 +133,15 @@ remain in memory and are never added to capture JSON, diagnostics payloads,
 logs, FTS, timeline or memory files, model requests, or MCP surfaces. Helper
 acknowledgement payloads, stderr, and private failure details are not logged.
 
-This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
+This guard protects windows identifiable by app, bundle, or title metadata. It
+cannot classify sensitive content inside an otherwise allowed app. The double
+inventory snapshot detects persistent additions, removals, owner/frame changes,
+and title-classification changes, while application filters also exclude new
+windows from an app already classified as protected. The OS APIs still cannot
+prove absence of a different application's privacy window that appears and
+disappears entirely between the two snapshots. For high-risk workflows, keep
+password managers in the app/bundle denylist and pause capture before displaying
+secrets.
 
 ## Privacy protection indicators
 
@@ -128,8 +153,8 @@ The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
 The helper acknowledges a non-`off` generation only when every visible
 indicator and input panel has a distinct positive UInt32 window number. If any
 number is unavailable or duplicated, the panels remain visible but the helper
-returns an unconfirmed acknowledgement with no IDs; capture can then use only
-the fresh skip-monitor fallback.
+returns an unconfirmed acknowledgement with no IDs; screenshot capture remains
+stopped until a later generation is confirmed.
 
 - Green means that display has been excluded by the same-generation protection
   decision used for capture.

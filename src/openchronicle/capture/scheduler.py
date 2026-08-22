@@ -141,6 +141,13 @@ def _fallback_regions_are_valid(decision: ProtectionDecision) -> bool:
     return not snapshot.protected_display_ids and not snapshot.protected_regions
 
 
+def _indicator_confirmation_allows_capture(decision: ProtectionDecision) -> bool:
+    return (
+        decision.snapshot.indicator_style == "off"
+        or decision.indicator_confirmed
+    )
+
+
 def _grab_current_monitor_screenshots(
     cfg: CaptureConfig,
     decision: ProtectionDecision,
@@ -166,10 +173,14 @@ def _grab_fresh_skip_monitor_fallback(
     protection_monitor: PrivacyProtectionMonitor,
     *,
     category: str,
+    current_decision: ProtectionDecision | None = None,
 ) -> tuple[list[screenshot.Screenshot], ProtectionDecision] | None:
-    latest = protection_monitor.decision_for_capture(force=True)
+    latest = current_decision or protection_monitor.decision_for_capture(force=True)
     if _decision_is_terminal(cfg, latest):
         return None
+    if not _indicator_confirmation_allows_capture(latest):
+        logger.warning("screenshot fallback skipped: privacy indicator not confirmed")
+        return [], latest
     if not _fallback_regions_are_valid(latest):
         logger.warning("screenshot fallback skipped: category=invalid_protected_regions")
         return [], latest
@@ -186,10 +197,43 @@ def _grab_fresh_skip_monitor_fallback(
     if _decision_is_terminal(cfg, after_capture):
         return None
     if (
-        not _fallback_regions_are_valid(after_capture)
+        not _indicator_confirmation_allows_capture(after_capture)
+        or not _fallback_regions_are_valid(after_capture)
         or _filtered_authorization_key(after_capture) != authorization
     ):
         logger.warning("screenshot fallback discarded: category=authorization_changed")
+        return [], after_capture
+    return shots, after_capture
+
+
+def _grab_inactive_filtered_screenshots(
+    cfg: CaptureConfig,
+    protection_monitor: PrivacyProtectionMonitor,
+    decision: ProtectionDecision,
+) -> tuple[list[screenshot.Screenshot], ProtectionDecision] | None:
+    if not _indicator_confirmation_allows_capture(decision):
+        logger.warning("screenshot skipped: privacy indicator clear not confirmed")
+        return [], decision
+    if not _fallback_regions_are_valid(decision):
+        return [], decision
+
+    authorization = _filtered_authorization_key(decision)
+    shots = screenshot.grab_many(
+        monitor_mode=cfg.screenshot_monitor,
+        max_width=cfg.screenshot_max_width,
+        jpeg_quality=cfg.screenshot_jpeg_quality,
+        blocked_regions=[],
+    )
+    after_capture = protection_monitor.decision_for_capture(force=True)
+    if _decision_is_terminal(cfg, after_capture):
+        return None
+    if (
+        after_capture.snapshot.state is not ProtectionState.INACTIVE
+        or not _indicator_confirmation_allows_capture(after_capture)
+        or not _fallback_regions_are_valid(after_capture)
+        or _filtered_authorization_key(after_capture) != authorization
+    ):
+        logger.warning("screenshot discarded: inactive authorization changed")
         return [], after_capture
     return shots, after_capture
 
@@ -278,10 +322,15 @@ def _build_capture(
             else:
                 blocked_regions = privacy.sensitive_window_regions(cfg)
                 if blocked_regions is None:
-                    logger.warning(
-                        "screenshot skipped: category=visible_window_inventory_unavailable"
-                    )
-                    return out
+                    if (
+                        cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES
+                        or cfg.screenshot_privacy_fail_closed
+                    ):
+                        logger.warning(
+                            "screenshot skipped: category=visible_window_inventory_unavailable"
+                        )
+                        return out
+                    blocked_regions = []
             shots = screenshot.grab_many(
                 monitor_mode=cfg.screenshot_monitor,
                 max_width=cfg.screenshot_max_width,
@@ -324,17 +373,25 @@ def _build_capture(
                         cfg,
                         protection_monitor,
                         category="filtered_authorization_changed",
+                        current_decision=latest,
                     )
                     if fallback is None:
                         return None
                     shots, latest = fallback
                 decision = latest
         elif cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES:
-            fallback = _grab_fresh_skip_monitor_fallback(
-                cfg,
-                protection_monitor,
-                category="filtered_ineligible",
-            )
+            if decision.snapshot.state is ProtectionState.INACTIVE:
+                fallback = _grab_inactive_filtered_screenshots(
+                    cfg,
+                    protection_monitor,
+                    decision,
+                )
+            else:
+                fallback = _grab_fresh_skip_monitor_fallback(
+                    cfg,
+                    protection_monitor,
+                    category="filtered_ineligible",
+                )
             if fallback is None:
                 return None
             shots, decision = fallback

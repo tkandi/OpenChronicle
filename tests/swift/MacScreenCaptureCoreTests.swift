@@ -58,6 +58,56 @@ private func sourceDisplay(
     )
 }
 
+private func sourceApplication(
+    processID: Int32,
+    bundleIdentifier: String,
+    applicationName: String
+) -> CaptureApplicationSource {
+    CaptureApplicationSource(
+        processID: processID,
+        bundleIdentifier: bundleIdentifier,
+        applicationName: applicationName
+    )
+}
+
+private func sourceWindow(
+    id: UInt32,
+    owner: CaptureApplicationSource?,
+    left: Double = 10,
+    top: Double = 20,
+    width: Double = 300,
+    height: Double = 200,
+    title: String? = "window"
+) -> CaptureWindowSource {
+    CaptureWindowSource(
+        id: id,
+        owner: owner,
+        left: left,
+        top: top,
+        width: width,
+        height: height,
+        title: title
+    )
+}
+
+private let protectedApplication = sourceApplication(
+    processID: 500,
+    bundleIdentifier: "com.example.private",
+    applicationName: "Private"
+)
+private let overlayApplication = sourceApplication(
+    processID: 600,
+    bundleIdentifier: "com.openchronicle.overlay",
+    applicationName: "OpenChronicle Overlay"
+)
+
+private func fingerprint(
+    displays: [CaptureDisplaySource] = [sourceDisplay()],
+    windows: [CaptureWindowSource]
+) -> CapturePrivacyFingerprint {
+    requireSuccess(capturePrivacyFingerprint(displays: displays, windows: windows))
+}
+
 private func testExactCommandDecodes() {
     let command = requireSuccess(prepareCaptureCommand(Data(exactCommand.utf8), supportedOS: true))
 
@@ -181,12 +231,12 @@ private func testNumericFieldsRequirePlainIntegerTokens() {
 
 private func testPlainIntegerTokenBoundaries() {
     let command = requireSuccess(prepareCaptureCommand(
-        Data(#"{"version":1,"displays":[{"id":4294967295,"width":9223372036854775807,"height":1}],"protected_window_ids":[4294967295],"overlay_window_ids":[]}"#.utf8),
+        Data(#"{"version":1,"displays":[{"id":4294967295,"width":16384,"height":1}],"protected_window_ids":[4294967295],"overlay_window_ids":[]}"#.utf8),
         supportedOS: true
     ))
     precondition(command.displays == [CaptureDisplayRequest(
         id: UInt32.max,
-        width: Int.max,
+        width: CaptureResourceLimits.maxDimension,
         height: 1
     )])
     precondition(command.protectedWindowIDs == [UInt32.max])
@@ -199,6 +249,57 @@ private func testPlainIntegerTokenBoundaries() {
     for raw in invalidCommands {
         expectFailure(prepareCaptureCommand(Data(raw.utf8), supportedOS: true), .invalidCommand)
     }
+}
+
+private func testResourceLimitConstantsAndCommandBoundaries() {
+    precondition(CaptureResourceLimits.maxCommandBytes == 65_536)
+    precondition(CaptureResourceLimits.maxDisplayCount == 16)
+    precondition(CaptureResourceLimits.maxDimension == 16_384)
+    precondition(CaptureResourceLimits.maxAggregatePixels == 128_000_000)
+    precondition(CaptureResourceLimits.maxPNGBytes == 67_108_864)
+    precondition(CaptureResourceLimits.maxAggregatePNGBytes == 134_217_728)
+    precondition(CaptureResourceLimits.maxResponseBytes == 188_743_680)
+    precondition(CaptureResourceLimits.maxStderrBytes == 65_536)
+
+    let prefix = #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#
+    let exact = prefix + String(
+        repeating: " ",
+        count: CaptureResourceLimits.maxCommandBytes - prefix.utf8.count
+    )
+    precondition(exact.utf8.count == CaptureResourceLimits.maxCommandBytes)
+    _ = requireSuccess(prepareCaptureCommand(Data(exact.utf8), supportedOS: true))
+    expectFailure(
+        prepareCaptureCommand(Data((exact + " ").utf8), supportedOS: true),
+        .invalidCommand
+    )
+
+    let maximumDisplays = (1...CaptureResourceLimits.maxDisplayCount)
+        .map { #"{"id":\#($0),"width":1,"height":1}"# }
+        .joined(separator: ",")
+    _ = requireSuccess(prepareCaptureCommand(
+        Data((#"{"version":1,"displays":["# + maximumDisplays
+            + #"],"protected_window_ids":[456],"overlay_window_ids":[]}"#).utf8),
+        supportedOS: true
+    ))
+    let tooManyDisplays = maximumDisplays
+        + #",{"id":999,"width":1,"height":1}"#
+    expectFailure(
+        prepareCaptureCommand(
+            Data((#"{"version":1,"displays":["# + tooManyDisplays
+                + #"],"protected_window_ids":[456],"overlay_window_ids":[]}"#).utf8),
+            supportedOS: true
+        ),
+        .invalidCommand
+    )
+
+    let oversizedDimension = CaptureResourceLimits.maxDimension + 1
+    expectFailure(
+        prepareCaptureCommand(
+            Data(#"{"version":1,"displays":[{"id":123,"width":\#(oversizedDimension),"height":1}],"protected_window_ids":[456],"overlay_window_ids":[]}"#.utf8),
+            supportedOS: true
+        ),
+        .invalidCommand
+    )
 }
 
 private func testDuplicateObjectMembersAreInvalidAfterKeyDecoding() {
@@ -226,35 +327,75 @@ private func testResolverReturnsOnlyUniqueExactTargets() {
         overlayWindowIDs: [789]
     )
     let displays = [sourceDisplay(id: 124), sourceDisplay(id: 123)]
+    let applications = [overlayApplication, protectedApplication]
     let windows = [
-        CaptureWindowSource(id: 789),
-        CaptureWindowSource(id: 999),
-        CaptureWindowSource(id: 456),
-        CaptureWindowSource(id: 457),
+        sourceWindow(id: 789, owner: overlayApplication),
+        sourceWindow(id: 999, owner: protectedApplication),
+        sourceWindow(id: 456, owner: protectedApplication),
+        sourceWindow(id: 457, owner: protectedApplication),
     ]
 
     let targets = requireSuccess(resolveCaptureTargets(
         command: command,
         displays: displays,
-        windows: windows
+        windows: windows,
+        applications: applications
     ))
 
     precondition(targets.displayIndices == [1, 0])
-    precondition(targets.excludedWindowIndices == [2, 3, 0])
+    precondition(targets.excludedApplicationIndices == [1, 0])
+}
+
+private func testResolverPromotesProtectedOverlayAndAuxiliaryWindowsToOwningApplications() {
+    let otherApplication = sourceApplication(
+        processID: 700,
+        bundleIdentifier: "com.example.allowed",
+        applicationName: "Allowed"
+    )
+    let windows = [
+        sourceWindow(id: 456, owner: protectedApplication, title: "matched"),
+        sourceWindow(id: 457, owner: protectedApplication, title: "sheet"),
+        sourceWindow(id: 458, owner: protectedApplication, title: "new popover"),
+        sourceWindow(id: 789, owner: overlayApplication, title: "indicator"),
+        sourceWindow(id: 999, owner: otherApplication, title: "allowed"),
+    ]
+    let applications = [otherApplication, protectedApplication, overlayApplication]
+
+    let targets = requireSuccess(resolveCaptureTargets(
+        command: validCommand(),
+        displays: [sourceDisplay()],
+        windows: windows,
+        applications: applications
+    ))
+
+    precondition(targets.excludedApplicationIndices == [1, 2])
+    let excludedOwners = Set(targets.excludedApplicationIndices.map { applications[$0] })
+    precondition(excludedOwners.contains(windows[1].owner!))
+    precondition(excludedOwners.contains(windows[2].owner!))
+    precondition(!excludedOwners.contains(windows[4].owner!))
 }
 
 private func testResolverRejectsMissingAndAmbiguousDisplays() {
     let command = validCommand()
 
     expectFailure(
-        resolveCaptureTargets(command: command, displays: [], windows: [CaptureWindowSource(id: 456)]),
+        resolveCaptureTargets(
+            command: command,
+            displays: [],
+            windows: [sourceWindow(id: 456, owner: protectedApplication)],
+            applications: [protectedApplication, overlayApplication]
+        ),
         .displayNotFound
     )
     expectFailure(
         resolveCaptureTargets(
             command: command,
             displays: [sourceDisplay(), sourceDisplay()],
-            windows: [CaptureWindowSource(id: 456)]
+            windows: [
+                sourceWindow(id: 456, owner: protectedApplication),
+                sourceWindow(id: 789, owner: overlayApplication),
+            ],
+            applications: [protectedApplication, overlayApplication]
         ),
         .ambiguousDisplay
     )
@@ -264,17 +405,70 @@ private func testResolverRejectsMissingAndAmbiguousExcludedWindows() {
     let command = validCommand()
 
     expectFailure(
-        resolveCaptureTargets(command: command, displays: [sourceDisplay()], windows: []),
+        resolveCaptureTargets(
+            command: command,
+            displays: [sourceDisplay()],
+            windows: [],
+            applications: [protectedApplication, overlayApplication]
+        ),
         .windowNotFound
     )
     expectFailure(
         resolveCaptureTargets(
             command: command,
             displays: [sourceDisplay()],
-            windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 456)]
+            windows: [
+                sourceWindow(id: 456, owner: protectedApplication),
+                sourceWindow(id: 456, owner: protectedApplication),
+                sourceWindow(id: 789, owner: overlayApplication),
+            ],
+            applications: [protectedApplication, overlayApplication]
         ),
         .ambiguousWindow
     )
+}
+
+private func testResolverRejectsMissingDuplicateAndInconsistentOwners() {
+    let inconsistent = sourceApplication(
+        processID: protectedApplication.processID,
+        bundleIdentifier: "com.example.changed",
+        applicationName: protectedApplication.applicationName
+    )
+    let cases: [([CaptureWindowSource], [CaptureApplicationSource])] = [
+        (
+            [
+                sourceWindow(id: 456, owner: nil),
+                sourceWindow(id: 789, owner: overlayApplication),
+            ],
+            [protectedApplication, overlayApplication]
+        ),
+        (
+            [
+                sourceWindow(id: 456, owner: protectedApplication),
+                sourceWindow(id: 789, owner: overlayApplication),
+            ],
+            [protectedApplication, protectedApplication, overlayApplication]
+        ),
+        (
+            [
+                sourceWindow(id: 456, owner: inconsistent),
+                sourceWindow(id: 789, owner: overlayApplication),
+            ],
+            [protectedApplication, overlayApplication]
+        ),
+    ]
+
+    for (windows, applications) in cases {
+        expectFailure(
+            resolveCaptureTargets(
+                command: validCommand(),
+                displays: [sourceDisplay()],
+                windows: windows,
+                applications: applications
+            ),
+            .windowOwnerUnavailable
+        )
+    }
 }
 
 private func testResolverRevalidatesSafetyCriticalCommandState() {
@@ -293,7 +487,11 @@ private func testResolverRevalidatesSafetyCriticalCommandState() {
             resolveCaptureTargets(
                 command: command,
                 displays: [sourceDisplay()],
-                windows: [CaptureWindowSource(id: 456)]
+                windows: [
+                    sourceWindow(id: 456, owner: protectedApplication),
+                    sourceWindow(id: 789, owner: overlayApplication),
+                ],
+                applications: [protectedApplication, overlayApplication]
             ),
             .invalidCommand
         )
@@ -314,11 +512,53 @@ private func testResolverRejectsUnrepresentableDisplayGeometry() {
             resolveCaptureTargets(
                 command: validCommand(),
                 displays: [display],
-                windows: [CaptureWindowSource(id: 456)]
+                windows: [
+                    sourceWindow(id: 456, owner: protectedApplication),
+                    sourceWindow(id: 789, owner: overlayApplication),
+                ],
+                applications: [protectedApplication, overlayApplication]
             ),
             .contentUnavailable
         )
     }
+}
+
+private func testPrivacyFingerprintIsCanonicalAndDetectsWindowChanges() {
+    let firstWindows = [
+        sourceWindow(id: 456, owner: protectedApplication, title: "Private"),
+        sourceWindow(id: 789, owner: overlayApplication, title: "Protected"),
+    ]
+    let first = fingerprint(windows: firstWindows)
+    let reordered = fingerprint(windows: Array(firstWindows.reversed()))
+    precondition(first == reordered)
+
+    let changedTitle = fingerprint(windows: [
+        sourceWindow(id: 456, owner: protectedApplication, title: "Allowed"),
+        firstWindows[1],
+    ])
+    let changedOwner = fingerprint(windows: [
+        sourceWindow(id: 456, owner: overlayApplication, title: "Private"),
+        firstWindows[1],
+    ])
+    let changedFrame = fingerprint(windows: [
+        sourceWindow(id: 456, owner: protectedApplication, left: 11, title: "Private"),
+        firstWindows[1],
+    ])
+    let addedSameAppWindow = fingerprint(windows: firstWindows + [
+        sourceWindow(id: 457, owner: protectedApplication, title: "new sheet")
+    ])
+    precondition(first != changedTitle)
+    precondition(first != changedOwner)
+    precondition(first != changedFrame)
+    precondition(first != addedSameAppWindow)
+
+    expectFailure(
+        capturePrivacyFingerprint(
+            displays: [sourceDisplay()],
+            windows: [sourceWindow(id: 456, owner: protectedApplication, left: .nan)]
+        ),
+        .contentUnavailable
+    )
 }
 
 private func testOutputDimensionsUseExplicitOrNativePixels() {
@@ -382,11 +622,12 @@ private func testCaptureSequencePreparesAllTargetsBeforeProducingPNGs() async {
         overlayWindowIDs: [789]
     )
     let displays = [sourceDisplay(id: 124), sourceDisplay(id: 123)]
+    let applications = [overlayApplication, protectedApplication]
     let windows = [
-        CaptureWindowSource(id: 789),
-        CaptureWindowSource(id: 999),
-        CaptureWindowSource(id: 456),
-        CaptureWindowSource(id: 457),
+        sourceWindow(id: 789, owner: overlayApplication),
+        sourceWindow(id: 999, owner: protectedApplication),
+        sourceWindow(id: 456, owner: protectedApplication),
+        sourceWindow(id: 457, owner: protectedApplication),
     ]
     var preparationCalls: [(Int, [Int])] = []
 
@@ -394,8 +635,9 @@ private func testCaptureSequencePreparesAllTargetsBeforeProducingPNGs() async {
         command: command,
         displays: displays,
         windows: windows,
-        prepareResource: { displayIndex, excludedWindowIndices in
-            preparationCalls.append((displayIndex, excludedWindowIndices))
+        applications: applications,
+        prepareResource: { displayIndex, excludedApplicationIndices in
+            preparationCalls.append((displayIndex, excludedApplicationIndices))
             let scale = displayIndex == 1 ? 2.0 : 1.5
             return .success((FakeCaptureResource(displayIndex: displayIndex), scale))
         }
@@ -403,24 +645,36 @@ private func testCaptureSequencePreparesAllTargetsBeforeProducingPNGs() async {
 
     precondition(preparationCalls.count == 2)
     precondition(preparationCalls[0].0 == 1)
-    precondition(preparationCalls[0].1 == [2, 3, 0])
+    precondition(preparationCalls[0].1 == [1, 0])
     precondition(preparationCalls[1].0 == 0)
-    precondition(preparationCalls[1].1 == [2, 3, 0])
+    precondition(preparationCalls[1].1 == [1, 0])
     precondition(prepared.map(\.pixelSize) == [
         CapturePixelSize(width: 2880, height: 1800),
         CapturePixelSize(width: 800, height: 600),
     ])
 
+    var events: [String] = []
     var captureCalls: [(FakeCaptureResource, CapturePixelSize)] = []
+    let initialFingerprint = fingerprint(windows: windows)
     let captured = requireSuccess(await executePreparedCaptures(
         prepared,
+        initialFingerprint: initialFingerprint,
         capture: { resource, pixelSize in
+            events.append("capture-\(resource.displayIndex)")
             captureCalls.append((resource, pixelSize))
             return .success(CapturedFrame(
                 pixelWidth: pixelSize.width,
                 pixelHeight: pixelSize.height,
-                pngData: Data([0x89, UInt8(resource.displayIndex)])
+                payload: UInt8(resource.displayIndex)
             ))
+        },
+        currentFingerprint: {
+            events.append("fingerprint")
+            return .success(initialFingerprint)
+        },
+        encodePNG: { payload in
+            events.append("encode-\(payload)")
+            return Data([0x89, payload])
         }
     ))
 
@@ -432,6 +686,48 @@ private func testCaptureSequencePreparesAllTargetsBeforeProducingPNGs() async {
     precondition(captured.map(\.id) == [123, 124])
     precondition(captured.map(\.pixelWidth) == [2880, 800])
     precondition(captured.map(\.pngData) == [Data([0x89, 1]), Data([0x89, 0])])
+    precondition(events == ["capture-1", "capture-0", "fingerprint", "encode-1", "encode-0"])
+}
+
+private func testFingerprintChangePreventsEveryPNGEncode() async {
+    let windows = [
+        sourceWindow(id: 456, owner: protectedApplication),
+        sourceWindow(id: 789, owner: overlayApplication),
+    ]
+    let prepared = requireSuccess(prepareCaptureSequence(
+        command: validCommand(),
+        displays: [sourceDisplay()],
+        windows: windows,
+        applications: [protectedApplication, overlayApplication],
+        prepareResource: { displayIndex, _ in
+            .success((FakeCaptureResource(displayIndex: displayIndex), 1))
+        }
+    ))
+    let before = fingerprint(windows: windows)
+    let after = fingerprint(windows: windows + [
+        sourceWindow(id: 457, owner: protectedApplication, title: "new panel")
+    ])
+    var encodeCalls = 0
+
+    let result = await executePreparedCaptures(
+        prepared,
+        initialFingerprint: before,
+        capture: { _, pixelSize in
+            .success(CapturedFrame(
+                pixelWidth: pixelSize.width,
+                pixelHeight: pixelSize.height,
+                payload: UInt8(1)
+            ))
+        },
+        currentFingerprint: { .success(after) },
+        encodePNG: { _ in
+            encodeCalls += 1
+            return Data([1])
+        }
+    )
+
+    expectFailure(result, .contentChanged)
+    precondition(encodeCalls == 0)
 }
 
 private func testCaptureSequencePreparationFailuresPreventCapture() async {
@@ -440,6 +736,7 @@ private func testCaptureSequencePreparationFailuresPreventCapture() async {
         command: validCommand(),
         displays: [sourceDisplay()],
         windows: [],
+        applications: [protectedApplication, overlayApplication],
         prepareResource: { _, _ -> Result<(FakeCaptureResource, Double), CaptureErrorCode> in
             prepareCallCount += 1
             return .success((FakeCaptureResource(displayIndex: 0), 2))
@@ -456,7 +753,11 @@ private func testCaptureSequencePreparationFailuresPreventCapture() async {
     let resourceFailure = prepareCaptureSequence(
         command: twoDisplays,
         displays: [sourceDisplay(id: 123), sourceDisplay(id: 124)],
-        windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 789)],
+        windows: [
+            sourceWindow(id: 456, owner: protectedApplication),
+            sourceWindow(id: 789, owner: overlayApplication),
+        ],
+        applications: [protectedApplication, overlayApplication],
         prepareResource: { displayIndex, _ -> Result<
             (FakeCaptureResource, Double), CaptureErrorCode
         > in
@@ -472,7 +773,11 @@ private func testCaptureSequencePreparationFailuresPreventCapture() async {
     let dimensionFailure = prepareCaptureSequence(
         command: twoDisplays,
         displays: [sourceDisplay(id: 123), sourceDisplay(id: 124)],
-        windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 789)],
+        windows: [
+            sourceWindow(id: 456, owner: protectedApplication),
+            sourceWindow(id: 789, owner: overlayApplication),
+        ],
+        applications: [protectedApplication, overlayApplication],
         prepareResource: { displayIndex, _ in
             prepareCallCount += 1
             return .success((FakeCaptureResource(displayIndex: displayIndex), displayIndex == 0 ? 2 : 0))
@@ -491,45 +796,62 @@ private func testCaptureSequenceMidstreamFailuresReturnNoPartialDisplays() async
     let prepared = requireSuccess(prepareCaptureSequence(
         command: command,
         displays: [sourceDisplay(id: 123), sourceDisplay(id: 124), sourceDisplay(id: 125)],
-        windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 789)],
+        windows: [
+            sourceWindow(id: 456, owner: protectedApplication),
+            sourceWindow(id: 789, owner: overlayApplication),
+        ],
+        applications: [protectedApplication, overlayApplication],
         prepareResource: { displayIndex, _ in
             .success((FakeCaptureResource(displayIndex: displayIndex), 2))
         }
     ))
 
     var captureCallCount = 0
+    let baseline = fingerprint(windows: [
+        sourceWindow(id: 456, owner: protectedApplication),
+        sourceWindow(id: 789, owner: overlayApplication),
+    ])
     let captureFailure = await executePreparedCaptures(
         prepared,
+        initialFingerprint: baseline,
         capture: { _, pixelSize in
             captureCallCount += 1
             if captureCallCount == 2 { return .failure(.captureFailed) }
             return .success(CapturedFrame(
                 pixelWidth: pixelSize.width,
                 pixelHeight: pixelSize.height,
-                pngData: Data([1])
+                payload: Data([1])
             ))
-        }
+        },
+        currentFingerprint: { .success(baseline) },
+        encodePNG: { $0 }
     )
     expectFailure(captureFailure, .captureFailed)
     precondition(captureCallCount == 2)
 
     let wrongSize = await executePreparedCaptures(
         prepared,
+        initialFingerprint: baseline,
         capture: { _, _ in
-            .success(CapturedFrame(pixelWidth: 99, pixelHeight: 100, pngData: Data([1])))
-        }
+            .success(CapturedFrame(pixelWidth: 99, pixelHeight: 100, payload: Data([1])))
+        },
+        currentFingerprint: { .success(baseline) },
+        encodePNG: { $0 }
     )
     expectFailure(wrongSize, .captureFailed)
 
     let emptyPNG = await executePreparedCaptures(
         prepared,
+        initialFingerprint: baseline,
         capture: { _, pixelSize in
             .success(CapturedFrame(
                 pixelWidth: pixelSize.width,
                 pixelHeight: pixelSize.height,
-                pngData: Data()
+                payload: Data()
             ))
-        }
+        },
+        currentFingerprint: { .success(baseline) },
+        encodePNG: { $0 }
     )
     expectFailure(emptyPNG, .encodeFailed)
 }
@@ -543,6 +865,8 @@ private func testFixedErrorPayloadsAreExactSingleLines() {
         (.windowNotFound, "window_not_found"),
         (.ambiguousDisplay, "ambiguous_display"),
         (.ambiguousWindow, "ambiguous_window"),
+        (.windowOwnerUnavailable, "window_owner_unavailable"),
+        (.contentChanged, "content_changed"),
         (.captureFailed, "capture_failed"),
         (.encodeFailed, "encode_failed"),
     ]
@@ -552,6 +876,37 @@ private func testFixedErrorPayloadsAreExactSingleLines() {
         precondition(output == #"{"version":1,"status":"error","error":"\#(rawValue)"}"# + "\n")
         precondition(output.filter { $0 == "\n" }.count == 1)
     }
+}
+
+private func testAggregatePixelAndEncodedResponseResourceBoundaries() {
+    let exactPixels = [
+        CapturePixelSize(width: 10_000, height: 10_000),
+        CapturePixelSize(width: 10_000, height: 2_800),
+    ]
+    precondition(capturePixelSizesAreWithinLimits(exactPixels))
+    precondition(!capturePixelSizesAreWithinLimits(
+        exactPixels + [CapturePixelSize(width: 1, height: 1)]
+    ))
+    precondition(!capturePixelSizesAreWithinLimits([
+        CapturePixelSize(width: CaptureResourceLimits.maxDimension + 1, height: 1)
+    ]))
+
+    precondition(capturePNGByteCountsAreWithinLimits([
+        CaptureResourceLimits.maxPNGBytes,
+        CaptureResourceLimits.maxAggregatePNGBytes - CaptureResourceLimits.maxPNGBytes,
+    ]))
+    precondition(!capturePNGByteCountsAreWithinLimits([
+        CaptureResourceLimits.maxPNGBytes + 1
+    ]))
+    precondition(!capturePNGByteCountsAreWithinLimits([
+        CaptureResourceLimits.maxPNGBytes,
+        CaptureResourceLimits.maxAggregatePNGBytes
+            - CaptureResourceLimits.maxPNGBytes + 1,
+    ]))
+    precondition(estimatedBase64Length(0) == 0)
+    precondition(estimatedBase64Length(1) == 4)
+    precondition(estimatedBase64Length(3) == 4)
+    precondition(estimatedBase64Length(Int.max) == nil)
 }
 
 private func testSuccessPayloadHasOnlyBoundedPublicFields() throws {
@@ -714,18 +1069,24 @@ enum MacScreenCaptureCoreTests {
         testDimensionsMustBePairedPositiveIntegersWithinIntRange()
         testNumericFieldsRequirePlainIntegerTokens()
         testPlainIntegerTokenBoundaries()
+        testResourceLimitConstantsAndCommandBoundaries()
         testDuplicateObjectMembersAreInvalidAfterKeyDecoding()
         testResolverReturnsOnlyUniqueExactTargets()
+        testResolverPromotesProtectedOverlayAndAuxiliaryWindowsToOwningApplications()
         testResolverRejectsMissingAndAmbiguousDisplays()
         testResolverRejectsMissingAndAmbiguousExcludedWindows()
+        testResolverRejectsMissingDuplicateAndInconsistentOwners()
         testResolverRevalidatesSafetyCriticalCommandState()
         testResolverRejectsUnrepresentableDisplayGeometry()
         testOutputDimensionsUseExplicitOrNativePixels()
         testOutputDimensionBoundariesFailClosed()
+        testPrivacyFingerprintIsCanonicalAndDetectsWindowChanges()
         await testCaptureSequencePreparesAllTargetsBeforeProducingPNGs()
+        await testFingerprintChangePreventsEveryPNGEncode()
         await testCaptureSequencePreparationFailuresPreventCapture()
         await testCaptureSequenceMidstreamFailuresReturnNoPartialDisplays()
         testFixedErrorPayloadsAreExactSingleLines()
+        testAggregatePixelAndEncodedResponseResourceBoundaries()
         try testSuccessPayloadHasOnlyBoundedPublicFields()
         testInvalidSuccessBoundsReturnEncodeFailed()
 

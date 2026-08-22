@@ -5,6 +5,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -87,15 +88,15 @@ def _install_helper(
     request: dict[str, object] = {}
 
     def run(_args, **kwargs):
-        request.update(json.loads(kwargs["input"]))
-        return SimpleNamespace(
+        request.update(json.loads(kwargs["input_data"]))
+        return screenshot._BoundedProcessResult(
             returncode=returncode,
-            stdout=json.dumps(response) + stdout_suffix,
-            stderr=stderr,
+            stdout=(json.dumps(response) + stdout_suffix).encode(),
+            stderr=stderr.encode(),
         )
 
     monkeypatch.setattr(screenshot, "_resolve_filtered_capture_helper", lambda: "/helper")
-    monkeypatch.setattr(screenshot.subprocess, "run", run)
+    monkeypatch.setattr(screenshot, "_run_bounded_process", run)
     return request
 
 
@@ -376,12 +377,253 @@ def test_filtered_capture_rejects_helper_timeout(monkeypatch: pytest.MonkeyPatch
     displays = (_display(31, 0, 0, 10, 8, primary=True),)
     monkeypatch.setattr(screenshot, "_resolve_filtered_capture_helper", lambda: "/helper")
     monkeypatch.setattr(
-        screenshot.subprocess,
-        "run",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("helper", 1)),
+        screenshot,
+        "_run_bounded_process",
+        lambda *_args, **_kwargs: None,
     )
 
     assert _grab(monitor_mode="primary", displays=displays) is None
+
+
+def test_python_and_swift_capture_resource_limits_are_identical() -> None:
+    expected = {
+        "maxCommandBytes": screenshot._FILTERED_MAX_COMMAND_BYTES,
+        "maxDisplayCount": screenshot._FILTERED_MAX_DISPLAY_COUNT,
+        "maxDimension": screenshot._MAX_CAPTURE_DIMENSION,
+        "maxAggregatePixels": screenshot._MAX_CAPTURE_PIXELS,
+        "maxPNGBytes": screenshot._FILTERED_MAX_PNG_BYTES,
+        "maxAggregatePNGBytes": screenshot._FILTERED_MAX_AGGREGATE_PNG_BYTES,
+        "maxResponseBytes": screenshot._FILTERED_MAX_RESPONSE_BYTES,
+        "maxStderrBytes": screenshot._FILTERED_MAX_STDERR_BYTES,
+    }
+    assert expected == {
+        "maxCommandBytes": 65_536,
+        "maxDisplayCount": 16,
+        "maxDimension": 16_384,
+        "maxAggregatePixels": 128_000_000,
+        "maxPNGBytes": 67_108_864,
+        "maxAggregatePNGBytes": 134_217_728,
+        "maxResponseBytes": 188_743_680,
+        "maxStderrBytes": 65_536,
+    }
+
+    swift_source = (
+        Path(__file__).resolve().parents[1]
+        / "resources"
+        / "mac-screen-capture-core.swift"
+    ).read_text()
+    for name, value in expected.items():
+        assert f"static let {name} = {value:_}" in swift_source
+
+
+def test_filtered_capture_rejects_display_count_and_aggregate_pixels_before_launch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    maximum = tuple(
+        _display(index + 1, index * 10, 0, 10, 10, primary=index == 0)
+        for index in range(screenshot._FILTERED_MAX_DISPLAY_COUNT)
+    )
+    assert screenshot._validated_displays(maximum) == maximum
+    assert screenshot._validated_displays(
+        maximum + (_display(99, 200, 0, 10, 10),)
+    ) is None
+
+    exact = (
+        screenshot._FilteredCaptureTarget(maximum[0], 10_000, 10_000),
+        screenshot._FilteredCaptureTarget(maximum[1], 10_000, 2_800),
+    )
+    assert screenshot._capture_targets_are_within_limits(exact)
+    assert not screenshot._capture_targets_are_within_limits(
+        exact + (screenshot._FilteredCaptureTarget(maximum[2], 1, 1),)
+    )
+    monkeypatch.setattr(
+        screenshot,
+        "_resolve_filtered_capture_helper",
+        lambda: pytest.fail("helper must not launch"),
+    )
+    assert _grab(monitor_mode="separate", displays=maximum + (maximum[0],)) is None
+
+
+def test_filtered_request_bytes_are_bounded_before_helper_launch() -> None:
+    display = _display(31, 0, 0, 10, 8, primary=True)
+    target = screenshot._FilteredCaptureTarget(display, 10, 8)
+    assert screenshot._filtered_capture_request_bytes((target,), (71,), (82,)) is not None
+    assert screenshot._filtered_capture_request_bytes(
+        (target,),
+        tuple(range(1, 20_000)),
+        (),
+    ) is None
+
+
+def test_bounded_transport_streams_real_stdout_and_stderr() -> None:
+    result = screenshot._run_bounded_process(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys,time; "
+                "sys.stdin.buffer.read(); "
+                "sys.stdout.buffer.write(b'ab'); sys.stdout.flush(); "
+                "time.sleep(0.02); "
+                "sys.stdout.buffer.write(b'cd'); "
+                "sys.stderr.buffer.write(b'warn')"
+            ),
+        ],
+        input_data=b"request",
+        timeout=2,
+        max_stdout_bytes=4,
+        max_stderr_bytes=4,
+    )
+
+    assert result == screenshot._BoundedProcessResult(
+        returncode=0,
+        stdout=b"abcd",
+        stderr=b"warn",
+    )
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_bounded_transport_kills_and_reaps_on_stream_overflow(stream: str) -> None:
+    writer = "sys.stdout" if stream == "stdout" else "sys.stderr"
+    result = screenshot._run_bounded_process(
+        [
+            sys.executable,
+            "-c",
+            f"import sys,time; {writer}.write('x' * 65); {writer}.flush(); time.sleep(5)",
+        ],
+        input_data=b"",
+        timeout=2,
+        max_stdout_bytes=64,
+        max_stderr_bytes=64,
+    )
+
+    assert result is None
+
+
+def test_bounded_transport_timeout_rejects_partial_output() -> None:
+    started = time.monotonic()
+    result = screenshot._run_bounded_process(
+        [
+            sys.executable,
+            "-c",
+            "import sys,time; sys.stdout.write('{\"partial\":'); sys.stdout.flush(); time.sleep(5)",
+        ],
+        input_data=b"",
+        timeout=0.05,
+        max_stdout_bytes=1_024,
+        max_stderr_bytes=1_024,
+    )
+
+    assert result is None
+    assert time.monotonic() - started < 2
+
+
+def test_bounded_transport_overflow_kills_helper_process_group(tmp_path: Path) -> None:
+    orphan_marker = tmp_path / "orphan-survived"
+    child_code = (
+        "import pathlib,time; time.sleep(0.4); "
+        f"pathlib.Path({str(orphan_marker)!r}).write_text('alive')"
+    )
+    parent_code = (
+        "import subprocess,sys,time; "
+        f"subprocess.Popen([sys.executable, '-c', {child_code!r}]); "
+        "sys.stdout.write('x' * 4096); sys.stdout.flush(); time.sleep(5)"
+    )
+
+    assert screenshot._run_bounded_process(
+        [sys.executable, "-c", parent_code],
+        input_data=b"",
+        timeout=2,
+        max_stdout_bytes=64,
+        max_stderr_bytes=64,
+    ) is None
+    time.sleep(0.7)
+    assert not orphan_marker.exists()
+
+
+def test_real_helper_transport_wiring_decodes_complete_streamed_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    displays = (_display(31, 0, 0, 10, 8, primary=True),)
+    payload = json.dumps(_response(displays, ((220, 10, 20),)))
+    helper = _executable(
+        tmp_path / "helper",
+        "#!/usr/bin/env python3\n"
+        "import sys, time\n"
+        "sys.stdin.buffer.readline()\n"
+        f"payload = {payload!r}\n"
+        "middle = len(payload) // 2\n"
+        "sys.stdout.write(payload[:middle]); sys.stdout.flush()\n"
+        "time.sleep(0.02)\n"
+        "sys.stdout.write(payload[middle:] + '\\n'); sys.stdout.flush()\n",
+    )
+    monkeypatch.setattr(screenshot, "_resolve_filtered_capture_helper", lambda: helper)
+
+    shots = _grab(monitor_mode="primary", displays=displays)
+
+    assert shots is not None
+    assert (shots[0].width, shots[0].height) == (10, 8)
+
+
+def test_png_header_dimensions_are_checked_before_pillow_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    display = _display(31, 0, 0, 2, 2, primary=True)
+    target = screenshot._FilteredCaptureTarget(display, 2, 2)
+    row = _response((display,), ((220, 10, 20),), sizes=((3, 2),))["displays"][0]
+    row["pixel_width"] = 2
+    row["pixel_height"] = 2
+    monkeypatch.setattr(
+        Image,
+        "open",
+        lambda *_args, **_kwargs: pytest.fail("Pillow must not open mismatched IHDR dimensions"),
+    )
+
+    assert screenshot._decode_filtered_display(row, target, Image) is None
+
+
+@pytest.mark.parametrize("max_pixels", [3, 1], ids=["warning", "error"])
+def test_filtered_png_decompression_bomb_warning_and_error_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    max_pixels: int,
+) -> None:
+    display = _display(31, 0, 0, 2, 2, primary=True)
+    target = screenshot._FilteredCaptureTarget(display, 2, 2)
+    row = _response((display,), ((220, 10, 20),), sizes=((2, 2),))["displays"][0]
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", max_pixels)
+
+    assert screenshot._decode_filtered_display(row, target, Image) is None
+
+
+def test_base64_and_decoded_png_byte_limits_fail_before_decode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    display = _display(31, 0, 0, 2, 2, primary=True)
+    target = screenshot._FilteredCaptureTarget(display, 2, 2)
+    row = _response((display,), ((220, 10, 20),), sizes=((2, 2),))["displays"][0]
+    monkeypatch.setattr(screenshot, "_FILTERED_MAX_PNG_BYTES", 8)
+    row["png_base64"] = "A" * 13
+    monkeypatch.setattr(
+        screenshot.base64,
+        "b64decode",
+        lambda *_args, **_kwargs: pytest.fail("oversized base64 must be rejected before decode"),
+    )
+
+    assert screenshot._decode_filtered_display(row, target, Image) is None
+
+
+def test_helper_sources_wire_application_exclusion_double_snapshot_and_cg_id_mapping() -> None:
+    root = Path(__file__).resolve().parents[1]
+    capture_source = (root / "resources" / "mac-screen-capture.swift").read_text()
+    window_source = (root / "resources" / "mac-window-list.swift").read_text()
+
+    assert "excludingApplications:" in capture_source
+    assert "exceptingWindows: []" in capture_source
+    assert "excludingWindows:" not in capture_source
+    assert capture_source.count("loadShareableContent()") >= 2
+    assert "currentFingerprint:" in capture_source
+    assert "window_id: windowRecordID(from: source.metadata)" in window_source
 
 
 @pytest.mark.parametrize(

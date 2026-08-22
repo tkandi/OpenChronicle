@@ -223,8 +223,10 @@ ordinary display capture path and disables the background window monitor and
 indicator. `skip-monitor` uses the display-level fallback and omits a display
 that intersects a protected window. `mask-window` and `exclude-window` require
 macOS 14 or later: their ScreenCaptureKit helper source-excludes protected
-windows and every confirmed OpenChronicle indicator or input-panel window for
-the same decision generation. `mask-window` then paints the protected window
+windows and every confirmed OpenChronicle indicator or input-panel window by
+resolving them to unique owning applications and excluding each complete app.
+This intentionally removes all normal and auxiliary windows from those apps.
+`mask-window` then paints the protected window
 bounds gray; `exclude-window` leaves the pixels behind those excluded windows
 visible.
 
@@ -237,6 +239,17 @@ fall back to an unfiltered screenshot; they remain screenshot-fail-closed when
 the fallback cannot safely omit the protected display. See
 [Capture](capture.md#screenshot-privacy-modes) for the complete fallback and
 multi-display behavior.
+
+A non-`off` indicator that is not confirmed stops before `mss`, including an
+inactive state whose clear acknowledgement failed. Any fallback frame is
+discarded if indicator confirmation or authorization changes during `mss`.
+
+The helper fingerprints all shareable displays and on-screen windows before
+capture and reloads them after all display captures but before PNG encoding or
+stdout. Any ID, owner, finite-frame, or title change rejects every frame. This
+also excludes newly created windows from an app already classified as
+protected, but cannot prove absence of a different app's privacy window that
+appears and disappears entirely between the two OS snapshots.
 
 The decision inventory is limited to alpha-positive, positive-size, normal
 layer-0 windows returned by CoreGraphics as on-screen. It locally inspects owner
@@ -263,9 +276,10 @@ written or processed.
 With `screenshot_privacy_mode = "off"`, the daemon does not start the background
 inventory monitor or indicator, but foreground app, bundle, title, URL, and text
 rules still skip matching captures. With `screenshot_privacy_fail_closed =
-false`, an inventory failure clears stale overlays and allows an unprotected
-capture without claiming visual confirmation; the default `true` policy aborts
-the complete tick and shows yellow when the helper can render it.
+false`, only legacy `skip-monitor` and `off` may allow an unprotected capture
+after an ordinary inventory failure. `mask-window` and `exclude-window` remain
+fail-closed regardless of that setting; the default `true` policy aborts the
+complete tick and shows yellow when the helper can render it.
 
 `screenshot_privacy_fail_closed = false` applies only to window/display inventory
 failures. If the pause state cannot be read, OpenChronicle shows the yellow failed

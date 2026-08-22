@@ -31,7 +31,14 @@ from openchronicle.mcp.server import build_server
 from openchronicle.store import fts
 from openchronicle.writer import llm as llm_mod
 
+_MEMORY_ONLY_PROTECTED_WINDOW_ID = 4_294_967_000
 _MEMORY_ONLY_OVERLAY_WINDOW_ID = 4_294_967_001
+
+
+def _assert_authorization_ids_absent(value: object) -> None:
+    serialized = json.dumps(value, ensure_ascii=False)
+    assert str(_MEMORY_ONLY_PROTECTED_WINDOW_ID) not in serialized
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in serialized
 
 
 class _SafeAXProvider:
@@ -141,6 +148,8 @@ def _private_other_display_decision(
             reason_trigger="hover",
             display_reasons=DisplayProtectionReasons.from_reasons(reasons),
             diagnostics_guard_active=bool(diagnostics_display_ids),
+            protected_window_ids=frozenset({_MEMORY_ONLY_PROTECTED_WINDOW_ID}),
+            protected_window_regions=(ScreenRegion(110, 10, 70, 70),),
         ),
         indicator_confirmed=True,
         indicator_window_ids=(_MEMORY_ONLY_OVERLAY_WINDOW_ID,),
@@ -243,15 +252,16 @@ def test_exact_reason_never_enters_capture_or_fts(
         )
         assert out is not None
         assert marker not in json.dumps(out, ensure_ascii=False)
-        assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(out)
+        _assert_authorization_ids_absent(out)
         path = scheduler._write_capture(out)
 
     assert marker not in path.read_text()
-    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in path.read_text()
+    _assert_authorization_ids_absent(json.loads(path.read_text()))
     safe_hits = _search_capture_fts("knownsafefts")
     assert [hit.id for hit in safe_hits] == [path.stem]
     assert _search_capture_fts(marker) == []
     assert marker not in caplog.text
+    assert str(_MEMORY_ONLY_PROTECTED_WINDOW_ID) not in caplog.text
     assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in caplog.text
 
 
@@ -323,7 +333,7 @@ def test_category_socket_and_guard_never_persist_exact_reason(
             }
         ]
         assert marker not in json.dumps(category, ensure_ascii=False)
-        assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(category)
+        _assert_authorization_ids_absent(category)
         assert denied == {
             "schema_version": 1,
             "type": "error",
@@ -351,6 +361,7 @@ def test_category_socket_and_guard_never_persist_exact_reason(
                     "display_ids": [2],
                 }
                 assert marker not in guard_raw
+                assert str(_MEMORY_ONLY_PROTECTED_WINDOW_ID) not in guard_raw
                 assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in guard_raw
 
                 exact = _request(
@@ -360,7 +371,7 @@ def test_category_socket_and_guard_never_persist_exact_reason(
                 )
                 assert exact["type"] == "snapshot"
                 assert marker in json.dumps(exact, ensure_ascii=False)
-                assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(exact)
+                _assert_authorization_ids_absent(exact)
 
                 released = _request(
                     client,
@@ -397,7 +408,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
         created_at="2026-08-22T12:00:00.000000Z",
     )
     assert marker in json.dumps(exact_snapshot, ensure_ascii=False)
-    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(exact_snapshot)
+    _assert_authorization_ids_absent(exact_snapshot)
 
     status = cli._status_payload(cfg, model_checks=False)
     status_json = json.dumps(status, ensure_ascii=False)
@@ -405,6 +416,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
         "boundary-test-model"
     }
     assert marker not in status_json
+    assert str(_MEMORY_ONLY_PROTECTED_WINDOW_ID) not in status_json
     assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in status_json
     assert "privacy_reason" not in status_json
     assert "protection_reason" not in status_json
@@ -443,6 +455,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
     }
     assert event["model"] == cfg.model_for("timeline").model
     assert marker not in event_raw
+    assert str(_MEMORY_ONLY_PROTECTED_WINDOW_ID) not in event_raw
     assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in event_raw
     assert "privacy_reason" not in event_raw
     assert "protection_reason" not in event_raw
@@ -459,6 +472,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
         ensure_ascii=False,
     )
     assert marker not in surface_json
+    assert str(_MEMORY_ONLY_PROTECTED_WINDOW_ID) not in surface_json
     assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in surface_json
     assert "privacy_reason" not in surface_json
     assert "protection_reason" not in surface_json

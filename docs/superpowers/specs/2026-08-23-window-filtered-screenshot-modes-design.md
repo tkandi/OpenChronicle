@@ -3,7 +3,8 @@
 ## Goal
 
 Retain the existing whole-monitor privacy behavior and add two source-filtered screenshot modes that
-preserve non-sensitive screen context without ever returning protected-window pixels to Python.
+preserve non-sensitive screen context while excluding every application identified as protected by
+the before/after OS inventories from pixels returned to Python.
 
 ## User-Visible Modes
 
@@ -26,12 +27,18 @@ windows. New window-filtered modes use a bundled Swift helper based on ScreenCap
 
 1. Python sends requested display IDs, protected CG window IDs, confirmed privacy-overlay window
    IDs, and capture dimensions to the helper.
-2. The helper retrieves `SCShareableContent` with onscreen windows only.
-3. Every requested display and excluded window ID must resolve exactly once.
-4. For each display, the helper creates `SCContentFilter(display:excludingWindows:)` and uses
-   `SCScreenshotManager.captureImage` to capture one source-filtered frame.
-5. The helper returns one lossless PNG per physical display plus display bounds and pixel dimensions.
-6. Python applies an opaque rectangle in `mask-window`, leaves the image unmasked in
+2. The helper retrieves `SCShareableContent` with onscreen windows only and fingerprints every
+   display plus every on-screen window's ID, owner PID, finite frame, and title.
+3. Every requested display and excluded window ID must resolve exactly once. Every protected and
+   overlay window must also resolve to one valid, unique owning application.
+4. For each display, the helper creates
+   `SCContentFilter(display:excludingApplications:exceptingWindows:)`, excluding the unique complete
+   application set and excepting no windows. This intentionally removes every normal and auxiliary
+   window from a protected application.
+5. After all display captures, the helper reloads complete `SCShareableContent` and compares the
+   fingerprint before any PNG encoding or stdout. A change returns `content_changed` and no PNG.
+6. The helper returns one lossless PNG per physical display plus display bounds and pixel dimensions.
+7. Python applies an opaque rectangle in `mask-window`, leaves the image unmasked in
    `exclude-window`, resizes/encodes JPEG, and stitches per-display images for `all` mode.
 
 The helper is a one-request process with this version-1 JSON wire shape (one line on stdin and one
@@ -70,15 +77,22 @@ disjoint. A successful response is:
 Errors use `{"version":1,"status":"error","error":"<fixed-code>"}` with no titles,
 application names, rule values, private IDs, paths, or OS error text. The fixed codes are
 `unsupported_os`, `invalid_command`, `content_unavailable`, `display_not_found`,
-`window_not_found`, `ambiguous_display`, `ambiguous_window`, `capture_failed`, and
-`encode_failed`. The helper rejects an empty protected-ID list so it cannot accidentally become an
-unfiltered general screenshot path.
+`window_not_found`, `ambiguous_display`, `ambiguous_window`, `window_owner_unavailable`,
+`content_changed`, `capture_failed`, and `encode_failed`. The helper rejects an empty protected-ID
+list so it cannot accidentally become an unfiltered general screenshot path.
 
-Apple documents that `SCContentFilter` can capture a display while excluding specific windows and
+Both sides enforce the same constants: 65,536 command bytes, 16 displays, 16,384 pixels per
+dimension, 128,000,000 aggregate pixels, 67,108,864 bytes per PNG, 134,217,728 aggregate PNG bytes,
+188,743,680 response bytes, and 65,536 stderr bytes. Python streams bounded stdout/stderr from a
+`Popen` process group and terminates, kills if necessary, and waits after timeout or overflow. It
+bounds base64 before decoding, validates PNG IHDR dimensions before Pillow, and treats Pillow
+decompression-bomb warnings and errors as failure.
+
+Apple documents that `SCContentFilter` can capture a display while excluding applications and
 that `SCScreenshotManager` captures a single image using that filter:
 
 - https://developer.apple.com/documentation/screencapturekit/sccontentfilter
-- https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init%28display%3Aexcludingwindows%3A%29
+- https://developer.apple.com/documentation/screencapturekit/sccontentfilter/init%28display%3Aexcludingapplications%3Aexceptingwindows%3A%29
 - https://developer.apple.com/documentation/screencapturekit/scscreenshotmanager/captureimage%28contentfilter%3Aconfiguration%3Acompletionhandler%3A%29
 
 ## Window Identity And Protection Decisions
@@ -94,8 +108,9 @@ JSON, FTS, logs, timeline, memory, model input, or MCP responses.
 The native privacy overlay can reveal exact app, title, and rule details. A confirmed overlay
 acknowledgement therefore also returns the CG window IDs of every rendered indicator/input panel.
 Those IDs remain in the in-memory `ProtectionDecision` and are source-excluded with the protected
-windows. With a non-`off` indicator, missing or unresolved overlay IDs make window filtering
-ineligible and force the `skip-monitor` fallback.
+windows by promoting both sets to unique owning applications. With a non-`off` indicator, missing
+or unresolved overlay IDs make window filtering ineligible and stop screenshot capture until a
+later generation is confirmed.
 
 Window-filtered capture is authorized only when every protected region comes from one or more valid,
 uniquely mapped protected window IDs. Diagnostics display leases, pause states, inventory failures,
@@ -109,15 +124,18 @@ For `mask-window` and `exclude-window`, any of these conditions falls back to th
 - macOS earlier than 14.0 or unavailable ScreenCaptureKit symbols;
 - missing Screen Recording permission;
 - helper launch, timeout, parse, or image decode failure;
-- a requested display or protected window ID missing from `SCShareableContent`;
-- a confirmed non-`off` privacy overlay missing window IDs, or any overlay ID missing from
-  `SCShareableContent`;
+- a requested display or protected/overlay window ID missing from `SCShareableContent`;
+- a requested window with missing or ambiguous owning-application identity;
 - duplicate/invalid IDs or inconsistent bounds;
-- pause, diagnostics guard, inventory failure, unmapped window, or unconfirmed indicator;
+- diagnostics guard, unmapped owner/window, or incomplete indicator IDs;
 - any filtered display missing from the helper response.
 
-The fallback may lose non-sensitive context but may never produce an unfiltered image of a protected
-monitor.
+Pause and fail-closed inventory states stop the capture. A non-`off` unconfirmed indicator stops
+before `mss`, including an unconfirmed inactive clear. Every `mss` fallback is checked again after
+capture and discarded if indicator confirmation or authorization changes.
+
+The fallback may lose non-sensitive context but does not run unblocked on a monitor protected by
+either of its confirmed before/after decisions.
 
 ## Multi-Monitor Semantics
 
@@ -133,10 +151,16 @@ intersection in `mask-window`.
 
 ## Mask Semantics
 
-The mask is drawn only after ScreenCaptureKit has excluded the protected window, so sensitive pixels
-never enter the Python image. The mask uses a fixed opaque neutral color and covers the intersection
+The mask is drawn only after ScreenCaptureKit has excluded the protected owning application, so its
+pixels do not enter the Python image. The mask uses a fixed opaque neutral color and covers the intersection
 between the protected CG frame and each display. It does not reveal the window behind the protected
 window. No title, app name, or rule text is drawn into the screenshot.
+
+Application-level filtering excludes new windows from an app already identified as protected, and
+the double inventory snapshot detects persistent additions, removals, frame changes, owner changes,
+and title-classification changes. ScreenCaptureKit and `SCShareableContent` still cannot prove
+absence of a different application's privacy window that appears and disappears entirely between
+the two snapshots. Documentation and acceptance claims must retain this residual race.
 
 ## Compatibility And Packaging
 

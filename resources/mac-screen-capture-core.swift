@@ -8,8 +8,21 @@ enum CaptureErrorCode: String, Error, Equatable {
     case windowNotFound = "window_not_found"
     case ambiguousDisplay = "ambiguous_display"
     case ambiguousWindow = "ambiguous_window"
+    case windowOwnerUnavailable = "window_owner_unavailable"
+    case contentChanged = "content_changed"
     case captureFailed = "capture_failed"
     case encodeFailed = "encode_failed"
+}
+
+enum CaptureResourceLimits {
+    static let maxCommandBytes = 65_536
+    static let maxDisplayCount = 16
+    static let maxDimension = 16_384
+    static let maxAggregatePixels = 128_000_000
+    static let maxPNGBytes = 67_108_864
+    static let maxAggregatePNGBytes = 134_217_728
+    static let maxResponseBytes = 188_743_680
+    static let maxStderrBytes = 65_536
 }
 
 struct CaptureDisplayRequest: Equatable {
@@ -33,13 +46,25 @@ struct CaptureDisplaySource: Equatable {
     let pointHeight: Double
 }
 
+struct CaptureApplicationSource: Equatable, Hashable {
+    let processID: Int32
+    let bundleIdentifier: String
+    let applicationName: String
+}
+
 struct CaptureWindowSource: Equatable {
     let id: UInt32
+    let owner: CaptureApplicationSource?
+    let left: Double
+    let top: Double
+    let width: Double
+    let height: Double
+    let title: String?
 }
 
 struct ResolvedCaptureTargets: Equatable {
     let displayIndices: [Int]
-    let excludedWindowIndices: [Int]
+    let excludedApplicationIndices: [Int]
 }
 
 struct CapturePixelSize: Equatable {
@@ -62,13 +87,42 @@ struct PreparedCapture<Resource> {
     let resource: Resource
     let source: CaptureDisplaySource
     let pixelSize: CapturePixelSize
-    let excludedWindowIndices: [Int]
+    let excludedApplicationIndices: [Int]
 }
 
-struct CapturedFrame: Equatable {
+struct CapturedFrame<Payload> {
     let pixelWidth: Int
     let pixelHeight: Int
-    let pngData: Data
+    let payload: Payload
+}
+
+struct CapturePrivacyFingerprint: Equatable {
+    fileprivate let displays: [CaptureDisplayFingerprint]
+    fileprivate let windows: [CaptureWindowFingerprint]
+}
+
+private struct CaptureDisplayFingerprint: Equatable {
+    let id: UInt32
+    let left: Double
+    let top: Double
+    let width: Double
+    let height: Double
+}
+
+private struct CaptureWindowFingerprint: Equatable {
+    let id: UInt32
+    let ownerPID: Int32?
+    let left: Double
+    let top: Double
+    let width: Double
+    let height: Double
+    let title: String?
+}
+
+private struct PendingCapturedDisplay<Payload> {
+    let source: CaptureDisplaySource
+    let pixelSize: CapturePixelSize
+    let payload: Payload
 }
 
 private let captureCommandKeys: Set<String> = [
@@ -82,6 +136,9 @@ func prepareCaptureCommand(
     supportedOS: Bool
 ) -> Result<CaptureCommand, CaptureErrorCode> {
     guard supportedOS else { return .failure(.unsupportedOS) }
+    guard data.count <= CaptureResourceLimits.maxCommandBytes else {
+        return .failure(.invalidCommand)
+    }
     var parser = StrictJSONParser(data: data)
     guard
         let root = try? parser.parse(),
@@ -91,6 +148,7 @@ func prepareCaptureCommand(
         positiveInt(payload["version"]) == 1,
         case let .array(rawDisplays)? = payload["displays"],
         !rawDisplays.isEmpty,
+        rawDisplays.count <= CaptureResourceLimits.maxDisplayCount,
         case let .array(rawProtectedWindowIDs)? = payload["protected_window_ids"],
         case let .array(rawOverlayWindowIDs)? = payload["overlay_window_ids"]
     else {
@@ -115,7 +173,9 @@ func prepareCaptureCommand(
         } else {
             guard
                 let width = positiveInt(display["width"]),
-                let height = positiveInt(display["height"])
+                let height = positiveInt(display["height"]),
+                width <= CaptureResourceLimits.maxDimension,
+                height <= CaptureResourceLimits.maxDimension
             else {
                 return .failure(.invalidCommand)
             }
@@ -143,7 +203,8 @@ func prepareCaptureCommand(
 func resolveCaptureTargets(
     command: CaptureCommand,
     displays: [CaptureDisplaySource],
-    windows: [CaptureWindowSource]
+    windows: [CaptureWindowSource],
+    applications: [CaptureApplicationSource]
 ) -> Result<ResolvedCaptureTargets, CaptureErrorCode> {
     guard isValidCaptureCommand(command) else { return .failure(.invalidCommand) }
 
@@ -162,19 +223,33 @@ func resolveCaptureTargets(
     }
 
     let windowIndicesByID = indicesByID(windows.map(\.id))
+    let applicationIndicesByIdentity = indicesByIdentity(applications)
+    let applicationIdentitiesByPID = Dictionary(grouping: applications, by: \.processID)
     let requestedWindowIDs = command.protectedWindowIDs + command.overlayWindowIDs
-    var excludedWindowIndices: [Int] = []
-    excludedWindowIndices.reserveCapacity(requestedWindowIDs.count)
+    var excludedApplicationIndices: [Int] = []
+    var seenApplicationIndices: Set<Int> = []
     for id in requestedWindowIDs {
         let indices = windowIndicesByID[id] ?? []
         guard !indices.isEmpty else { return .failure(.windowNotFound) }
         guard indices.count == 1 else { return .failure(.ambiguousWindow) }
-        excludedWindowIndices.append(indices[0])
+        guard
+            let owner = windows[indices[0]].owner,
+            isValidApplicationSource(owner),
+            applicationIdentitiesByPID[owner.processID]?.allSatisfy({ $0 == owner }) == true,
+            let ownerIndices = applicationIndicesByIdentity[owner],
+            ownerIndices.count == 1
+        else {
+            return .failure(.windowOwnerUnavailable)
+        }
+        let ownerIndex = ownerIndices[0]
+        if seenApplicationIndices.insert(ownerIndex).inserted {
+            excludedApplicationIndices.append(ownerIndex)
+        }
     }
 
     return .success(ResolvedCaptureTargets(
         displayIndices: displayIndices,
-        excludedWindowIndices: excludedWindowIndices
+        excludedApplicationIndices: excludedApplicationIndices
     ))
 }
 
@@ -186,7 +261,10 @@ func resolveOutputDimensions(
 ) -> Result<CapturePixelSize, CaptureErrorCode> {
     guard isValidDisplayRequest(request) else { return .failure(.invalidCommand) }
     if let width = request.width, let height = request.height {
-        return .success(CapturePixelSize(width: width, height: height))
+        let size = CapturePixelSize(width: width, height: height)
+        return capturePixelSizesAreWithinLimits([size])
+            ? .success(size)
+            : .failure(.invalidCommand)
     }
 
     guard
@@ -199,20 +277,29 @@ func resolveOutputDimensions(
     else {
         return .failure(.contentUnavailable)
     }
-    return .success(CapturePixelSize(width: width, height: height))
+    let size = CapturePixelSize(width: width, height: height)
+    return capturePixelSizesAreWithinLimits([size])
+        ? .success(size)
+        : .failure(.contentUnavailable)
 }
 
 func prepareCaptureSequence<Resource>(
     command: CaptureCommand,
     displays: [CaptureDisplaySource],
     windows: [CaptureWindowSource],
+    applications: [CaptureApplicationSource],
     prepareResource: (
         _ displayIndex: Int,
-        _ excludedWindowIndices: [Int]
+        _ excludedApplicationIndices: [Int]
     ) -> Result<(Resource, Double), CaptureErrorCode>
 ) -> Result<[PreparedCapture<Resource>], CaptureErrorCode> {
     let targets: ResolvedCaptureTargets
-    switch resolveCaptureTargets(command: command, displays: displays, windows: windows) {
+    switch resolveCaptureTargets(
+        command: command,
+        displays: displays,
+        windows: windows,
+        applications: applications
+    ) {
     case let .success(resolved):
         targets = resolved
     case let .failure(error):
@@ -224,7 +311,7 @@ func prepareCaptureSequence<Resource>(
     for (requestIndex, displayIndex) in targets.displayIndices.enumerated() {
         let resource: Resource
         let pointPixelScale: Double
-        switch prepareResource(displayIndex, targets.excludedWindowIndices) {
+        switch prepareResource(displayIndex, targets.excludedApplicationIndices) {
         case let .success(value):
             (resource, pointPixelScale) = value
         case let .failure(error):
@@ -249,25 +336,37 @@ func prepareCaptureSequence<Resource>(
             resource: resource,
             source: source,
             pixelSize: pixelSize,
-            excludedWindowIndices: targets.excludedWindowIndices
+            excludedApplicationIndices: targets.excludedApplicationIndices
         ))
+    }
+    guard capturePixelSizesAreWithinLimits(prepared.map(\.pixelSize)) else {
+        return .failure(.contentUnavailable)
     }
     return .success(prepared)
 }
 
-func executePreparedCaptures<Resource>(
+func executePreparedCaptures<Resource, Payload>(
     _ prepared: [PreparedCapture<Resource>],
+    initialFingerprint: CapturePrivacyFingerprint,
     capture: (
         _ resource: Resource,
         _ pixelSize: CapturePixelSize
-    ) async -> Result<CapturedFrame, CaptureErrorCode>
+    ) async -> Result<CapturedFrame<Payload>, CaptureErrorCode>,
+    currentFingerprint: () async -> Result<CapturePrivacyFingerprint, CaptureErrorCode>,
+    encodePNG: (_ payload: Payload) -> Data?
 ) async -> Result<[CapturedDisplay], CaptureErrorCode> {
-    guard !prepared.isEmpty else { return .failure(.captureFailed) }
-    var displays: [CapturedDisplay] = []
-    displays.reserveCapacity(prepared.count)
+    guard
+        !prepared.isEmpty,
+        prepared.count <= CaptureResourceLimits.maxDisplayCount,
+        capturePixelSizesAreWithinLimits(prepared.map(\.pixelSize))
+    else {
+        return .failure(.captureFailed)
+    }
+    var pending: [PendingCapturedDisplay<Payload>] = []
+    pending.reserveCapacity(prepared.count)
 
     for item in prepared {
-        let frame: CapturedFrame
+        let frame: CapturedFrame<Payload>
         switch await capture(item.resource, item.pixelSize) {
         case let .success(captured):
             frame = captured
@@ -280,20 +379,164 @@ func executePreparedCaptures<Resource>(
         else {
             return .failure(.captureFailed)
         }
-        guard !frame.pngData.isEmpty else { return .failure(.encodeFailed) }
+        pending.append(PendingCapturedDisplay(
+            source: item.source,
+            pixelSize: item.pixelSize,
+            payload: frame.payload
+        ))
+    }
 
+    let postCaptureFingerprint: CapturePrivacyFingerprint
+    switch await currentFingerprint() {
+    case let .success(value):
+        postCaptureFingerprint = value
+    case let .failure(error):
+        return .failure(error)
+    }
+    guard postCaptureFingerprint == initialFingerprint else {
+        return .failure(.contentChanged)
+    }
+
+    var displays: [CapturedDisplay] = []
+    var pngByteCounts: [Int] = []
+    displays.reserveCapacity(pending.count)
+    pngByteCounts.reserveCapacity(pending.count)
+    for item in pending {
+        guard let pngData = encodePNG(item.payload), !pngData.isEmpty else {
+            return .failure(.encodeFailed)
+        }
+        pngByteCounts.append(pngData.count)
+        guard capturePNGByteCountsAreWithinLimits(pngByteCounts) else {
+            return .failure(.encodeFailed)
+        }
         displays.append(CapturedDisplay(
             id: item.source.id,
             left: item.source.left,
             top: item.source.top,
             pointWidth: item.source.pointWidth,
             pointHeight: item.source.pointHeight,
-            pixelWidth: frame.pixelWidth,
-            pixelHeight: frame.pixelHeight,
-            pngData: frame.pngData
+            pixelWidth: item.pixelSize.width,
+            pixelHeight: item.pixelSize.height,
+            pngData: pngData
         ))
     }
     return .success(displays)
+}
+
+func capturePrivacyFingerprint(
+    displays: [CaptureDisplaySource],
+    windows: [CaptureWindowSource]
+) -> Result<CapturePrivacyFingerprint, CaptureErrorCode> {
+    guard displays.allSatisfy(isRepresentableGeometry) else {
+        return .failure(.contentUnavailable)
+    }
+
+    let displayFingerprint = displays.map { display in
+        CaptureDisplayFingerprint(
+            id: display.id,
+            left: display.left,
+            top: display.top,
+            width: display.pointWidth,
+            height: display.pointHeight
+        )
+    }.sorted(by: displayFingerprintLessThan)
+
+    var windowFingerprint: [CaptureWindowFingerprint] = []
+    windowFingerprint.reserveCapacity(windows.count)
+    for window in windows {
+        guard
+            window.id > 0,
+            isRepresentableCoordinate(window.left),
+            isRepresentableCoordinate(window.top),
+            window.width.isFinite,
+            window.height.isFinite,
+            window.width >= 0,
+            window.height >= 0,
+            window.owner.map({ $0.processID > 0 }) ?? true
+        else {
+            return .failure(.contentUnavailable)
+        }
+        windowFingerprint.append(CaptureWindowFingerprint(
+            id: window.id,
+            ownerPID: window.owner?.processID,
+            left: window.left,
+            top: window.top,
+            width: window.width,
+            height: window.height,
+            title: window.title
+        ))
+    }
+    windowFingerprint.sort(by: windowFingerprintLessThan)
+    return .success(CapturePrivacyFingerprint(
+        displays: displayFingerprint,
+        windows: windowFingerprint
+    ))
+}
+
+func capturePixelSizesAreWithinLimits(_ sizes: [CapturePixelSize]) -> Bool {
+    guard sizes.count <= CaptureResourceLimits.maxDisplayCount else { return false }
+    var aggregatePixels = 0
+    for size in sizes {
+        guard
+            size.width > 0,
+            size.height > 0,
+            size.width <= CaptureResourceLimits.maxDimension,
+            size.height <= CaptureResourceLimits.maxDimension
+        else {
+            return false
+        }
+        let (pixels, multiplicationOverflow) = size.width.multipliedReportingOverflow(
+            by: size.height
+        )
+        guard !multiplicationOverflow else { return false }
+        let (newAggregate, additionOverflow) = aggregatePixels.addingReportingOverflow(pixels)
+        guard
+            !additionOverflow,
+            newAggregate <= CaptureResourceLimits.maxAggregatePixels
+        else {
+            return false
+        }
+        aggregatePixels = newAggregate
+    }
+    return true
+}
+
+func capturePNGByteCountsAreWithinLimits(_ counts: [Int]) -> Bool {
+    guard counts.count <= CaptureResourceLimits.maxDisplayCount else { return false }
+    var aggregateBytes = 0
+    var aggregateBase64Bytes = 0
+    for count in counts {
+        guard count > 0, count <= CaptureResourceLimits.maxPNGBytes else { return false }
+        let (newAggregate, additionOverflow) = aggregateBytes.addingReportingOverflow(count)
+        guard
+            !additionOverflow,
+            newAggregate <= CaptureResourceLimits.maxAggregatePNGBytes,
+            let base64Bytes = estimatedBase64Length(count)
+        else {
+            return false
+        }
+        let (newBase64Aggregate, base64Overflow) = aggregateBase64Bytes.addingReportingOverflow(
+            base64Bytes
+        )
+        guard
+            !base64Overflow,
+            newBase64Aggregate < CaptureResourceLimits.maxResponseBytes
+        else {
+            return false
+        }
+        aggregateBytes = newAggregate
+        aggregateBase64Bytes = newBase64Aggregate
+    }
+    return true
+}
+
+func estimatedBase64Length(_ byteCount: Int) -> Int? {
+    guard byteCount >= 0 else { return nil }
+    let (adjusted, additionOverflow) = byteCount.addingReportingOverflow(2)
+    guard !additionOverflow else { return nil }
+    let groups = adjusted / 3
+    let (encoded, multiplicationOverflow) = groups.multipliedReportingOverflow(by: 4)
+    return multiplicationOverflow ? nil : encoded
 }
 
 func errorResponseLine(_ code: CaptureErrorCode) -> Data {
@@ -303,7 +546,16 @@ func errorResponseLine(_ code: CaptureErrorCode) -> Data {
 func encodeSuccessResponseLine(
     displays: [CapturedDisplay]
 ) -> Result<Data, CaptureErrorCode> {
-    guard !displays.isEmpty else { return .failure(.encodeFailed) }
+    guard
+        !displays.isEmpty,
+        displays.count <= CaptureResourceLimits.maxDisplayCount,
+        capturePixelSizesAreWithinLimits(displays.map {
+            CapturePixelSize(width: $0.pixelWidth, height: $0.pixelHeight)
+        }),
+        capturePNGByteCountsAreWithinLimits(displays.map { $0.pngData.count })
+    else {
+        return .failure(.encodeFailed)
+    }
     let ids = displays.map(\.id)
     guard Set(ids).count == ids.count else { return .failure(.encodeFailed) }
     guard displays.allSatisfy(isValidCapturedDisplay) else { return .failure(.encodeFailed) }
@@ -330,6 +582,9 @@ func encodeSuccessResponseLine(
         encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
         var data = try encoder.encode(payload)
         data.append(0x0a)
+        guard data.count <= CaptureResourceLimits.maxResponseBytes else {
+            return .failure(.encodeFailed)
+        }
         return .success(data)
     } catch {
         return .failure(.encodeFailed)
@@ -337,7 +592,13 @@ func encodeSuccessResponseLine(
 }
 
 private func isValidCaptureCommand(_ command: CaptureCommand) -> Bool {
-    guard command.version == 1, !command.displays.isEmpty else { return false }
+    guard
+        command.version == 1,
+        !command.displays.isEmpty,
+        command.displays.count <= CaptureResourceLimits.maxDisplayCount
+    else {
+        return false
+    }
     guard command.displays.allSatisfy(isValidDisplayRequest) else { return false }
     let displayIDs = command.displays.map(\.id)
     guard Set(displayIDs).count == displayIDs.count else { return false }
@@ -360,7 +621,10 @@ private func isValidDisplayRequest(_ request: CaptureDisplayRequest) -> Bool {
     case (nil, nil):
         return true
     case let (width?, height?):
-        return width > 0 && height > 0
+        return width > 0
+            && height > 0
+            && width <= CaptureResourceLimits.maxDimension
+            && height <= CaptureResourceLimits.maxDimension
     default:
         return false
     }
@@ -406,6 +670,48 @@ private func indicesByID(_ ids: [UInt32]) -> [UInt32: [Int]] {
         result[id, default: []].append(index)
     }
     return result
+}
+
+private func indicesByIdentity(
+    _ applications: [CaptureApplicationSource]
+) -> [CaptureApplicationSource: [Int]] {
+    var result: [CaptureApplicationSource: [Int]] = [:]
+    for (index, application) in applications.enumerated() {
+        result[application, default: []].append(index)
+    }
+    return result
+}
+
+private func isValidApplicationSource(_ application: CaptureApplicationSource) -> Bool {
+    application.processID > 0
+        && !application.bundleIdentifier.isEmpty
+        && !application.applicationName.isEmpty
+}
+
+private func displayFingerprintLessThan(
+    _ left: CaptureDisplayFingerprint,
+    _ right: CaptureDisplayFingerprint
+) -> Bool {
+    if left.id != right.id { return left.id < right.id }
+    if left.left != right.left { return left.left < right.left }
+    if left.top != right.top { return left.top < right.top }
+    if left.width != right.width { return left.width < right.width }
+    return left.height < right.height
+}
+
+private func windowFingerprintLessThan(
+    _ left: CaptureWindowFingerprint,
+    _ right: CaptureWindowFingerprint
+) -> Bool {
+    if left.id != right.id { return left.id < right.id }
+    if left.ownerPID != right.ownerPID {
+        return (left.ownerPID ?? Int32.min) < (right.ownerPID ?? Int32.min)
+    }
+    if left.left != right.left { return left.left < right.left }
+    if left.top != right.top { return left.top < right.top }
+    if left.width != right.width { return left.width < right.width }
+    if left.height != right.height { return left.height < right.height }
+    return (left.title ?? "") < (right.title ?? "")
 }
 
 private func positiveUInt32Array(_ values: [StrictJSONValue]) -> [UInt32]? {

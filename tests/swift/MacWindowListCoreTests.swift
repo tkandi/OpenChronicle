@@ -31,6 +31,34 @@ private func testWindowRecordEncodesCoreGraphicsWindowID() {
     precondition((payload["window_id"] as? NSNumber)?.uint32Value == 73)
 }
 
+private func testCoreGraphicsSourceMapsToWindowRecordID() {
+    let valid = OnScreenCGWindow(
+        windowID: 73,
+        ownerPID: 500,
+        layer: 0,
+        bounds: WindowBounds(left: 0, top: 0, width: 100, height: 100),
+        title: "Private"
+    )
+    let missing = OnScreenCGWindow(
+        windowID: nil,
+        ownerPID: 500,
+        layer: 0,
+        bounds: valid.bounds,
+        title: ""
+    )
+    let invalid = OnScreenCGWindow(
+        windowID: 0,
+        ownerPID: 500,
+        layer: 0,
+        bounds: valid.bounds,
+        title: ""
+    )
+
+    precondition(windowRecordID(from: valid) == 73)
+    precondition(windowRecordID(from: missing) == nil)
+    precondition(windowRecordID(from: invalid) == nil)
+}
+
 private func testExactIdentityAuthorizesNormalLayerFallback() {
     let cgWindows = [
         OnScreenCGWindow(
@@ -517,6 +545,7 @@ private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
 enum MacWindowListCoreTests {
     static func main() {
         testWindowRecordEncodesCoreGraphicsWindowID()
+        testCoreGraphicsSourceMapsToWindowRecordID()
         testExactIdentityAuthorizesNormalLayerFallback()
         testNonWindowLayersCannotAuthorizeFallback()
         testPIDAndWindowIDMustBothMatch()

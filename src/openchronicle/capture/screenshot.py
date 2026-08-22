@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import json
 import math
 import os
 import platform
+import selectors
+import signal
 import subprocess
+import time
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -18,9 +23,16 @@ from .privacy import DisplayInfo, ScreenRegion
 
 logger = get("openchronicle.capture")
 _FILTERED_CAPTURE_TIMEOUT = 15
-_MAX_CAPTURE_DIMENSION = 32768
+_FILTERED_MAX_COMMAND_BYTES = 65_536
+_FILTERED_MAX_DISPLAY_COUNT = 16
+_MAX_CAPTURE_DIMENSION = 16_384
 _MAX_CAPTURE_PIXELS = 128_000_000
+_FILTERED_MAX_PNG_BYTES = 67_108_864
+_FILTERED_MAX_AGGREGATE_PNG_BYTES = 134_217_728
+_FILTERED_MAX_RESPONSE_BYTES = 188_743_680
+_FILTERED_MAX_STDERR_BYTES = 65_536
 _MASK_COLOR = (128, 128, 128)
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 
 
 @dataclass
@@ -58,6 +70,13 @@ class _FilteredCaptureLayout:
     virtual_region: ScreenRegion | None = None
     virtual_width: int | None = None
     virtual_height: int | None = None
+
+
+@dataclass(frozen=True)
+class _BoundedProcessResult:
+    returncode: int
+    stdout: bytes
+    stderr: bytes
 
 
 def grab(
@@ -283,7 +302,7 @@ def grab_filtered_many(
             return None
 
         layout = _filtered_capture_layout(inventory, monitor_mode, max_width)
-        if layout is None:
+        if layout is None or not _capture_targets_are_within_limits(layout.targets):
             return None
         raw = _run_filtered_capture_helper(layout.targets, protected_ids, overlay_ids)
         frames = _decode_filtered_response(raw, layout.targets)
@@ -341,7 +360,11 @@ def _validated_displays(value: Any) -> tuple[DisplayInfo, ...] | None:
         displays = tuple(value)
     except TypeError:
         return None
-    if not displays or any(not isinstance(display, DisplayInfo) for display in displays):
+    if (
+        not displays
+        or len(displays) > _FILTERED_MAX_DISPLAY_COUNT
+        or any(not isinstance(display, DisplayInfo) for display in displays)
+    ):
         return None
     if sum(display.is_primary is True for display in displays) != 1:
         return None
@@ -486,9 +509,47 @@ def _run_filtered_capture_helper(
     protected_window_ids: tuple[int, ...],
     overlay_window_ids: tuple[int, ...],
 ) -> dict[str, Any] | None:
+    request_bytes = _filtered_capture_request_bytes(
+        targets,
+        protected_window_ids,
+        overlay_window_ids,
+    )
+    if request_bytes is None:
+        return None
     helper = _resolve_filtered_capture_helper()
     if helper is None:
         return None
+    proc = _run_bounded_process(
+        [str(helper)],
+        input_data=request_bytes,
+        timeout=_FILTERED_CAPTURE_TIMEOUT,
+        max_stdout_bytes=_FILTERED_MAX_RESPONSE_BYTES,
+        max_stderr_bytes=_FILTERED_MAX_STDERR_BYTES,
+    )
+    if (
+        proc is None
+        or proc.returncode != 0
+        or len(proc.stdout) > _FILTERED_MAX_RESPONSE_BYTES
+        or len(proc.stderr) > _FILTERED_MAX_STDERR_BYTES
+        or proc.stderr
+        or not _is_single_response_line(proc.stdout)
+    ):
+        return None
+    try:
+        payload = json.loads(
+            proc.stdout[:-1],
+            object_pairs_hook=_no_duplicate_json_object,
+        )
+    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _filtered_capture_request_bytes(
+    targets: tuple[_FilteredCaptureTarget, ...],
+    protected_window_ids: tuple[int, ...],
+    overlay_window_ids: tuple[int, ...],
+) -> bytes | None:
     request = {
         "version": 1,
         "displays": [
@@ -499,26 +560,141 @@ def _run_filtered_capture_helper(
         "overlay_window_ids": list(overlay_window_ids),
     }
     try:
-        proc = subprocess.run(
-            [str(helper)],
-            input=json.dumps(request, separators=(",", ":")) + "\n",
-            capture_output=True,
-            text=True,
-            timeout=_FILTERED_CAPTURE_TIMEOUT,
-        )
-    except (OSError, subprocess.TimeoutExpired):
+        encoded = (json.dumps(request, separators=(",", ":")) + "\n").encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError):
         return None
-    if proc.returncode != 0 or proc.stderr or not _is_single_response_line(proc.stdout):
+    return encoded if len(encoded) <= _FILTERED_MAX_COMMAND_BYTES else None
+
+
+def _run_bounded_process(
+    args: list[str],
+    *,
+    input_data: bytes,
+    timeout: float,
+    max_stdout_bytes: int,
+    max_stderr_bytes: int,
+) -> _BoundedProcessResult | None:
+    if (
+        not isinstance(input_data, bytes)
+        or timeout <= 0
+        or max_stdout_bytes < 0
+        or max_stderr_bytes < 0
+    ):
         return None
     try:
-        payload = json.loads(proc.stdout[:-1], object_pairs_hook=_no_duplicate_json_object)
-    except (json.JSONDecodeError, TypeError, ValueError):
+        process = subprocess.Popen(
+            args,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+    except OSError:
         return None
-    return payload if isinstance(payload, dict) else None
+
+    if process.stdin is None or process.stdout is None or process.stderr is None:
+        _terminate_and_reap(process)
+        return None
+
+    streams = selectors.DefaultSelector()
+    stdout = bytearray()
+    stderr = bytearray()
+    input_offset = 0
+    try:
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            os.set_blocking(pipe.fileno(), False)
+        streams.register(process.stdout, selectors.EVENT_READ, ("stdout", max_stdout_bytes))
+        streams.register(process.stderr, selectors.EVENT_READ, ("stderr", max_stderr_bytes))
+        if input_data:
+            streams.register(process.stdin, selectors.EVENT_WRITE, ("stdin", len(input_data)))
+        else:
+            process.stdin.close()
+
+        deadline = time.monotonic() + timeout
+        while streams.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_and_reap(process)
+                return None
+            events = streams.select(remaining)
+            if not events:
+                _terminate_and_reap(process)
+                return None
+            for key, _ in events:
+                kind, limit = key.data
+                pipe = key.fileobj
+                if kind == "stdin":
+                    try:
+                        written = os.write(pipe.fileno(), input_data[input_offset:])
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        written = len(input_data) - input_offset
+                    input_offset += written
+                    if input_offset >= len(input_data):
+                        streams.unregister(pipe)
+                        pipe.close()
+                    continue
+
+                target = stdout if kind == "stdout" else stderr
+                try:
+                    chunk = os.read(pipe.fileno(), min(65_536, limit - len(target) + 1))
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    streams.unregister(pipe)
+                    pipe.close()
+                    continue
+                target.extend(chunk)
+                if len(target) > limit:
+                    _terminate_and_reap(process)
+                    return None
+
+        returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+        return _BoundedProcessResult(returncode, bytes(stdout), bytes(stderr))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        _terminate_and_reap(process)
+        return None
+    finally:
+        streams.close()
+        for pipe in (process.stdin, process.stdout, process.stderr):
+            if not pipe.closed:
+                with contextlib.suppress(OSError):
+                    pipe.close()
+
+
+def _terminate_and_reap(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+    except OSError:
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.terminate()
+    if process.poll() is None:
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.wait(timeout=0.25)
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        if process.poll() is None:
+            with contextlib.suppress(OSError):
+                process.kill()
+    try:
+        process.wait(timeout=1)
+    except (OSError, subprocess.TimeoutExpired):
+        with contextlib.suppress(OSError):
+            process.kill()
+        with contextlib.suppress(OSError, subprocess.TimeoutExpired):
+            process.wait(timeout=1)
 
 
 def _is_single_response_line(value: Any) -> bool:
-    return isinstance(value, str) and value.endswith("\n") and value.count("\n") == 1 and bool(value[:-1])
+    return (
+        isinstance(value, bytes)
+        and value.endswith(b"\n")
+        and value.count(b"\n") == 1
+        and bool(value[:-1])
+    )
 
 
 def _no_duplicate_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -551,11 +727,16 @@ def _decode_filtered_response(
         return None
 
     frames: list[_FilteredDisplayImage] = []
+    aggregate_png_bytes = 0
     for row, target in zip(rows, expected_targets, strict=True):
         decoded = _decode_filtered_display(row, target, Image)
         if decoded is None:
             return None
-        frames.append(decoded)
+        frame, png_bytes = decoded
+        aggregate_png_bytes += png_bytes
+        if aggregate_png_bytes > _FILTERED_MAX_AGGREGATE_PNG_BYTES:
+            return None
+        frames.append(frame)
     return frames
 
 
@@ -563,7 +744,7 @@ def _decode_filtered_display(
     row: Any,
     target: _FilteredCaptureTarget,
     image_cls: Any,
-) -> _FilteredDisplayImage | None:
+) -> tuple[_FilteredDisplayImage, int] | None:
     expected_keys = {
         "id",
         "left",
@@ -601,19 +782,42 @@ def _decode_filtered_display(
     png_base64 = row.get("png_base64")
     if not isinstance(png_base64, str) or not png_base64:
         return None
+    max_base64_bytes = ((_FILTERED_MAX_PNG_BYTES + 2) // 3) * 4
+    if len(png_base64) > max_base64_bytes:
+        return None
     try:
         png_data = base64.b64decode(png_base64, validate=True)
-        verified = image_cls.open(io.BytesIO(png_data))
-        if verified.format != "PNG" or getattr(verified, "is_animated", False):
+        if not 0 < len(png_data) <= _FILTERED_MAX_PNG_BYTES:
             return None
-        verified.verify()
-        image = image_cls.open(io.BytesIO(png_data))
-        image.load()
+        if _png_dimensions(png_data) != (pixel_width, pixel_height):
+            return None
+        bomb_warning = getattr(image_cls, "DecompressionBombWarning", Warning)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", bomb_warning)
+            verified = image_cls.open(io.BytesIO(png_data))
+            if verified.format != "PNG" or getattr(verified, "is_animated", False):
+                return None
+            verified.verify()
+            image = image_cls.open(io.BytesIO(png_data))
+            image.load()
         if image.size != (pixel_width, pixel_height):
             return None
-        return _FilteredDisplayImage(target, image.convert("RGB"))
-    except (OSError, ValueError, base64.binascii.Error):
+        return _FilteredDisplayImage(target, image.convert("RGB")), len(png_data)
+    except Exception:  # noqa: BLE001 - malformed images and Pillow bomb failures fail closed
         return None
+
+
+def _png_dimensions(data: bytes) -> tuple[int, int] | None:
+    if (
+        len(data) < 24
+        or data[:8] != _PNG_SIGNATURE
+        or data[8:12] != b"\x00\x00\x00\r"
+        or data[12:16] != b"IHDR"
+    ):
+        return None
+    width = int.from_bytes(data[16:20], "big")
+    height = int.from_bytes(data[20:24], "big")
+    return (width, height) if width > 0 and height > 0 else None
 
 
 def _is_json_number(value: Any) -> bool:
@@ -634,6 +838,21 @@ def _is_valid_pixel_size(width: Any, height: Any) -> bool:
         and 0 < height <= _MAX_CAPTURE_DIMENSION
         and width * height <= _MAX_CAPTURE_PIXELS
     )
+
+
+def _capture_targets_are_within_limits(
+    targets: tuple[_FilteredCaptureTarget, ...],
+) -> bool:
+    if not targets or len(targets) > _FILTERED_MAX_DISPLAY_COUNT:
+        return False
+    aggregate_pixels = 0
+    for target in targets:
+        if not _is_valid_pixel_size(target.width, target.height):
+            return False
+        aggregate_pixels += target.width * target.height
+        if aggregate_pixels > _MAX_CAPTURE_PIXELS:
+            return False
+    return True
 
 
 def _mask_protected_regions(

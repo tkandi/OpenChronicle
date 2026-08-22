@@ -4,6 +4,18 @@ private struct Acknowledgement: Decodable {
     let generation: Int
     let rendered: Bool
     let error: String?
+    let window_ids: [UInt32]
+}
+
+private func requireFailureAcknowledgement(
+    _ acknowledgement: Acknowledgement,
+    generation: Int,
+    error: String
+) {
+    precondition(acknowledgement.generation == generation)
+    precondition(acknowledgement.rendered == false)
+    precondition(acknowledgement.error == error)
+    precondition(acknowledgement.window_ids.isEmpty)
 }
 
 enum MacPrivacyOverlayProtocolTests {
@@ -19,9 +31,11 @@ enum MacPrivacyOverlayProtocolTests {
         )
         precondition(unresolved.status == 0)
         let unresolvedAck = try JSONDecoder().decode(Acknowledgement.self, from: unresolved.output)
-        precondition(unresolvedAck.generation == 12)
-        precondition(unresolvedAck.rendered == false)
-        precondition(unresolvedAck.error == "unresolved-window-id")
+        requireFailureAcknowledgement(
+            unresolvedAck,
+            generation: 12,
+            error: "unresolved-window-id"
+        )
 
         let exactMarker = "exact-private-marker-must-not-escape"
         let reasonCommand = #"{"generation":13,"state":"protected","style":"pill","displays":[],"all_displays":false,"reason_display":"hybrid","reason_detail":"exact","reason_trigger":"hover","reasons":[{"code":"window_title_rule","window_title":"\#(exactMarker)"}]}"# + "\n"
@@ -29,9 +43,11 @@ enum MacPrivacyOverlayProtocolTests {
         precondition(reasonResult.status == 0)
         precondition(!String(data: reasonResult.output, encoding: .utf8)!.contains(exactMarker))
         let reasonAck = try JSONDecoder().decode(Acknowledgement.self, from: reasonResult.output)
-        precondition(reasonAck.generation == 13)
-        precondition(reasonAck.rendered == false)
-        precondition(reasonAck.error == "unresolved-window-id")
+        requireFailureAcknowledgement(
+            reasonAck,
+            generation: 13,
+            error: "unresolved-window-id"
+        )
 
         let resumeMarker = "2026-08-22T18:30:00+08:00"
         try expectUnresolved(
@@ -72,18 +88,22 @@ enum MacPrivacyOverlayProtocolTests {
             Acknowledgement.self,
             from: invalidResumeType.output
         )
-        precondition(invalidResumeAck.generation == -1)
-        precondition(invalidResumeAck.rendered == false)
-        precondition(invalidResumeAck.error == "invalid-command")
+        requireFailureAcknowledgement(
+            invalidResumeAck,
+            generation: -1,
+            error: "invalid-command"
+        )
 
         let privateMarker = "private-marker-must-not-escape"
         let invalid = try runHelper(helper, input: "{\(privateMarker)}\n")
         precondition(invalid.status == 0)
         precondition(!String(data: invalid.output, encoding: .utf8)!.contains(privateMarker))
         let invalidAck = try JSONDecoder().decode(Acknowledgement.self, from: invalid.output)
-        precondition(invalidAck.generation == -1)
-        precondition(invalidAck.rendered == false)
-        precondition(invalidAck.error == "invalid-command")
+        requireFailureAcknowledgement(
+            invalidAck,
+            generation: -1,
+            error: "invalid-command"
+        )
 
         print("MacPrivacyOverlayProtocolTests passed")
     }
@@ -106,9 +126,11 @@ enum MacPrivacyOverlayProtocolTests {
             precondition(!outputText.contains(value))
         }
         let acknowledgement = try JSONDecoder().decode(Acknowledgement.self, from: result.output)
-        precondition(acknowledgement.generation == generation)
-        precondition(acknowledgement.rendered == false)
-        precondition(acknowledgement.error == "unresolved-window-id")
+        requireFailureAcknowledgement(
+            acknowledgement,
+            generation: generation,
+            error: "unresolved-window-id"
+        )
     }
 
     private static func runReasonCommand(

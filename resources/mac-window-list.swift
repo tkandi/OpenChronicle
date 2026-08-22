@@ -220,7 +220,7 @@ enum MacWindowList {
                 is_active: resolved.isActive,
                 title_available: resolved.titleAvailable,
                 is_active_candidate: resolved.isActiveCandidate,
-                window_id: source.metadata.windowID
+                window_id: windowRecordID(from: source.metadata)
             )
         }
 
