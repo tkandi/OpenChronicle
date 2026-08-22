@@ -7,6 +7,7 @@ import platform
 import shutil
 import stat
 import subprocess
+import tarfile
 import tomllib
 from pathlib import Path
 
@@ -68,20 +69,80 @@ def test_screen_capture_sources_are_declared_for_wheel() -> None:
     )
 
 
-@pytest.mark.parametrize(
-    "generated_path",
-    [
-        "/resources/mac-window-list",
-        "/resources/mac-privacy-overlay",
-        "/resources/mac-screen-capture",
-        "/macos/OpenChronicleApp/.build",
-    ],
-)
-def test_generated_macos_artifacts_are_excluded_from_sdist(generated_path: str) -> None:
-    pyproject = tomllib.loads(Path("pyproject.toml").read_text())
-    excludes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
+def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    resources = project / "resources"
+    package = project / "src" / "openchronicle"
+    resources.mkdir(parents=True)
+    package.mkdir(parents=True)
+    shutil.copy2("pyproject.toml", project / "pyproject.toml")
+    shutil.copy2("README.md", project / "README.md")
+    shutil.copy2("src/openchronicle/__init__.py", package / "__init__.py")
 
-    assert generated_path in excludes
+    source_names = (
+        "mac-ax-helper.swift",
+        "build-mac-ax-helper.sh",
+        "mac-ax-watcher.swift",
+        "build-mac-ax-watcher.sh",
+        "mac-window-list.swift",
+        "mac-window-list-core.swift",
+        "build-mac-window-list.sh",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay.swift",
+        "build-mac-privacy-overlay.sh",
+        "mac-screen-capture-core.swift",
+        "mac-screen-capture.swift",
+        "build-mac-screen-capture.sh",
+    )
+    for name in source_names:
+        shutil.copy2(Path("resources") / name, resources / name)
+
+    sentinels = {
+        resources / "mac-window-list": b"\xfe\xed\xfa\xcewindow-list",
+        resources / "mac-privacy-overlay": b"\xfe\xed\xfa\xcfprivacy-overlay",
+        resources / "mac-screen-capture": b"\xce\xfa\xed\xfescreen-capture",
+        project / "macos" / "OpenChronicleApp" / ".build" / "fat-sentinel": b"\xca\xfe\xba\xbe",
+        project / ".build" / "macos-app" / "fat-sentinel": b"\xca\xfe\xba\xbe",
+    }
+    for path, contents in sentinels.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(contents)
+
+    dist = project / "dist"
+    result = subprocess.run(
+        ["uv", "build", "--sdist", "--offline", "--out-dir", str(dist)],
+        cwd=project,
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, "UV_OFFLINE": "1", "UV_NO_PROGRESS": "1"},
+    )
+    assert result.returncode == 0, result.stderr
+
+    archive_path = next(dist.glob("*.tar.gz"))
+    mach_o_magic = {
+        b"\xfe\xed\xfa\xce",
+        b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+    }
+    with tarfile.open(archive_path) as archive:
+        members = [member for member in archive.getmembers() if member.isfile()]
+        names = {member.name.split("/", 1)[1] for member in members}
+        assert {f"resources/{name}" for name in source_names} <= names
+        assert not any(name in names for name in (
+            "resources/mac-window-list",
+            "resources/mac-privacy-overlay",
+            "resources/mac-screen-capture",
+        ))
+        assert not any(name.startswith("macos/OpenChronicleApp/.build/") for name in names)
+        assert not any(name.startswith(".build/") for name in names)
+        assert all(
+            archive.extractfile(member).read(4) not in mach_o_magic
+            for member in members
+        )
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="requires the macOS Swift SDK")
