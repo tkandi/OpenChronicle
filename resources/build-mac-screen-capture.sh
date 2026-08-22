@@ -16,7 +16,7 @@ if [[ ! -f "${CORE}" || ! -f "${MAIN}" ]]; then
   exit 1
 fi
 
-ARCH="$(uname -m)"
+ARCH="${OPENCHRONICLE_SCREEN_CAPTURE_ARCH:-$(uname -m)}"
 case "${ARCH}" in
   arm64|x86_64)
     TARGET="${ARCH}-apple-macos12.0"
@@ -39,9 +39,23 @@ fi
 
 SOURCES=("${CORE}" "${MAIN}")
 TEMP_DIR=""
+TEMP_OUT=""
+COMPILER_STDERR=""
+cleanup() {
+  if [[ -n "${TEMP_OUT}" ]]; then
+    rm -f -- "${TEMP_OUT}"
+  fi
+  if [[ -n "${COMPILER_STDERR}" ]]; then
+    rm -f -- "${COMPILER_STDERR}"
+  fi
+  if [[ -n "${TEMP_DIR}" ]]; then
+    rm -rf -- "${TEMP_DIR}"
+  fi
+  return 0
+}
+trap cleanup EXIT
 if (( SDK_MAJOR < 14 )); then
   TEMP_DIR="$(mktemp -d "${TMPDIR:-/private/tmp}/openchronicle-screen-capture.XXXXXX")"
-  trap 'rm -rf "${TEMP_DIR}"' EXIT
   UNSUPPORTED_MAIN="${TEMP_DIR}/mac-screen-capture-unsupported.swift"
   cat > "${UNSUPPORTED_MAIN}" <<'SWIFT'
 import Foundation
@@ -58,16 +72,27 @@ SWIFT
 fi
 
 echo "[mac-screen-capture] Compiling ${OUT}"
+TEMP_OUT="$(mktemp "${SCRIPT_DIR}/.mac-screen-capture.XXXXXX")"
+COMPILER_STDERR="$(mktemp "${SCRIPT_DIR}/.mac-screen-capture.stderr.XXXXXX")"
 if ! CLANG_MODULE_CACHE_PATH="${CACHE_DIR}" swiftc \
      "${SOURCES[@]}" \
-     -o "${OUT}" \
-     -O -target "${TARGET}" -swift-version 5 \
+     -o "${TEMP_OUT}" \
+     -O -warnings-as-errors -target "${TARGET}" -swift-version 5 \
      -framework ScreenCaptureKit \
      -framework ImageIO \
-     -framework UniformTypeIdentifiers; then
+     -framework UniformTypeIdentifiers 2>"${COMPILER_STDERR}"; then
+  cat "${COMPILER_STDERR}" >&2
   echo "[mac-screen-capture] swiftc failed." >&2
   echo "[mac-screen-capture] Install Xcode Command Line Tools: xcode-select --install" >&2
   exit 1
 fi
+if [[ -s "${COMPILER_STDERR}" || ! -x "${TEMP_OUT}" ]]; then
+  cat "${COMPILER_STDERR}" >&2
+  echo "[mac-screen-capture] swiftc produced diagnostics or no executable." >&2
+  exit 1
+fi
+
+mv -f "${TEMP_OUT}" "${OUT}"
+TEMP_OUT=""
 
 echo "[mac-screen-capture] Done."

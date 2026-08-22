@@ -39,8 +39,25 @@ class Screenshot:
 
 @dataclass
 class _FilteredDisplayImage:
-    display: DisplayInfo
+    target: _FilteredCaptureTarget
     image: Any
+
+
+@dataclass(frozen=True)
+class _FilteredCaptureTarget:
+    display: DisplayInfo
+    width: int
+    height: int
+    left: int = 0
+    top: int = 0
+
+
+@dataclass(frozen=True)
+class _FilteredCaptureLayout:
+    targets: tuple[_FilteredCaptureTarget, ...]
+    virtual_region: ScreenRegion | None = None
+    virtual_width: int | None = None
+    virtual_height: int | None = None
 
 
 def grab(
@@ -265,30 +282,31 @@ def grab_filtered_many(
         ):
             return None
 
-        targets = _capture_targets(inventory, monitor_mode)
-        if not targets:
+        layout = _filtered_capture_layout(inventory, monitor_mode, max_width)
+        if layout is None:
             return None
-        raw = _run_filtered_capture_helper(targets, protected_ids, overlay_ids)
-        frames = _decode_filtered_response(raw, targets)
+        raw = _run_filtered_capture_helper(layout.targets, protected_ids, overlay_ids)
+        frames = _decode_filtered_response(raw, layout.targets)
         if frames is None:
             return None
 
         if privacy_mode == "mask-window":
             for frame in frames:
-                _mask_protected_regions(frame.image, frame.display, regions)
+                _mask_protected_regions(frame.image, frame.target, regions)
 
         if monitor_mode == "all":
-            combined = _stitch_filtered_displays(frames)
+            combined = _stitch_filtered_displays(frames, layout)
             if combined is None:
                 return None
-            image, region = combined
+            image = combined
+            if layout.virtual_region is None:
+                return None
             return [
                 _filtered_screenshot(
                     image,
                     monitor_index=0,
-                    monitor_region=region,
+                    monitor_region=layout.virtual_region,
                     monitor_is_all=True,
-                    max_width=max_width,
                     jpeg_quality=jpeg_quality,
                 )
             ]
@@ -296,10 +314,9 @@ def grab_filtered_many(
         return [
             _filtered_screenshot(
                 frame.image,
-                monitor_index=inventory.index(frame.display) + 1,
-                monitor_region=frame.display.region,
+                monitor_index=inventory.index(frame.target.display) + 1,
+                monitor_region=frame.target.display.region,
                 monitor_is_all=False,
-                max_width=max_width,
                 jpeg_quality=jpeg_quality,
             )
             for frame in frames
@@ -393,16 +410,79 @@ def _regions_overlap(left: ScreenRegion, right: ScreenRegion) -> bool:
     )
 
 
-def _capture_targets(
-    displays: tuple[DisplayInfo, ...], monitor_mode: str
-) -> tuple[DisplayInfo, ...]:
-    if monitor_mode == "primary":
-        return tuple(display for display in displays if display.is_primary)
-    return displays
+def _filtered_capture_layout(
+    displays: tuple[DisplayInfo, ...],
+    monitor_mode: str,
+    max_width: int,
+) -> _FilteredCaptureLayout | None:
+    if monitor_mode == "all":
+        return _all_capture_layout(displays, max_width)
+    selected = (
+        tuple(display for display in displays if display.is_primary)
+        if monitor_mode == "primary"
+        else displays
+    )
+    targets = tuple(_physical_capture_target(display, max_width) for display in selected)
+    return _FilteredCaptureLayout(targets) if all(targets) else None
+
+
+def _physical_capture_target(
+    display: DisplayInfo,
+    max_width: int,
+) -> _FilteredCaptureTarget | None:
+    scale = min(1.0, max_width / display.region.width) if max_width else 1.0
+    width = _rounded_edge(display.region.width * scale)
+    height = _rounded_edge(display.region.height * scale)
+    if not _is_valid_pixel_size(width, height):
+        return None
+    return _FilteredCaptureTarget(display, width, height)
+
+
+def _all_capture_layout(
+    displays: tuple[DisplayInfo, ...],
+    max_width: int,
+) -> _FilteredCaptureLayout | None:
+    left = min(display.region.left for display in displays)
+    top = min(display.region.top for display in displays)
+    right = max(display.region.left + display.region.width for display in displays)
+    bottom = max(display.region.top + display.region.height for display in displays)
+    region = ScreenRegion(left, top, right - left, bottom - top)
+    if not _is_valid_region(region):
+        return None
+    scale = min(1.0, max_width / region.width) if max_width else 1.0
+    virtual_width = _rounded_edge(region.width * scale)
+    virtual_height = _rounded_edge(region.height * scale)
+    if not _is_valid_pixel_size(virtual_width, virtual_height):
+        return None
+    targets: list[_FilteredCaptureTarget] = []
+    for display in displays:
+        source = display.region
+        pixel_left = _rounded_edge((source.left - left) * scale)
+        pixel_top = _rounded_edge((source.top - top) * scale)
+        pixel_right = _rounded_edge((source.left + source.width - left) * scale)
+        pixel_bottom = _rounded_edge((source.top + source.height - top) * scale)
+        width = pixel_right - pixel_left
+        height = pixel_bottom - pixel_top
+        if (
+            not _is_valid_pixel_size(width, height)
+            or pixel_left < 0
+            or pixel_top < 0
+            or pixel_right > virtual_width
+            or pixel_bottom > virtual_height
+        ):
+            return None
+        targets.append(_FilteredCaptureTarget(display, width, height, pixel_left, pixel_top))
+    return _FilteredCaptureLayout(tuple(targets), region, virtual_width, virtual_height)
+
+
+def _rounded_edge(value: float) -> int:
+    if not math.isfinite(value) or value < 0:
+        return -1
+    return math.floor(value + 0.5)
 
 
 def _run_filtered_capture_helper(
-    displays: tuple[DisplayInfo, ...],
+    targets: tuple[_FilteredCaptureTarget, ...],
     protected_window_ids: tuple[int, ...],
     overlay_window_ids: tuple[int, ...],
 ) -> dict[str, Any] | None:
@@ -411,7 +491,10 @@ def _run_filtered_capture_helper(
         return None
     request = {
         "version": 1,
-        "displays": [{"id": display.id} for display in displays],
+        "displays": [
+            {"id": target.display.id, "width": target.width, "height": target.height}
+            for target in targets
+        ],
         "protected_window_ids": list(protected_window_ids),
         "overlay_window_ids": list(overlay_window_ids),
     }
@@ -449,7 +532,7 @@ def _no_duplicate_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _decode_filtered_response(
     payload: dict[str, Any] | None,
-    expected_displays: tuple[DisplayInfo, ...],
+    expected_targets: tuple[_FilteredCaptureTarget, ...],
 ) -> list[_FilteredDisplayImage] | None:
     if not isinstance(payload, dict) or set(payload) != {"version", "status", "displays"}:
         return None
@@ -460,7 +543,7 @@ def _decode_filtered_response(
     ):
         return None
     rows = payload.get("displays")
-    if not isinstance(rows, list) or len(rows) != len(expected_displays):
+    if not isinstance(rows, list) or len(rows) != len(expected_targets):
         return None
     try:
         from PIL import Image
@@ -468,8 +551,8 @@ def _decode_filtered_response(
         return None
 
     frames: list[_FilteredDisplayImage] = []
-    for row, expected in zip(rows, expected_displays, strict=True):
-        decoded = _decode_filtered_display(row, expected, Image)
+    for row, target in zip(rows, expected_targets, strict=True):
+        decoded = _decode_filtered_display(row, target, Image)
         if decoded is None:
             return None
         frames.append(decoded)
@@ -478,7 +561,7 @@ def _decode_filtered_response(
 
 def _decode_filtered_display(
     row: Any,
-    expected: DisplayInfo,
+    target: _FilteredCaptureTarget,
     image_cls: Any,
 ) -> _FilteredDisplayImage | None:
     expected_keys = {
@@ -493,10 +576,11 @@ def _decode_filtered_display(
     }
     if not isinstance(row, dict) or set(row) != expected_keys:
         return None
-    region = expected.region
+    display = target.display
+    region = display.region
     if (
         type(row.get("id")) is not int
-        or row["id"] != expected.id
+        or row["id"] != display.id
         or not _is_json_number(row.get("left"))
         or not _is_json_number(row.get("top"))
         or not _is_json_number(row.get("point_width"))
@@ -509,7 +593,10 @@ def _decode_filtered_display(
         return None
     pixel_width = row.get("pixel_width")
     pixel_height = row.get("pixel_height")
-    if not _is_valid_pixel_size(pixel_width, pixel_height):
+    if (
+        not _is_valid_pixel_size(pixel_width, pixel_height)
+        or (pixel_width, pixel_height) != (target.width, target.height)
+    ):
         return None
     png_base64 = row.get("png_base64")
     if not isinstance(png_base64, str) or not png_base64:
@@ -524,11 +611,7 @@ def _decode_filtered_display(
         image.load()
         if image.size != (pixel_width, pixel_height):
             return None
-        scale_x = pixel_width / region.width
-        scale_y = pixel_height / region.height
-        if not math.isclose(scale_x, scale_y, rel_tol=0.02, abs_tol=0.02):
-            return None
-        return _FilteredDisplayImage(expected, image.convert("RGB"))
+        return _FilteredDisplayImage(target, image.convert("RGB"))
     except (OSError, ValueError, base64.binascii.Error):
         return None
 
@@ -555,14 +638,14 @@ def _is_valid_pixel_size(width: Any, height: Any) -> bool:
 
 def _mask_protected_regions(
     image: Any,
-    display: DisplayInfo,
+    target: _FilteredCaptureTarget,
     regions: tuple[ScreenRegion, ...],
 ) -> None:
     from PIL import ImageDraw
 
-    display_region = display.region
-    scale_x = image.width / display_region.width
-    scale_y = image.height / display_region.height
+    display_region = target.display.region
+    scale_x = target.width / display_region.width
+    scale_y = target.height / display_region.height
     draw = ImageDraw.Draw(image)
     for region in regions:
         left = max(display_region.left, region.left)
@@ -584,48 +667,27 @@ def _mask_protected_regions(
 
 def _stitch_filtered_displays(
     frames: list[_FilteredDisplayImage],
-) -> tuple[Any, ScreenRegion] | None:
+    layout: _FilteredCaptureLayout,
+) -> Any | None:
     try:
         from PIL import Image
     except ImportError:
         return None
     if not frames:
         return None
-    left = min(frame.display.region.left for frame in frames)
-    top = min(frame.display.region.top for frame in frames)
-    right = max(frame.display.region.left + frame.display.region.width for frame in frames)
-    bottom = max(frame.display.region.top + frame.display.region.height for frame in frames)
-    region = ScreenRegion(left, top, right - left, bottom - top)
-    if not _is_valid_region(region):
+    if (
+        layout.virtual_width is None
+        or layout.virtual_height is None
+        or len(frames) != len(layout.targets)
+        or not _is_valid_pixel_size(layout.virtual_width, layout.virtual_height)
+    ):
         return None
-    scale = max(
-        frame.image.width / frame.display.region.width
-        for frame in frames
-    )
-    scale = max(
-        scale,
-        max(frame.image.height / frame.display.region.height for frame in frames),
-    )
-    width = math.ceil(region.width * scale)
-    height = math.ceil(region.height * scale)
-    if not _is_valid_pixel_size(width, height):
-        return None
-    canvas = Image.new("RGB", (width, height), _MASK_COLOR)
-    for frame in frames:
-        display = frame.display.region
-        pixel_left = math.floor((display.left - left) * scale)
-        pixel_top = math.floor((display.top - top) * scale)
-        pixel_right = math.ceil((display.left + display.width - left) * scale)
-        pixel_bottom = math.ceil((display.top + display.height - top) * scale)
-        target_width = pixel_right - pixel_left
-        target_height = pixel_bottom - pixel_top
-        if target_width <= 0 or target_height <= 0:
+    canvas = Image.new("RGB", (layout.virtual_width, layout.virtual_height), _MASK_COLOR)
+    for frame, target in zip(frames, layout.targets, strict=True):
+        if frame.target != target or frame.image.size != (target.width, target.height):
             return None
-        image = frame.image
-        if image.size != (target_width, target_height):
-            image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
-        canvas.paste(image, (pixel_left, pixel_top))
-    return canvas, region
+        canvas.paste(frame.image, (target.left, target.top))
+    return canvas
 
 
 def _filtered_screenshot(
@@ -634,17 +696,8 @@ def _filtered_screenshot(
     monitor_index: int,
     monitor_region: ScreenRegion,
     monitor_is_all: bool,
-    max_width: int,
     jpeg_quality: int,
 ) -> Screenshot:
-    from PIL import Image
-
-    if max_width and image.width > max_width:
-        ratio = max_width / image.width
-        image = image.resize(
-            (max_width, max(1, int(image.height * ratio))),
-            Image.Resampling.LANCZOS,
-        )
     output = io.BytesIO()
     image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
     return Screenshot(
@@ -668,6 +721,14 @@ def _resolve_filtered_capture_helper() -> Path | None:
         path = Path(override).expanduser().resolve()
         return path if path.is_file() and os.access(path, os.X_OK) else None
 
+    for directory in _filtered_capture_helper_directories():
+        binary = directory / "mac-screen-capture"
+        if _ensure_filtered_capture_helper(binary):
+            return binary
+    return None
+
+
+def _filtered_capture_helper_directories() -> tuple[Path, ...]:
     candidates: list[Path] = []
     try:
         from importlib.resources import files as package_files
@@ -677,11 +738,7 @@ def _resolve_filtered_capture_helper() -> Path | None:
     except (ModuleNotFoundError, ValueError):
         pass
     candidates.append(Path(__file__).resolve().parents[3] / "resources")
-    for directory in candidates:
-        binary = directory / "mac-screen-capture"
-        if _ensure_filtered_capture_helper(binary):
-            return binary
-    return None
+    return tuple(candidates)
 
 
 def _ensure_filtered_capture_helper(binary: Path) -> bool:
@@ -689,11 +746,11 @@ def _ensure_filtered_capture_helper(binary: Path) -> bool:
     core = binary.with_name("mac-screen-capture-core.swift")
     if not main.is_file() or not core.is_file():
         return binary.is_file() and os.access(binary, os.X_OK)
-    if _filtered_capture_helper_is_fresh(binary, main, core):
-        return True
     build_script = binary.with_name("build-mac-screen-capture.sh")
     if not build_script.is_file():
         return False
+    if _filtered_capture_helper_is_fresh(binary, main, core, build_script):
+        return True
     try:
         result = subprocess.run(
             ["/bin/bash", str(build_script)],
@@ -704,16 +761,26 @@ def _ensure_filtered_capture_helper(binary: Path) -> bool:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
-    return result.returncode == 0 and _filtered_capture_helper_is_fresh(binary, main, core)
+    return (
+        result.returncode == 0
+        and not result.stderr
+        and _filtered_capture_helper_is_fresh(binary, main, core, build_script)
+    )
 
 
-def _filtered_capture_helper_is_fresh(binary: Path, main: Path, core: Path) -> bool:
+def _filtered_capture_helper_is_fresh(
+    binary: Path,
+    main: Path,
+    core: Path,
+    build_script: Path,
+) -> bool:
     try:
         return (
             binary.is_file()
             and os.access(binary, os.X_OK)
             and binary.stat().st_mtime >= main.stat().st_mtime
             and binary.stat().st_mtime >= core.stat().st_mtime
+            and binary.stat().st_mtime >= build_script.stat().st_mtime
         )
     except OSError:
         return False
