@@ -8,6 +8,19 @@ enum SettingsPage: Hashable {
   case advanced
 }
 
+struct PrivacyReasonPickerAvailability: Equatable {
+  let isDisplayEnabled = true
+  let isDetailEnabled = true
+  let isTriggerEnabled: Bool
+
+  init(
+    display: PrivacyReasonDisplayOption,
+    indicatorStyle: PrivacyIndicatorStyleOption
+  ) {
+    isTriggerEnabled = display != .diagnostics && indicatorStyle != .off
+  }
+}
+
 struct SettingsView: View {
   @ObservedObject var backend: BackendController
   @ObservedObject var configuration: ConfigurationController
@@ -158,6 +171,39 @@ struct SettingsView: View {
             PrivacyIndicatorStylePicker(
               selection: binding(\.privacyIndicatorStyle, fallback: "pill")
             )
+            Picker(
+              "Reason location",
+              selection: binding(\.privacyReasonDisplay, fallback: "hybrid")
+            ) {
+              ForEach(PrivacyReasonDisplayOption.allCases) { option in
+                Label(option.title, systemImage: option.systemImage)
+                  .tag(option.rawValue)
+              }
+            }
+            .pickerStyle(.menu)
+            .disabled(!privacyReasonPickerAvailability.isDisplayEnabled)
+            Picker(
+              "Detail",
+              selection: binding(\.privacyReasonDetail, fallback: "exact")
+            ) {
+              ForEach(PrivacyReasonDetailOption.allCases) { option in
+                Label(option.title, systemImage: option.systemImage)
+                  .tag(option.rawValue)
+              }
+            }
+            .pickerStyle(.menu)
+            .disabled(!privacyReasonPickerAvailability.isDetailEnabled)
+            Picker(
+              "Overlay reveal",
+              selection: binding(\.privacyReasonTrigger, fallback: "hover")
+            ) {
+              ForEach(PrivacyReasonTriggerOption.allCases) { option in
+                Label(option.title, systemImage: option.systemImage)
+                  .tag(option.rawValue)
+              }
+            }
+            .pickerStyle(.menu)
+            .disabled(!privacyReasonPickerAvailability.isTriggerEnabled)
             integerField("JPEG quality (1–100)", \.screenshotJPEGQuality, fallback: 80)
           }
 
@@ -178,6 +224,17 @@ struct SettingsView: View {
         invalidConfigurationPlaceholder
       }
     }
+  }
+
+  private var privacyReasonPickerAvailability: PrivacyReasonPickerAvailability {
+    PrivacyReasonPickerAvailability(
+      display: PrivacyReasonDisplayOption(
+        rawValue: configuration.draft?.privacyReasonDisplay ?? ""
+      ) ?? .defaultValue,
+      indicatorStyle: PrivacyIndicatorStyleOption(
+        rawValue: configuration.draft?.privacyIndicatorStyle ?? ""
+      ) ?? .defaultStyle
+    )
   }
 
   private var processingTab: some View {

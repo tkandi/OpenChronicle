@@ -9,6 +9,7 @@ struct MainWindowView: View {
   @ObservedObject var navigator: MainWindowNavigator
   @ObservedObject var modelFailureNotifications: ModelFailureNotificationController
   @ObservedObject var capturePause: CapturePauseController
+  @ObservedObject var privacyDiagnostics: PrivacyDiagnosticsController
 
   var body: some View {
     NavigationSplitView {
@@ -49,7 +50,7 @@ struct MainWindowView: View {
   private func sidebarRows(_ sections: [MainWindowSection]) -> some View {
     ForEach(sections) { section in
       HStack(spacing: 8) {
-        Label(section.title, systemImage: section.systemImage)
+        Label(section.sidebarTitle, systemImage: section.systemImage)
         Spacer()
         if section == .permissions && !permissions.criticalPermissionsGranted {
           Image(systemName: "exclamationmark.triangle.fill")
@@ -118,6 +119,31 @@ struct MainWindowView: View {
         capturePause: capturePause,
         page: .runtime
       )
+    case .protectionDiagnostics:
+      if configuration.snapshot != nil {
+        ProtectionDiagnosticsView(
+          controller: privacyDiagnostics,
+          detailOption: activePrivacyReasonDetail
+        )
+      } else {
+        VStack(spacing: 8) {
+          if configuration.isLoading {
+            ProgressView()
+              .controlSize(.small)
+            Text("Loading diagnostics")
+              .foregroundStyle(.secondary)
+          } else if configuration.lastError != nil {
+            Label("Diagnostics unavailable", systemImage: "exclamationmark.triangle")
+              .foregroundStyle(.secondary)
+          }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task {
+          if configuration.snapshot == nil && !configuration.isLoading {
+            await configuration.load()
+          }
+        }
+      }
     case .models:
       SettingsView(backend: backend, configuration: configuration, page: .models)
     case .capture:
@@ -133,5 +159,11 @@ struct MainWindowView: View {
 
   private var hasUnsavedConfiguration: Bool {
     configuration.hasFormChanges || configuration.hasRawChanges
+  }
+
+  private var activePrivacyReasonDetail: PrivacyReasonDetailOption {
+    PrivacyReasonDetailOption(
+      rawValue: configuration.snapshot?.values?.capture.privacyReasonDetail ?? ""
+    ) ?? .defaultValue
   }
 }

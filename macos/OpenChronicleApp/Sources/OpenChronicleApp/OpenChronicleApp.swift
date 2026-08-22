@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   static var mainWindowNavigator: MainWindowNavigator?
   static var modelFailureNotifications: ModelFailureNotificationController?
   static var capturePause: CapturePauseController?
+  static var privacyDiagnostics: PrivacyDiagnosticsController?
 
   private var refreshTimer: Timer?
   private var mainWindowController: NSWindowController?
@@ -64,6 +65,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
   func applicationWillTerminate(_ notification: Notification) {
     refreshTimer?.invalidate()
     NSWorkspace.shared.notificationCenter.removeObserver(self)
+    Self.privacyDiagnostics?.shutdown()
     Self.backend?.shutdownManagedBackend()
   }
 
@@ -95,7 +97,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
       let configuration = Self.configuration,
       let navigator = Self.mainWindowNavigator,
       let modelFailureNotifications = Self.modelFailureNotifications,
-      let capturePause = Self.capturePause
+      let capturePause = Self.capturePause,
+      let privacyDiagnostics = Self.privacyDiagnostics
     else {
       return
     }
@@ -110,12 +113,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         configuration: configuration,
         navigator: navigator,
         modelFailureNotifications: modelFailureNotifications,
-        capturePause: capturePause
+        capturePause: capturePause,
+        privacyDiagnostics: privacyDiagnostics
       )
       let hostingController = NSHostingController(rootView: rootView)
       let window = NSWindow(contentViewController: hostingController)
       window.title = "OpenChronicle"
-      window.styleMask = [.titled, .closable, .miniaturizable]
+      window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
       window.isReleasedWhenClosed = false
       window.setContentSize(NSSize(width: 1040, height: 760))
       window.minSize = NSSize(width: 900, height: 680)
@@ -169,6 +173,7 @@ struct OpenChronicleDesktopApp: App {
   @StateObject private var mainWindowNavigator: MainWindowNavigator
   @StateObject private var modelFailureNotifications: ModelFailureNotificationController
   @StateObject private var capturePause: CapturePauseController
+  @StateObject private var privacyDiagnostics: PrivacyDiagnosticsController
 
   init() {
     let backend = BackendController()
@@ -179,6 +184,11 @@ struct OpenChronicleDesktopApp: App {
     let mainWindowNavigator = MainWindowNavigator()
     let modelFailureNotifications = ModelFailureNotificationController()
     let capturePause = CapturePauseController(backend: backend)
+    let privacyDiagnostics = PrivacyDiagnosticsController(
+      activeConfigurationProvider: { [weak configuration] in
+        configuration?.snapshot
+      }
+    )
     _backend = StateObject(wrappedValue: backend)
     _permissions = StateObject(wrappedValue: permissions)
     _loginItem = StateObject(wrappedValue: loginItem)
@@ -187,6 +197,7 @@ struct OpenChronicleDesktopApp: App {
     _mainWindowNavigator = StateObject(wrappedValue: mainWindowNavigator)
     _modelFailureNotifications = StateObject(wrappedValue: modelFailureNotifications)
     _capturePause = StateObject(wrappedValue: capturePause)
+    _privacyDiagnostics = StateObject(wrappedValue: privacyDiagnostics)
     AppDelegate.backend = backend
     AppDelegate.permissions = permissions
     AppDelegate.loginItem = loginItem
@@ -195,6 +206,7 @@ struct OpenChronicleDesktopApp: App {
     AppDelegate.mainWindowNavigator = mainWindowNavigator
     AppDelegate.modelFailureNotifications = modelFailureNotifications
     AppDelegate.capturePause = capturePause
+    AppDelegate.privacyDiagnostics = privacyDiagnostics
   }
 
   var body: some Scene {

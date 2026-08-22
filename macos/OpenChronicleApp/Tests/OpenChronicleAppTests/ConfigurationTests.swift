@@ -170,6 +170,82 @@ final class ConfigurationTests: XCTestCase {
     }
   }
 
+  func testPrivacyReasonPickerAvailabilityUsesDisplayAndIndicatorStyle() {
+    for display in PrivacyReasonDisplayOption.allCases {
+      let state = PrivacyReasonPickerAvailability(
+        display: display,
+        indicatorStyle: .pill
+      )
+      XCTAssertTrue(state.isDisplayEnabled)
+      XCTAssertTrue(state.isDetailEnabled)
+      XCTAssertEqual(state.isTriggerEnabled, display != .diagnostics)
+    }
+
+    for display in PrivacyReasonDisplayOption.allCases {
+      let state = PrivacyReasonPickerAvailability(
+        display: display,
+        indicatorStyle: .off
+      )
+      XCTAssertTrue(state.isDisplayEnabled)
+      XCTAssertTrue(state.isDetailEnabled)
+      XCTAssertFalse(state.isTriggerEnabled)
+    }
+  }
+
+  func testReasonPresentationKeepsEightRowsAndUsesStableTruncation() {
+    let exactValue = String(repeating: "x", count: 160)
+    let fixtureCodes: [ProtectionReasonDiagnosticCode] = [
+      .windowTitleRule,
+      .appRule,
+      .bundleRule,
+      .windowTitleUnknown,
+      .modeAllInherited,
+      .manualPause,
+      .inventoryUnavailable,
+      .indicatorUnconfirmed,
+    ]
+    let reasons = fixtureCodes.enumerated().map { index, code in
+      ProtectionReasonDiagnostic(
+        code: code,
+        displayID: 1,
+        windowTitle: index == 0 ? exactValue : "Window \(index)"
+      )
+    }
+
+    let descriptors = reasons.map {
+      ProtectionReasonPresentationDescriptor(
+        reason: $0,
+        detail: .exact,
+        showsExactValues: true
+      )
+    }
+
+    XCTAssertEqual(descriptors.count, 8)
+    XCTAssertTrue(descriptors.allSatisfy { $0.detailLineLimit == 2 })
+    XCTAssertTrue(descriptors.allSatisfy { $0.truncation == .middle })
+    XCTAssertTrue(descriptors[0].detail?.contains(exactValue) == true)
+  }
+
+  func testReasonPresentationUsesFixedPlaceholderWhileExactValuesAreHidden() {
+    let marker = String(repeating: "private", count: 20)
+    let descriptor = ProtectionReasonPresentationDescriptor(
+      reason: ProtectionReasonDiagnostic(
+        code: .windowTitleRule,
+        displayID: 1,
+        windowTitle: marker,
+        rule: marker
+      ),
+      detail: .tiered,
+      showsExactValues: false
+    )
+
+    XCTAssertEqual(
+      descriptor.detail,
+      ProtectionReasonPresentationDescriptor.hiddenExactValuePlaceholder
+    )
+    XCTAssertFalse(descriptor.detail?.contains(marker) == true)
+  }
+
   func testPrivacyDraftEmitsArrayChangesAndRejectsBlankRules() throws {
     let payload = privacySnapshotPayload(path: "/tmp/config.toml")
     let snapshot = try JSONDecoder().decode(

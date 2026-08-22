@@ -5,6 +5,7 @@ enum MainWindowSection: String, CaseIterable, Identifiable {
   case overview
   case permissions
   case runtime
+  case protectionDiagnostics
   case models
   case capture
   case processing
@@ -15,6 +16,7 @@ enum MainWindowSection: String, CaseIterable, Identifiable {
     .overview,
     .permissions,
     .runtime,
+    .protectionDiagnostics,
   ]
 
   static let configurationSections: [MainWindowSection] = [
@@ -32,6 +34,7 @@ enum MainWindowSection: String, CaseIterable, Identifiable {
     case .overview: return "Overview"
     case .permissions: return "Permissions"
     case .runtime: return "Runtime & Storage"
+    case .protectionDiagnostics: return "Protection Diagnostics"
     case .models: return "Models"
     case .capture: return "Capture"
     case .processing: return "Processing"
@@ -40,11 +43,19 @@ enum MainWindowSection: String, CaseIterable, Identifiable {
     }
   }
 
+  var sidebarTitle: String {
+    switch self {
+    case .protectionDiagnostics: return "Diagnostics"
+    default: return title
+    }
+  }
+
   var subtitle: String {
     switch self {
     case .overview: return "Capture state and backend controls"
     case .permissions: return "Privacy access and launch behavior"
     case .runtime: return "Health, local data, and model diagnostics"
+    case .protectionDiagnostics: return "Per-display reasons and privacy guard state"
     case .models: return "Provider and per-stage model selection"
     case .capture: return "Timing, screenshots, privacy, and retention"
     case .processing: return "Timeline, sessions, memory, and search"
@@ -58,6 +69,7 @@ enum MainWindowSection: String, CaseIterable, Identifiable {
     case .overview: return "gauge"
     case .permissions: return "lock.shield"
     case .runtime: return "internaldrive"
+    case .protectionDiagnostics: return "checkmark.shield"
     case .models: return "cpu"
     case .capture: return "camera.viewfinder"
     case .processing: return "flowchart"
