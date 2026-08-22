@@ -45,7 +45,7 @@ privacy_indicator_style = "pill"
 
 默认值为 `pill`。已有安装中没有该配置项时，配置加载器同样采用这个默认值。
 
-右下角标识以 `NSScreen.visibleFrame` 为定位范围并留出边距，从而避开 Dock。边缘框和状态条使用完整屏幕范围。所有浮层都不会获取键盘焦点，也不会接收鼠标事件。
+右下角标识以 `NSScreen.visibleFrame` 为定位范围并留出边距，从而避开 Dock。边缘框和状态条使用完整屏幕范围。所有浮层都不会获取键盘焦点。`always` 和 `hover` 保持鼠标穿透；`hover` 只观察指针移动，不拦截底层应用输入。`click` 仅为有界的徽标/原因区域启用点击目标，并且只消费命中该目标的点击。
 
 ### 状态
 
@@ -109,7 +109,8 @@ inventory 从 CoreGraphics `optionOnScreenOnly` 结果开始，只保留 alpha �
 
 新增一个随包提供的 Swift 可执行文件 `mac-privacy-overlay`，由 daemon 启动并监管。它以 accessory AppKit 进程运行，不显示 Dock 图标。每块需要标识的显示器对应一个无边框、非激活的 `NSPanel`，具有以下特性：
 
-- `ignoresMouseEvents = true`；
+- `always` 和 `hover` 的展示 panel 保持鼠标穿透，hover 跟踪不会消费底层指针输入；
+- `click` 只为有界的徽标/原因 panel 或 hit target 启用输入，显示器其他区域继续穿透；
 - 永远不会成为 key window 或 main window；
 - 跨 Space 可见；
 - 可以与全屏应用共同显示；
@@ -190,7 +191,7 @@ daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_sty
 
 - 样式与状态 presentation model 能选出预期的图标、文字、颜色、尺寸和锚点。
 - AppKit panel controller 能按显示器创建、更新、移动和移除 panel。
-- panel 不会激活并且鼠标可穿透。
+- panel 不会激活；`always`/`hover` 保持点击穿透，`click` 只消费有界徽标/原因 hit target 内的输入。
 - NDJSON 命令解码和确认编码正确。
 - 随包 helper 能够针对受支持的 arm64 和 x86_64 macOS target 编译。
 

@@ -55,8 +55,10 @@ The default is `pill`. Existing installations that do not contain the new key re
 same default when configuration is loaded.
 
 Lower-right indicators are inset from `NSScreen.visibleFrame` so they avoid the Dock.
-Border and banner styles use the full screen frame. Overlays never accept keyboard focus or
-mouse events.
+Border and banner styles use the full screen frame. Overlays never accept keyboard focus.
+`always` and `hover` remain mouse-through; `hover` observes pointer movement without intercepting
+the underlying app. `click` enables only the bounded badge/reason hit target, and only a click
+inside that target is consumed.
 
 ### States
 
@@ -164,7 +166,10 @@ A bundled Swift executable, `mac-privacy-overlay`, is started and supervised by 
 It runs as an accessory AppKit process without a Dock icon. One borderless, non-activating
 `NSPanel` is created for each indicated display with these characteristics:
 
-- `ignoresMouseEvents = true`;
+- `always` and `hover` presentation panels remain mouse-through; hover tracking does not consume
+  underlying pointer input;
+- `click` enables input only for the bounded badge/reason panel or hit target, while the rest of
+  the display remains mouse-through;
 - never becomes key or main;
 - visible across Spaces;
 - allowed alongside full-screen applications;
@@ -277,7 +282,8 @@ config editor and normalized to `pill` by the regular config loader as a final f
 
 - Style/state presentation model selects the expected symbol, text, color, size, and anchor.
 - AppKit panel controller creates, updates, relocates, and removes per-display panels.
-- Panels are non-activating and click-through.
+- Panels are non-activating; `always`/`hover` remain click-through, while `click` consumes only
+  input inside the bounded badge/reason hit target.
 - NDJSON command decoding and acknowledgement encoding.
 - The bundled helper compiles for supported arm64 and x86_64 macOS targets.
 
