@@ -106,10 +106,19 @@ display's `width` and `height` are both omitted for native pixels or both positi
 - Create or Modify: `tests/test_filtered_screenshot.py`
 
 **Interfaces:**
-- Produces: `grab_filtered_many(...) -> list[Screenshot] | None`
+- Produces:
+  `grab_filtered_many(*, monitor_mode, privacy_mode, displays, protected_window_ids,
+  protected_window_regions, overlay_window_ids, max_width, jpeg_quality) -> list[Screenshot] | None`
 - `None` means safe filtered capture unavailable and requires skip-monitor fallback.
 - Consumes the already-authorized union of protected and confirmed overlay window IDs; Python never
   receives pixels from either class of window.
+
+`privacy_mode` accepts only `mask-window` and `exclude-window`. `displays` preserves native
+inventory order and carries stable CG display IDs/bounds/primary metadata. Protected IDs are
+non-empty; protected regions have the same cardinality; overlay IDs may be empty. The backend must
+strictly validate the helper's exact success schema, requested display set/order, geometry, PNG
+dimensions, and base64 before creating any `Screenshot`. Any launch/timeout/exit/stderr/protocol,
+ID, geometry, image, or output-completeness failure returns `None` without partial screenshots.
 
 - [ ] Write RED tests with a fake helper response for PNG decoding, opaque masks, coordinate scaling,
   separate/primary/all outputs, stitching, missing displays/windows, invalid images, and timeout.
