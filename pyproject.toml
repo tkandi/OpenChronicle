@@ -58,6 +58,14 @@ packages = ["src/openchronicle"]
 "resources/mac-privacy-overlay-reason.swift" = "openchronicle/_bundled/mac-privacy-overlay-reason.swift"
 "resources/mac-privacy-overlay.swift" = "openchronicle/_bundled/mac-privacy-overlay.swift"
 "resources/build-mac-privacy-overlay.sh" = "openchronicle/_bundled/build-mac-privacy-overlay.sh"
+"resources/mac-screen-capture-core.swift" = "openchronicle/_bundled/mac-screen-capture-core.swift"
+"resources/mac-screen-capture.swift" = "openchronicle/_bundled/mac-screen-capture.swift"
+"resources/build-mac-screen-capture.sh" = "openchronicle/_bundled/build-mac-screen-capture.sh"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/resources/mac-screen-capture",
+]
 
 [dependency-groups]
 dev = [

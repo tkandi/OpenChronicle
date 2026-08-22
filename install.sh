@@ -203,11 +203,17 @@ install_package() {
 
 compile_bundled_binaries() {
   log "compiling bundled macOS helper binaries"
-  "${VENV_DIR}/bin/python" - <<'PY' || die "failed to compile bundled macOS binaries"
+  OPENCHRONICLE_SOURCE_ROOT="${ROOT_DIR}" "${VENV_DIR}/bin/python" - <<'PY' \
+    || die "failed to compile bundled macOS binaries"
+import os
+import platform
+import subprocess
 from openchronicle.capture.ax_capture import _resolve_helper_path
 from openchronicle.capture.privacy import _resolve_window_list_path
 from openchronicle.capture.privacy_overlay import _resolve_overlay_path
 from openchronicle.capture.watcher import _resolve_watcher_path
+from importlib.resources import files as package_files
+from pathlib import Path
 
 helper = _resolve_helper_path()
 watcher = _resolve_watcher_path()
@@ -221,10 +227,42 @@ if window_list is None:
     raise SystemExit("mac-window-list not available after install")
 if privacy_overlay is None:
     raise SystemExit("mac-privacy-overlay not available after install")
+
+bundled_dir = Path(str(package_files("openchronicle").joinpath("_bundled")))
+source_dir = Path(os.environ["OPENCHRONICLE_SOURCE_ROOT"]) / "resources"
+required_sources = (
+    "mac-screen-capture-core.swift",
+    "mac-screen-capture.swift",
+    "build-mac-screen-capture.sh",
+)
+screen_capture_dir = next(
+    (
+        candidate
+        for candidate in (bundled_dir, source_dir)
+        if all((candidate / name).is_file() for name in required_sources)
+    ),
+    None,
+)
+if screen_capture_dir is None:
+    raise SystemExit("mac-screen-capture sources not available after install")
+subprocess.run(
+    ["bash", str(screen_capture_dir / "build-mac-screen-capture.sh")],
+    check=True,
+)
+
+macos_version = platform.mac_ver()[0]
+macos_major = int(macos_version.split(".", 1)[0]) if macos_version else 0
+screen_capture = screen_capture_dir / "mac-screen-capture"
+if macos_major >= 14 and not (screen_capture.is_file() and os.access(screen_capture, os.X_OK)):
+    raise SystemExit("mac-screen-capture not available after install")
 print(f"helper={helper}")
 print(f"watcher={watcher}")
 print(f"window_list={window_list}")
 print(f"privacy_overlay={privacy_overlay}")
+if screen_capture.is_file():
+    print(f"screen_capture={screen_capture}")
+else:
+    print("screen_capture=unsupported_os")
 PY
 }
 
