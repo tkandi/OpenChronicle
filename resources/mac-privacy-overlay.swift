@@ -31,19 +31,25 @@ enum MacPrivacyOverlay {
                 do {
                     let command = try JSONDecoder().decode(OverlayCommand.self, from: Data(line.utf8))
                     DispatchQueue.main.async {
-                        controller.apply(command) { rendered in
+                        controller.applyWithWindowIDs(command) { rendered, windowIDs in
                             writeAcknowledgement(
                                 OverlayAcknowledgement(
                                     generation: command.generation,
                                     rendered: rendered,
-                                    error: rendered ? nil : "unresolved-display"
+                                    error: rendered ? nil : "unresolved-display",
+                                    windowIDs: rendered ? windowIDs : []
                                 )
                             )
                         }
                     }
                 } catch {
                     writeAcknowledgement(
-                        OverlayAcknowledgement(generation: -1, rendered: false, error: "invalid-command")
+                        OverlayAcknowledgement(
+                            generation: -1,
+                            rendered: false,
+                            error: "invalid-command",
+                            windowIDs: []
+                        )
                     )
                 }
             }

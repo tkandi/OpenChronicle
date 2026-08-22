@@ -15,7 +15,9 @@ Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 3. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers, unless the decision blocks AX.
 4. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from an allowed AX tree (see [S1 fields](#s1-fields) below).
 5. Validate again against every refresh request observed during AX work; a newly protected or paused decision discards the complete in-memory capture.
-6. `screenshot.grab_many()` — unless `include_screenshot = false`; targets intersecting denied windows are omitted.
+6. Capture screenshots unless `include_screenshot = false`. Depending on the
+   privacy mode, this uses source-filtered ScreenCaptureKit capture or the
+   display-level `mss` fallback described below.
 7. Write `{iso8601_safe}.json` to the buffer.
 
 Privacy denylist checks can short-circuit this flow:
@@ -24,7 +26,26 @@ Privacy denylist checks can short-circuit this flow:
 - `deny_url_patterns` and `deny_text_patterns` run after S1 parsing, before screenshots and disk writes.
 - Denied captures are not written to JSON, not inserted into `captures_fts`, not absorbed into timeline blocks, and not sent to any model stage.
 
-With `screenshot_privacy_mode = "skip-monitor"`, the bundled `mac-window-list`
+### Screenshot privacy modes
+
+`screenshot_privacy_mode` has four values:
+
+- **`off`** disables the background window monitor and protection indicator.
+  Foreground app, bundle, title, URL, and text deny rules remain active.
+- **`skip-monitor`** uses `mss` and omits every target display intersecting a
+  protected window. In `all` mode, one protected display omits the complete
+  virtual desktop image.
+- **`mask-window`** uses the macOS 14 or newer ScreenCaptureKit helper to
+  exclude protected windows and OpenChronicle's own indicator windows at the
+  source, then paints the protected window bounds gray in the returned image.
+- **`exclude-window`** uses the same source exclusion but leaves the pixels
+  behind the excluded window visible instead of adding a gray mask.
+
+The daemon runs the normal protection monitor for `skip-monitor`,
+`mask-window`, and `exclude-window`. It starts an `off`-mode monitor only when
+an existing Protection Diagnostics guard must remain fail-closed.
+
+With the three monitored modes, the bundled `mac-window-list`
 helper inventories only alpha-positive, positive-size windows returned by
 CoreGraphics as on-screen at normal layer 0. It records their owner, bundle ID,
 CoreGraphics title, and CoreGraphics bounds immediately before `mss` captures
@@ -51,21 +72,41 @@ when an app or bundle denylist independently matches an inventoried normal
 window or the foreground window. The helper never traverses background AX trees
 or reads their controls and contents. In `separate` mode, only monitors
 intersecting a denied inventoried window are skipped. In `all` mode, any denied
-inventoried window skips the full virtual-desktop screenshot. Each watcher event
+inventoried window skips the full virtual-desktop screenshot when the
+skip-monitor fallback is used. Each watcher event
 increments a request epoch; pre-capture and post-AX validation return only a
 decision that covers every request observed at validation time.
 
-`screenshot_privacy_mode = "off"` disables the background inventory guard and
-its indicator, but all foreground app, bundle, title, URL, and text deny rules
-remain active. On a genuine inventory failure,
-`screenshot_privacy_fail_closed = true` aborts the complete tick. Setting it to
-`false` permits an unprotected capture, clears stale protection indicators, and
-leaves visual confirmation false; no yellow "screenshot disabled" state is
-shown because capture is not disabled.
+Window-filtered capture is used only for a protected, complete window decision:
+the display inventory and protected window IDs/bounds must be filterable, the
+same-generation indicator acknowledgement must be confirmed, and a visible
+indicator must report every indicator and input-panel window ID. Indicator
+style `off` needs no overlay IDs. Diagnostics protection, unknown titles,
+missing or duplicate IDs, an unavailable helper, or any other incomplete
+decision falls back to `skip-monitor` using the latest protected display
+regions. The protected display is never captured by unblocked `mss`.
+
+After a filtered helper returns, OpenChronicle forces a fresh protection
+decision before keeping the image. A change to protected windows or bounds,
+display IDs or bounds, filtering eligibility, or overlay IDs discards the
+filtered frames and applies the latest skip-monitor decision. A terminal
+decision keeps no stale screenshot or capture.
+
+On a genuine inventory failure, `screenshot_privacy_fail_closed = true` aborts
+the complete tick. Setting it to `false` preserves the legacy fail-open policy
+for `skip-monitor` and `off`, but never for `mask-window` or `exclude-window`:
+those two modes always fail closed. A direct `capture-once` without a background
+monitor runs the visible-window check and can use only the skip-monitor path;
+if enumeration fails, it does not take a screenshot.
 
 `screenshot_privacy_fail_closed = false` applies only to window/display inventory
 failures. If the pause state cannot be read, OpenChronicle shows the yellow failed
 indicator and aborts the complete capture regardless of this setting.
+
+Protected and overlay window IDs are transient capture authorization data. They
+remain in memory and are never added to capture JSON, diagnostics payloads,
+logs, FTS, timeline or memory files, model requests, or MCP surfaces. Helper
+acknowledgement payloads, stderr, and private failure details are not logged.
 
 This guard protects windows identifiable by app, bundle, or title metadata. It cannot classify sensitive content inside an otherwise allowed app, and there is a small unavoidable race if a window appears between enumeration and pixel capture. For high-risk workflows, keep password managers in the app/bundle denylist and pause capture before displaying secrets.
 

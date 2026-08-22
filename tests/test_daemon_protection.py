@@ -138,6 +138,34 @@ class RejectingOverlay:
         return None
 
 
+class ConfirmingWindowIDOverlay:
+    def __init__(self, *window_ids: int) -> None:
+        self.window_ids = tuple(window_ids)
+        self.generation: int | None = None
+
+    def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+        self.generation = snapshot.generation
+        return True
+
+    def clear(self, generation: int, timeout: float = 0.5) -> bool:
+        self.generation = generation
+        return True
+
+    def confirmed_window_ids(self, generation: int) -> tuple[int, ...]:
+        return self.window_ids if generation == self.generation else ()
+
+    def mark_terminal(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
+class FailingWindowIDOverlay(ConfirmingWindowIDOverlay):
+    def confirmed_window_ids(self, generation: int) -> tuple[int, ...]:
+        raise RuntimeError("private-window-id-detail")
+
+
 def _configure_daemon(monkeypatch, monitor: FakeMonitor, session: FakeSessionManager) -> Config:
     async def park_forever(*_args, **_kwargs) -> None:
         await asyncio.Event().wait()
@@ -201,6 +229,7 @@ def test_unconfirmed_indicator_publishes_fixed_diagnostic_without_exact_values(
     )
 
     assert decision.indicator_confirmed is False
+    assert decision.indicator_window_ids == ()
     assert category["reasons"] == [
         {
             "code": ProtectionReasonCode.INDICATOR_UNCONFIRMED.value,
@@ -212,9 +241,77 @@ def test_unconfirmed_indicator_publishes_fixed_diagnostic_without_exact_values(
     assert marker not in caplog.text
 
 
+def test_monitor_carries_exact_generation_window_ids_only_in_memory(
+    ac_root: Path,
+) -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "Private",
+                ScreenRegion(0, 0, 80, 90),
+                True,
+                window_id=73,
+            ),
+        ),
+        displays=(DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),),
+    )
+    overlay = ConfirmingWindowIDOverlay(41, 7)
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(deny_window_title_patterns=["Private"]),
+        config_path=ac_root / "missing.toml",
+        overlay=overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.indicator_confirmed is True
+    assert decision.indicator_window_ids == (7, 41)
+    assert decision.snapshot.protected_window_ids == frozenset({73})
+
+
+def test_monitor_keeps_rendered_indicator_but_drops_ids_when_id_read_fails(
+    ac_root: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "Private",
+                ScreenRegion(0, 0, 80, 90),
+                True,
+                window_id=73,
+            ),
+        ),
+        displays=(DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),),
+    )
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(deny_window_title_patterns=["Private"]),
+        config_path=ac_root / "missing.toml",
+        overlay=FailingWindowIDOverlay(41),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
+        decision = monitor.decision_for_capture(force=True)
+
+    assert decision.indicator_confirmed is True
+    assert decision.indicator_window_ids == ()
+    assert "private-window-id-detail" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "privacy_mode", ["skip-monitor", "mask-window", "exclude-window"]
+)
 @pytest.mark.asyncio
 async def test_daemon_owns_protection_monitor_lifecycle(
-    ac_root: Path, monkeypatch,
+    ac_root: Path, monkeypatch, privacy_mode: str,
 ) -> None:
     monitor = FakeMonitor()
     session = FakeSessionManager()
@@ -225,6 +322,7 @@ async def test_daemon_owns_protection_monitor_lifecycle(
         seen_monitor = protection_monitor
 
     cfg = _configure_daemon(monkeypatch, monitor, session)
+    cfg.capture.screenshot_privacy_mode = privacy_mode
     monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
 
     await daemon_mod._run(cfg, capture_only=True)

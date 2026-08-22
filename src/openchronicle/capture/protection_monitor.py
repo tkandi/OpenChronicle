@@ -47,6 +47,7 @@ class ProtectionDecision:
     snapshot: ProtectionSnapshot
     indicator_confirmed: bool
     covered_request_epoch: int = 0
+    indicator_window_ids: tuple[int, ...] = ()
 
 
 class PrivacyProtectionMonitor:
@@ -256,6 +257,10 @@ class PrivacyProtectionMonitor:
             self._raise_if_stopped()
             rendered = self._render(snapshot)
             indicator_confirmed = rendered or snapshot.indicator_style == "off"
+            indicator_window_ids = self._confirmed_indicator_window_ids(
+                snapshot,
+                rendered=rendered,
+            )
             if not indicator_confirmed and not (
                 snapshot.state is ProtectionState.FAILED
                 and not failure_requires_fail_closed(self._cfg, snapshot)
@@ -277,6 +282,7 @@ class PrivacyProtectionMonitor:
                 snapshot,
                 indicator_confirmed,
                 covered_request_epoch=covered_request_epoch,
+                indicator_window_ids=indicator_window_ids,
             )
             with self._lifecycle_lock:
                 if self._stopped:
@@ -396,6 +402,33 @@ class PrivacyProtectionMonitor:
         except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
             logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
             return False
+
+    def _confirmed_indicator_window_ids(
+        self,
+        snapshot: ProtectionSnapshot,
+        *,
+        rendered: bool,
+    ) -> tuple[int, ...]:
+        if not rendered or snapshot.indicator_style == "off":
+            return ()
+        getter = getattr(self._overlay, "confirmed_window_ids", None)
+        if getter is None:
+            return ()
+        try:
+            window_ids = tuple(getter(snapshot.generation))
+        except Exception:  # noqa: BLE001 - ID retrieval failure must stay private and fail closed.
+            return ()
+        if (
+            len(set(window_ids)) != len(window_ids)
+            or any(
+                not isinstance(window_id, int)
+                or isinstance(window_id, bool)
+                or not 0 < window_id <= 0xFFFFFFFF
+                for window_id in window_ids
+            )
+        ):
+            return ()
+        return tuple(sorted(window_ids))
 
     def _log_failure_transition(self, snapshot: ProtectionSnapshot) -> None:
         if snapshot.diagnostics_guard_invalid:

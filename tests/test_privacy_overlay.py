@@ -15,6 +15,7 @@ from openchronicle.capture.privacy import DisplayInfo, ScreenRegion
 from openchronicle.capture.privacy_overlay import (
     PrivacyOverlayClient,
     _maybe_compile_overlay,
+    _OverlayAcknowledgement,
     _resolve_overlay_path,
     _SubprocessOverlayTransport,
 )
@@ -32,16 +33,26 @@ class FakeTransport:
         self.responses = list(responses)
         self.closed = False
 
-    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool:
+    def send_and_wait(
+        self, line: str, generation: int, timeout: float
+    ) -> _OverlayAcknowledgement | None:
         self.writes.append(line)
-        return self.responses.pop(0) if self.responses else False
+        rendered = self.responses.pop(0) if self.responses else False
+        return _OverlayAcknowledgement(
+            generation=generation,
+            rendered=rendered,
+            error=None if rendered else "test-error",
+            window_ids=(),
+        )
 
     def close(self) -> None:
         self.closed = True
 
 
 class FailingTransport(FakeTransport):
-    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool:
+    def send_and_wait(
+        self, line: str, generation: int, timeout: float
+    ) -> _OverlayAcknowledgement | None:
         raise BrokenPipeError
 
 
@@ -52,11 +63,19 @@ class BlockingTransport(FakeTransport):
         self.release = threading.Event()
         self.closed_before_release = False
 
-    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool:
+    def send_and_wait(
+        self, line: str, generation: int, timeout: float
+    ) -> _OverlayAcknowledgement | None:
         self.writes.append(line)
         self.started.set()
         assert self.release.wait(timeout=1.0)
-        return self.responses.pop(0) if self.responses else False
+        rendered = self.responses.pop(0) if self.responses else False
+        return _OverlayAcknowledgement(
+            generation=generation,
+            rendered=rendered,
+            error=None if rendered else "test-error",
+            window_ids=(),
+        )
 
     def close(self) -> None:
         self.closed_before_release = not self.release.is_set()
@@ -381,6 +400,100 @@ def test_wrong_generation_or_timeout_is_not_confirmed(
     assert fake_transport.closed is True
 
 
+def test_exact_acknowledgement_confirms_sorted_window_ids_for_only_that_generation(
+    snapshot: ProtectionSnapshot, tmp_path: Path
+) -> None:
+    helper = _helper_script(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    print(json.dumps({\n"
+        "        'generation': command['generation'],\n"
+        "        'rendered': True,\n"
+        "        'error': None,\n"
+        "        'window_ids': [4294967295, 7],\n"
+        "    }), flush=True)",
+    )
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
+
+    assert client.render(snapshot, timeout=0.2) is True
+    assert client.confirmed_window_ids(snapshot.generation) == (7, 4294967295)
+    assert client.confirmed_window_ids(snapshot.generation + 1) == ()
+
+
+@pytest.mark.parametrize(
+    "acknowledgement",
+    [
+        {"generation": 12, "rendered": True, "error": None},
+        {"generation": 12, "rendered": True, "error": None, "window_ids": [0]},
+        {"generation": 12, "rendered": True, "error": None, "window_ids": [7, 7]},
+        {"generation": 12, "rendered": True, "error": None, "window_ids": [True]},
+        {
+            "generation": 12,
+            "rendered": True,
+            "error": None,
+            "window_ids": [4294967296],
+        },
+        {"generation": 12, "rendered": True, "error": None, "window_ids": "7"},
+        {"generation": 12, "rendered": True, "window_ids": [7]},
+        {
+            "generation": 12,
+            "rendered": True,
+            "error": "private-helper-detail",
+            "window_ids": [7],
+        },
+    ],
+    ids=[
+        "missing-window-ids",
+        "zero",
+        "duplicate",
+        "bool",
+        "overflow",
+        "not-array",
+        "missing-error",
+        "success-with-error",
+    ],
+)
+def test_malformed_window_id_acknowledgements_fail_closed(
+    snapshot: ProtectionSnapshot,
+    tmp_path: Path,
+    acknowledgement: dict[str, object],
+) -> None:
+    helper = _helper_script(
+        tmp_path,
+        "import json, sys\n"
+        f"acknowledgement = {acknowledgement!r}\n"
+        "for _line in sys.stdin:\n"
+        "    print(json.dumps(acknowledgement), flush=True)",
+    )
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
+
+    assert client.render(snapshot, timeout=0.2) is False
+    assert client.confirmed_window_ids(snapshot.generation) == ()
+
+
+def test_clear_requires_an_empty_acknowledged_window_id_set(
+    snapshot: ProtectionSnapshot, tmp_path: Path
+) -> None:
+    helper = _helper_script(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    print(json.dumps({\n"
+        "        'generation': command['generation'],\n"
+        "        'rendered': True,\n"
+        "        'error': None,\n"
+        "        'window_ids': [7],\n"
+        "    }), flush=True)",
+    )
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
+
+    assert client.clear(snapshot.generation, timeout=0.2) is False
+    assert client.confirmed_window_ids(snapshot.generation) == ()
+
+
 def test_off_style_does_not_start_a_transport(snapshot: ProtectionSnapshot) -> None:
     starts = 0
 
@@ -401,7 +514,9 @@ def test_off_style_does_not_start_a_transport(snapshot: ProtectionSnapshot) -> N
         fresh_until=snapshot.fresh_until,
     )
 
-    assert PrivacyOverlayClient(transport_factory=factory).render(off) is True
+    client = PrivacyOverlayClient(transport_factory=factory)
+    assert client.render(off) is True
+    assert client.confirmed_window_ids(off.generation) == ()
     assert starts == 0
 
 
@@ -499,7 +614,8 @@ def test_malformed_then_valid_acknowledgements_fail_closed(snapshot, tmp_path: P
         "for line in sys.stdin:\n"
         "    command = json.loads(line)\n"
         "    print('{bad-json', flush=True)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
@@ -512,8 +628,10 @@ def test_wrong_generation_then_valid_acknowledgements_fail_closed(snapshot, tmp_
         "import json, sys\n"
         "for line in sys.stdin:\n"
         "    command = json.loads(line)\n"
-        "    print(json.dumps({'generation': command['generation'] + 1, 'rendered': True}), flush=True)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "    print(json.dumps({'generation': command['generation'] + 1, 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)\n"
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
@@ -526,7 +644,8 @@ def test_repeated_generation_acknowledgement_fails_closed(snapshot, tmp_path: Pa
         "import json, sys\n"
         "for line in sys.stdin:\n"
         "    command = json.loads(line)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     transport = _python_helper_transport(helper)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
@@ -550,8 +669,10 @@ def test_duplicate_prior_acknowledgement_fails_next_command_closed(snapshot, tmp
         "    if first_generation is None:\n"
         "        first_generation = command['generation']\n"
         "    else:\n"
-        "        print(json.dumps({'generation': first_generation, 'rendered': True}), flush=True)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "        print(json.dumps({'generation': first_generation, 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)\n"
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
@@ -563,7 +684,8 @@ def test_preexisting_acknowledgement_fails_closed(snapshot, tmp_path: Path) -> N
     helper = _helper_script(
         tmp_path,
         "import time\n"
-        "print('{\"generation\": 12, \"rendered\": true}', flush=True)\n"
+        "print('{\"generation\":12,\"rendered\":true,\"error\":null,"
+        "\"window_ids\":[]}', flush=True)\n"
         "time.sleep(30)",
     )
     transport = _python_helper_transport(helper)
@@ -580,7 +702,8 @@ def test_malformed_acknowledgement_is_not_confirmed(
     helper = _helper_script(
         tmp_path,
         "import time\n"
-        "print('{\"generation\": 12, \"rendered\": \"true\"}', flush=True)\n"
+        "print('{\"generation\":12,\"rendered\":\"true\",\"error\":null,"
+        "\"window_ids\":[]}', flush=True)\n"
         "time.sleep(30)",
     )
     client = PrivacyOverlayClient(
@@ -607,7 +730,8 @@ def test_subprocess_transport_can_launch_helper_through_existing_interpreter(
         "import json, sys\n"
         "for line in sys.stdin:\n"
         "    command = json.loads(line)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     helper.chmod(stat.S_IRUSR | stat.S_IWUSR)
     transport = _SubprocessOverlayTransport(helper, interpreter=sys.executable)
@@ -625,7 +749,8 @@ def test_subprocess_acknowledgement_state_stays_constant_over_long_run(tmp_path:
         "import json, sys\n"
         "for line in sys.stdin:\n"
         "    command = json.loads(line)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     transport = _python_helper_transport(helper)
 
@@ -639,7 +764,7 @@ def test_subprocess_acknowledgement_state_stays_constant_over_long_run(tmp_path:
 
         assert transport._last_completed_generation == 256
         assert not any(isinstance(value, set) for value in vars(transport).values())
-        assert transport.send_and_wait('{"generation":1}', 1, timeout=0.01) is False
+        assert transport.send_and_wait('{"generation":1}', 1, timeout=0.01) is None
     finally:
         transport.close()
 
@@ -650,7 +775,8 @@ def test_close_stops_subprocess_reader_thread(snapshot: ProtectionSnapshot, tmp_
         "import json, sys\n"
         "for line in sys.stdin:\n"
         "    command = json.loads(line)\n"
-        "    print(json.dumps({'generation': command['generation'], 'rendered': True}), flush=True)",
+        "    print(json.dumps({'generation': command['generation'], 'rendered': True, "
+        "'error': None, 'window_ids': []}), flush=True)",
     )
     transport = _python_helper_transport(helper)
     client = PrivacyOverlayClient(transport_factory=lambda: transport)

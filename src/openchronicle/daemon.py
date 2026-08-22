@@ -37,7 +37,7 @@ def _build_protection_monitor(
     diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
     guard_only: bool = False,
 ) -> PrivacyProtectionMonitor | None:
-    if cfg.capture.screenshot_privacy_mode != "skip-monitor" and not guard_only:
+    if cfg.capture.screenshot_privacy_mode == "off" and not guard_only:
         return None
     return PrivacyProtectionMonitor(
         cfg.capture,
@@ -86,9 +86,7 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
     try:
         lease_manager = DiagnosticsLeaseManager(paths.privacy_diagnostics_guard())
         loaded_guard = lease_manager.load()
-        normal_protection_enabled = (
-            cfg.capture.screenshot_privacy_mode == "skip-monitor"
-        )
+        normal_protection_enabled = cfg.capture.screenshot_privacy_mode != "off"
         persisted_guard_requires_protection = (
             loaded_guard.fail_closed_all or bool(loaded_guard.display_ids)
         )

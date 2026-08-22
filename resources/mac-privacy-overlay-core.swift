@@ -123,6 +123,12 @@ struct OverlayAcknowledgement: Codable {
     let generation: Int
     let rendered: Bool
     let error: String?
+    let windowIDs: [UInt32]
+
+    enum CodingKeys: String, CodingKey {
+        case generation, rendered, error
+        case windowIDs = "window_ids"
+    }
 }
 
 struct OverlayScreenGeometry {
@@ -531,6 +537,7 @@ final class PrivacyOverlayController {
     private let inputPanelFactory: () -> PrivacyOverlayPanel
     private let pointerProvider: () -> NSPoint
     private let timerFactory: OverlayPointerTimerFactory
+    private let windowNumberProvider: (PrivacyOverlayPanel) -> Int
 
     init(
         screenProvider: @escaping () -> [OverlayScreenGeometry] = PrivacyOverlayController.systemScreenGeometry,
@@ -539,13 +546,15 @@ final class PrivacyOverlayController {
             PrivacyOverlayPanel(contentRect: .zero)
         },
         pointerProvider: @escaping () -> NSPoint = { NSEvent.mouseLocation },
-        timerFactory: @escaping OverlayPointerTimerFactory = PrivacyOverlayController.makePointerTimer
+        timerFactory: @escaping OverlayPointerTimerFactory = PrivacyOverlayController.makePointerTimer,
+        windowNumberProvider: @escaping (PrivacyOverlayPanel) -> Int = { $0.windowNumber }
     ) {
         self.screenProvider = screenProvider
         self.panelFactory = panelFactory
         self.inputPanelFactory = inputPanelFactory
         self.pointerProvider = pointerProvider
         self.timerFactory = timerFactory
+        self.windowNumberProvider = windowNumberProvider
     }
 
     deinit {
@@ -553,17 +562,26 @@ final class PrivacyOverlayController {
     }
 
     func apply(_ command: OverlayCommand, completion: @escaping (Bool) -> Void) {
+        applyWithWindowIDs(command) { rendered, _windowIDs in
+            completion(rendered)
+        }
+    }
+
+    func applyWithWindowIDs(
+        _ command: OverlayCommand,
+        completion: @escaping (Bool, [UInt32]) -> Void
+    ) {
         dispatchPrecondition(condition: .onQueue(.main))
 
         guard command.state != .inactive, command.style != .off else {
             removeAllPanels()
-            completion(true)
+            completion(true, [])
             return
         }
 
         guard let displays = resolvedDisplays(for: command) else {
             removeAllPanels()
-            completion(false)
+            completion(false, [])
             return
         }
 
@@ -622,7 +640,20 @@ final class PrivacyOverlayController {
 
         startPointerTimerIfNeeded()
         pollPointer()
-        completion(true)
+        completion(true, currentWindowIDs())
+    }
+
+    private func currentWindowIDs() -> [UInt32] {
+        let currentPanels = Array(panels.values) + Array(inputPanels.values)
+        var windowIDs = Set<UInt32>()
+        for panel in currentPanels {
+            let windowNumber = windowNumberProvider(panel)
+            guard windowNumber > 0, windowNumber <= Int(UInt32.max) else {
+                return []
+            }
+            windowIDs.insert(UInt32(windowNumber))
+        }
+        return windowIDs.sorted()
     }
 
     private func resolvedDisplays(for command: OverlayCommand) -> [OverlayScreenGeometry]? {

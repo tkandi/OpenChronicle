@@ -27,6 +27,18 @@ enum MacPrivacyOverlayCoreTests {
         precondition(command.reasons.isEmpty)
         precondition(command.displays.allSatisfy { ($0.reasons ?? []).isEmpty })
 
+        let acknowledgement = OverlayAcknowledgement(
+            generation: 9,
+            rendered: true,
+            error: nil,
+            windowIDs: [7, 41]
+        )
+        let acknowledgementJSON = String(
+            data: try JSONEncoder().encode(acknowledgement),
+            encoding: .utf8
+        )!
+        precondition(acknowledgementJSON.contains(#""window_ids":[7,41]"#))
+
         testRevealState()
         testReasonPresentation()
         testTimedPauseResumePresentation()
@@ -45,6 +57,8 @@ enum MacPrivacyOverlayCoreTests {
         precondition(!panel.canBecomeMain)
 
         testControllerRendering()
+        testControllerAcknowledgesEveryPanelWindowID()
+        testControllerKeepsRenderingWhenAnyWindowIDIsUnavailable()
         testHoverStaysMouseThrough()
         testCompactClickKeepsTargetSizedVisualPanel()
         testClickUsesOnlyIndicatorHitTarget()
@@ -232,6 +246,75 @@ enum MacPrivacyOverlayCoreTests {
         precondition(rejected == false)
         precondition(panels[0].orderOutCount >= 1)
         precondition(!panels[0].isVisible)
+    }
+
+    private static func testControllerAcknowledgesEveryPanelWindowID() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let visualPanel = RecordingPanel(contentRect: .zero)
+        let inputPanel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { visualPanel },
+            inputPanelFactory: { inputPanel },
+            pointerProvider: { NSPoint(x: 400, y: 300) },
+            timerFactory: { _, _ in {} },
+            windowNumberProvider: { panel in
+                panel === visualPanel ? 41 : 7
+            }
+        )
+
+        var acknowledgement: (Bool, [UInt32])?
+        controller.applyWithWindowIDs(reasonCommand(trigger: .click, style: .border)) {
+            acknowledgement = ($0, $1)
+        }
+
+        precondition(acknowledgement?.0 == true)
+        precondition(acknowledgement?.1 == [7, 41])
+
+        controller.applyWithWindowIDs(
+            OverlayCommand(
+                generation: 99,
+                state: .inactive,
+                style: .off,
+                displays: [],
+                allDisplays: false
+            )
+        ) { rendered, windowIDs in
+            precondition(rendered)
+            precondition(windowIDs.isEmpty)
+        }
+    }
+
+    private static func testControllerKeepsRenderingWhenAnyWindowIDIsUnavailable() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let visualPanel = RecordingPanel(contentRect: .zero)
+        let inputPanel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { visualPanel },
+            inputPanelFactory: { inputPanel },
+            pointerProvider: { NSPoint(x: 400, y: 300) },
+            timerFactory: { _, _ in {} },
+            windowNumberProvider: { panel in
+                panel === visualPanel ? 41 : 0
+            }
+        )
+
+        controller.applyWithWindowIDs(reasonCommand(trigger: .click, style: .border)) {
+            rendered, windowIDs in
+            precondition(rendered)
+            precondition(windowIDs.isEmpty)
+        }
+        precondition(visualPanel.isVisible)
+        precondition(inputPanel.isVisible)
     }
 
     private static func testHoverStaysMouseThrough() {

@@ -31,6 +31,8 @@ from openchronicle.mcp.server import build_server
 from openchronicle.store import fts
 from openchronicle.writer import llm as llm_mod
 
+_MEMORY_ONLY_OVERLAY_WINDOW_ID = 4_294_967_001
+
 
 class _SafeAXProvider:
     """Return one fixed AX tree containing no diagnostics values."""
@@ -123,7 +125,7 @@ def _private_other_display_decision(
         )
         for display_id in sorted(diagnostics_display_ids)
     )
-    return ProtectionDecision(
+    decision = ProtectionDecision(
         ProtectionSnapshot(
             generation=generation,
             state=ProtectionState.PROTECTED,
@@ -141,7 +143,9 @@ def _private_other_display_decision(
             diagnostics_guard_active=bool(diagnostics_display_ids),
         ),
         indicator_confirmed=True,
+        indicator_window_ids=(_MEMORY_ONLY_OVERLAY_WINDOW_ID,),
     )
+    return decision
 
 
 def _search_capture_fts(query: str):
@@ -239,13 +243,16 @@ def test_exact_reason_never_enters_capture_or_fts(
         )
         assert out is not None
         assert marker not in json.dumps(out, ensure_ascii=False)
+        assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(out)
         path = scheduler._write_capture(out)
 
     assert marker not in path.read_text()
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in path.read_text()
     safe_hits = _search_capture_fts("knownsafefts")
     assert [hit.id for hit in safe_hits] == [path.stem]
     assert _search_capture_fts(marker) == []
     assert marker not in caplog.text
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in caplog.text
 
 
 def test_category_socket_and_guard_never_persist_exact_reason(
@@ -316,6 +323,7 @@ def test_category_socket_and_guard_never_persist_exact_reason(
             }
         ]
         assert marker not in json.dumps(category, ensure_ascii=False)
+        assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(category)
         assert denied == {
             "schema_version": 1,
             "type": "error",
@@ -343,6 +351,7 @@ def test_category_socket_and_guard_never_persist_exact_reason(
                     "display_ids": [2],
                 }
                 assert marker not in guard_raw
+                assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in guard_raw
 
                 exact = _request(
                     client,
@@ -351,6 +360,7 @@ def test_category_socket_and_guard_never_persist_exact_reason(
                 )
                 assert exact["type"] == "snapshot"
                 assert marker in json.dumps(exact, ensure_ascii=False)
+                assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(exact)
 
                 released = _request(
                     client,
@@ -387,6 +397,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
         created_at="2026-08-22T12:00:00.000000Z",
     )
     assert marker in json.dumps(exact_snapshot, ensure_ascii=False)
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in json.dumps(exact_snapshot)
 
     status = cli._status_payload(cfg, model_checks=False)
     status_json = json.dumps(status, ensure_ascii=False)
@@ -394,6 +405,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
         "boundary-test-model"
     }
     assert marker not in status_json
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in status_json
     assert "privacy_reason" not in status_json
     assert "protection_reason" not in status_json
 
@@ -431,6 +443,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
     }
     assert event["model"] == cfg.model_for("timeline").model
     assert marker not in event_raw
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in event_raw
     assert "privacy_reason" not in event_raw
     assert "protection_reason" not in event_raw
 
@@ -446,6 +459,7 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
         ensure_ascii=False,
     )
     assert marker not in surface_json
+    assert str(_MEMORY_ONLY_OVERLAY_WINDOW_ID) not in surface_json
     assert "privacy_reason" not in surface_json
     assert "protection_reason" not in surface_json
     assert "acquire_exact" not in surface_json

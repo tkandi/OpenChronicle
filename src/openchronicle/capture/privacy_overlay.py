@@ -12,6 +12,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -27,8 +28,18 @@ _REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
 _REASON_TRIGGERS = frozenset({"always", "hover", "click"})
 
 
+@dataclass(frozen=True)
+class _OverlayAcknowledgement:
+    generation: int
+    rendered: bool
+    error: str | None
+    window_ids: tuple[int, ...]
+
+
 class OverlayTransport(Protocol):
-    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool: ...
+    def send_and_wait(
+        self, line: str, generation: int, timeout: float
+    ) -> _OverlayAcknowledgement | None: ...
 
     def close(self) -> None: ...
 
@@ -175,7 +186,7 @@ class _SubprocessOverlayTransport:
         self._reader_finished = False
         self._protocol_failed = False
         self._pending_generation: int | None = None
-        self._pending_result: bool | None = None
+        self._pending_result: _OverlayAcknowledgement | bool | None = None
         self._last_completed_generation: int | None = None
         command = [str(helper_path)] if interpreter is None else [interpreter, str(helper_path)]
         self._process: subprocess.Popen[str] | None = subprocess.Popen(
@@ -193,7 +204,9 @@ class _SubprocessOverlayTransport:
         )
         self._reader_thread.start()
 
-    def send_and_wait(self, line: str, generation: int, timeout: float) -> bool:
+    def send_and_wait(
+        self, line: str, generation: int, timeout: float
+    ) -> _OverlayAcknowledgement | None:
         with self._command_lock:
             with self._condition:
                 process = self._process
@@ -209,7 +222,7 @@ class _SubprocessOverlayTransport:
                     or process.poll() is not None
                     or process.stdin is None
                 ):
-                    return False
+                    return None
                 self._pending_generation = generation
                 self._pending_result = None
 
@@ -232,12 +245,17 @@ class _SubprocessOverlayTransport:
                     if remaining <= 0:
                         break
                     self._condition.wait(remaining)
-                confirmed = self._pending_result is True and not self._protocol_failed
-                if confirmed:
+                acknowledgement = (
+                    self._pending_result
+                    if isinstance(self._pending_result, _OverlayAcknowledgement)
+                    and not self._protocol_failed
+                    else None
+                )
+                if acknowledgement is not None:
                     self._last_completed_generation = generation
                 self._pending_generation = None
                 self._pending_result = None
-                return confirmed
+                return acknowledgement
 
     def close(self) -> None:
         with self._command_lock:
@@ -291,23 +309,54 @@ class _SubprocessOverlayTransport:
             message: Any = json.loads(line)
             generation = message["generation"]
             rendered = message["rendered"]
+            error = message["error"]
+            raw_window_ids = message["window_ids"]
         except (json.JSONDecodeError, KeyError, TypeError):
             message = None
             generation = None
             rendered = None
+            error = None
+            raw_window_ids = None
+        acknowledgement: _OverlayAcknowledgement | None = None
+        if (
+            isinstance(message, dict)
+            and isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and isinstance(rendered, bool)
+            and isinstance(raw_window_ids, list)
+            and all(
+                isinstance(window_id, int)
+                and not isinstance(window_id, bool)
+                and 0 < window_id <= 0xFFFFFFFF
+                for window_id in raw_window_ids
+            )
+            and len(set(raw_window_ids)) == len(raw_window_ids)
+            and (
+                (rendered and error is None)
+                or (
+                    not rendered
+                    and isinstance(error, str)
+                    and bool(error)
+                    and not raw_window_ids
+                )
+            )
+        ):
+            acknowledgement = _OverlayAcknowledgement(
+                generation=generation,
+                rendered=rendered,
+                error=error,
+                window_ids=tuple(sorted(raw_window_ids)),
+            )
         with self._condition:
             exact = (
-                isinstance(message, dict)
-                and not isinstance(generation, bool)
-                and isinstance(generation, int)
-                and rendered is True
-                and generation == self._pending_generation
+                acknowledgement is not None
+                and acknowledgement.generation == self._pending_generation
                 and self._pending_result is None
             )
             if self._pending_generation is None or self._pending_result is not None:
                 self._protocol_failed = True
             else:
-                self._pending_result = exact
+                self._pending_result = acknowledgement if exact else False
             self._condition.notify_all()
 
 
@@ -359,6 +408,8 @@ class PrivacyOverlayClient:
         self._send_lock = threading.Lock()
         self._closed = False
         self._close_started = False
+        self._confirmed_generation: int | None = None
+        self._confirmed_window_ids: tuple[int, ...] = ()
 
     def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
         if snapshot.indicator_style == "off":
@@ -366,6 +417,7 @@ class PrivacyOverlayClient:
                 if self._closed:
                     return False
                 self._discard_transport(schedule_restart=False)
+                self._set_confirmation(snapshot.generation, ())
             return True
         return self._send(self._render_command(snapshot), snapshot.generation, timeout)
 
@@ -384,7 +436,15 @@ class PrivacyOverlayClient:
             },
             generation,
             timeout,
+            require_empty_window_ids=True,
         )
+
+    def confirmed_window_ids(self, generation: int) -> tuple[int, ...]:
+        """Return IDs confirmed for exactly one completed helper generation."""
+        with self._lifecycle_lock:
+            if generation != self._confirmed_generation:
+                return ()
+            return self._confirmed_window_ids
 
     def close(self) -> None:
         self.mark_terminal()
@@ -399,28 +459,52 @@ class PrivacyOverlayClient:
         """Prevent later render or clear calls without waiting for transport cleanup."""
         with self._send_lock, self._lifecycle_lock:
             self._closed = True
+            self._confirmed_generation = None
+            self._confirmed_window_ids = ()
 
-    def _send(self, command: dict[str, Any], generation: int, timeout: float) -> bool:
+    def _send(
+        self,
+        command: dict[str, Any],
+        generation: int,
+        timeout: float,
+        *,
+        require_empty_window_ids: bool = False,
+    ) -> bool:
         with self._send_lock:
             if self._closed:
                 return False
+            self._set_confirmation(None, ())
             transport = self._ensure_transport()
             if transport is None:
                 return False
             try:
-                confirmed = transport.send_and_wait(
+                acknowledgement = transport.send_and_wait(
                     json.dumps(command, separators=(",", ":")), generation, timeout
                 )
             except (OSError, RuntimeError, ValueError):
-                confirmed = False
-            if confirmed:
+                acknowledgement = None
+            if (
+                isinstance(acknowledgement, _OverlayAcknowledgement)
+                and acknowledgement.rendered
+                and (not require_empty_window_ids or not acknowledgement.window_ids)
+            ):
                 with self._lifecycle_lock:
                     if self._transport is transport:
                         self._restart_delay = _INITIAL_RESTART_DELAY
                         self._next_restart_at = 0.0
+                self._set_confirmation(generation, acknowledgement.window_ids)
                 return True
             self._discard_transport(schedule_restart=True, expected=transport)
             return False
+
+    def _set_confirmation(
+        self,
+        generation: int | None,
+        window_ids: tuple[int, ...],
+    ) -> None:
+        with self._lifecycle_lock:
+            self._confirmed_generation = generation
+            self._confirmed_window_ids = window_ids
 
     def _ensure_transport(self) -> OverlayTransport | None:
         with self._lifecycle_lock:
