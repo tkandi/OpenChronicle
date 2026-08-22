@@ -19,6 +19,7 @@ struct WindowRecord: Codable {
     let app_name: String
     let bundle_id: String
     let title: String
+    let alternate_title: String?
     let left: Double
     let top: Double
     let width: Double
@@ -208,6 +209,7 @@ enum MacWindowList {
                 app_name: source.appName,
                 bundle_id: source.bundleID,
                 title: resolved.title,
+                alternate_title: resolved.alternateTitle,
                 left: source.metadata.bounds.left,
                 top: source.metadata.bounds.top,
                 width: source.metadata.bounds.width,

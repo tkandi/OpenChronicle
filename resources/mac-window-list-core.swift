@@ -33,17 +33,20 @@ struct AXWindowMatchResolution: Equatable {
 
 struct ResolvedWindowMetadata: Equatable {
     let title: String
+    let alternateTitle: String?
     let isActive: Bool
     let titleAvailable: Bool
     let isActiveCandidate: Bool
 
     init(
         title: String,
+        alternateTitle: String? = nil,
         isActive: Bool,
         titleAvailable: Bool = true,
         isActiveCandidate: Bool = false
     ) {
         self.title = title
+        self.alternateTitle = alternateTitle
         self.isActive = isActive
         self.titleAvailable = titleAvailable
         self.isActiveCandidate = isActiveCandidate
@@ -122,15 +125,19 @@ func resolvedWindowMetadata(
         let cgWindow = cgWindows[cgIndex]
         let axIndex = resolution.axIndexByCGIndex[cgIndex]
         var title = cgWindow.title
+        var alternateTitle: String?
         var titleAvailable = !title.isEmpty
-        if title.isEmpty, cgWindow.layer == 0 {
-            if let axIndex, let axTitle = readAXTitle(axIndex) {
+        if let axIndex, let axTitle = readAXTitle(axIndex) {
+            if title.isEmpty {
                 title = axTitle
                 titleAvailable = true
+            } else if axTitle != title {
+                alternateTitle = axTitle
             }
         }
         metadata.append(ResolvedWindowMetadata(
             title: title,
+            alternateTitle: alternateTitle,
             isActive: cgIndex == activeCGIndex,
             titleAvailable: titleAvailable,
             isActiveCandidate: activeCGIndex == nil

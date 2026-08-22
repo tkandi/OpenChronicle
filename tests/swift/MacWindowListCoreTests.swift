@@ -238,10 +238,47 @@ private func testResolvedMetadataPreservesCGTitleAndUsesExactAXFallback() {
         }
     )
 
-    precondition(titleReadIndices == [1])
+    precondition(titleReadIndices == [0, 1])
     precondition(metadata == [
-        ResolvedWindowMetadata(title: "CG title", isActive: false),
+        ResolvedWindowMetadata(
+            title: "CG title",
+            alternateTitle: "different AX title",
+            isActive: false
+        ),
         ResolvedWindowMetadata(title: "InPrivate", isActive: true),
+    ])
+}
+
+private func testDistinctAXTitleIsRetainedForSafelyMatchedTitledWindow() {
+    let cgWindows = [
+        OnScreenCGWindow(
+            windowID: 58,
+            ownerPID: 500,
+            layer: 0,
+            bounds: WindowBounds(left: 0, top: 0, width: 200, height: 100),
+            title: "Google"
+        )
+    ]
+    let axWindows = [AXWindowMetadata(windowID: 58, ownerPID: 500, isFocused: true)]
+    var titleReadCount = 0
+
+    let metadata = resolvedWindowMetadata(
+        cgWindows: cgWindows,
+        axWindows: axWindows,
+        readAXTitle: { axIndex in
+            precondition(axIndex == 0)
+            titleReadCount += 1
+            return "Google - Microsoft Edge (InPrivate)"
+        }
+    )
+
+    precondition(titleReadCount == 1)
+    precondition(metadata == [
+        ResolvedWindowMetadata(
+            title: "Google",
+            alternateTitle: "Google - Microsoft Edge (InPrivate)",
+            isActive: true
+        )
     ])
 }
 
@@ -327,14 +364,19 @@ private func testExactFocusedIdentitySuppressesActiveCandidates() {
         AXWindowMetadata(windowID: 71, ownerPID: 500, isFocused: true),
         AXWindowMetadata(windowID: 72, ownerPID: 500),
     ]
+    var titleReadIndices: [Int] = []
 
     let metadata = resolvedWindowMetadata(
         cgWindows: cgWindows,
         axWindows: axWindows,
         frontmostPID: 500,
-        readAXTitle: { _ in preconditionFailure("CG titles are already available") }
+        readAXTitle: { axIndex in
+            titleReadIndices.append(axIndex)
+            return axIndex == 0 ? "one" : "two"
+        }
     )
 
+    precondition(titleReadIndices == [0, 1])
     precondition(metadata == [
         ResolvedWindowMetadata(
             title: "one",
@@ -395,6 +437,18 @@ private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
                 AXWindowMetadata(windowID: 64, ownerPID: 500),
             ]
         ),
+        (
+            [
+                OnScreenCGWindow(
+                    windowID: 66,
+                    ownerPID: 500,
+                    layer: 0,
+                    bounds: bounds,
+                    title: "CG title"
+                )
+            ],
+            [AXWindowMetadata(windowID: 66, ownerPID: 600)]
+        ),
     ]
 
     for (cgWindows, axWindows) in rejectedCases {
@@ -409,7 +463,7 @@ private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
         )
 
         precondition(metadata.count == cgWindows.count)
-        precondition(metadata.allSatisfy { !$0.titleAvailable })
+        precondition(metadata.map(\.titleAvailable) == cgWindows.map { !$0.title.isEmpty })
         precondition(titleReadCount == 0)
     }
 
@@ -449,6 +503,7 @@ enum MacWindowListCoreTests {
         testMissingIdentityOrTitleProducesTypedUnknownMetadata()
         testEmptyAXTitleIsACompletedFallbackRead()
         testResolvedMetadataPreservesCGTitleAndUsesExactAXFallback()
+        testDistinctAXTitleIsRetainedForSafelyMatchedTitledWindow()
         testResolvedMetadataKeepsIncompleteBlankTitleAsActiveCandidate()
         testUnrelatedUnsupportedBlankTitleDoesNotDiscardKnownWindows()
         testExactFocusedIdentitySuppressesActiveCandidates()
