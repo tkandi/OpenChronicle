@@ -1,4 +1,3 @@
-import CoreFoundation
 import Foundation
 
 enum CaptureErrorCode: String, Error, Equatable {
@@ -59,6 +58,19 @@ struct CapturedDisplay: Equatable {
     let pngData: Data
 }
 
+struct PreparedCapture<Resource> {
+    let resource: Resource
+    let source: CaptureDisplaySource
+    let pixelSize: CapturePixelSize
+    let excludedWindowIndices: [Int]
+}
+
+struct CapturedFrame: Equatable {
+    let pixelWidth: Int
+    let pixelHeight: Int
+    let pngData: Data
+}
+
 private let captureCommandKeys: Set<String> = [
     "version", "displays", "protected_window_ids", "overlay_window_ids",
 ]
@@ -70,15 +82,17 @@ func prepareCaptureCommand(
     supportedOS: Bool
 ) -> Result<CaptureCommand, CaptureErrorCode> {
     guard supportedOS else { return .failure(.unsupportedOS) }
+    var parser = StrictJSONParser(data: data)
     guard
-        let object = try? JSONSerialization.jsonObject(with: data),
-        let payload = object as? [String: Any],
+        let root = try? parser.parse(),
+        case let .object(rootMembers) = root,
+        let payload = objectDictionary(rootMembers),
         Set(payload.keys) == captureCommandKeys,
         positiveInt(payload["version"]) == 1,
-        let rawDisplays = payload["displays"] as? [Any],
+        case let .array(rawDisplays)? = payload["displays"],
         !rawDisplays.isEmpty,
-        let rawProtectedWindowIDs = payload["protected_window_ids"] as? [Any],
-        let rawOverlayWindowIDs = payload["overlay_window_ids"] as? [Any]
+        case let .array(rawProtectedWindowIDs)? = payload["protected_window_ids"],
+        case let .array(rawOverlayWindowIDs)? = payload["overlay_window_ids"]
     else {
         return .failure(.invalidCommand)
     }
@@ -87,7 +101,8 @@ func prepareCaptureCommand(
     displays.reserveCapacity(rawDisplays.count)
     for rawDisplay in rawDisplays {
         guard
-            let display = rawDisplay as? [String: Any],
+            case let .object(displayMembers) = rawDisplay,
+            let display = objectDictionary(displayMembers),
             Set(display.keys) == nativeDisplayRequestKeys
                 || Set(display.keys) == sizedDisplayRequestKeys,
             let id = positiveUInt32(display["id"])
@@ -185,6 +200,100 @@ func resolveOutputDimensions(
         return .failure(.contentUnavailable)
     }
     return .success(CapturePixelSize(width: width, height: height))
+}
+
+func prepareCaptureSequence<Resource>(
+    command: CaptureCommand,
+    displays: [CaptureDisplaySource],
+    windows: [CaptureWindowSource],
+    prepareResource: (
+        _ displayIndex: Int,
+        _ excludedWindowIndices: [Int]
+    ) -> Result<(Resource, Double), CaptureErrorCode>
+) -> Result<[PreparedCapture<Resource>], CaptureErrorCode> {
+    let targets: ResolvedCaptureTargets
+    switch resolveCaptureTargets(command: command, displays: displays, windows: windows) {
+    case let .success(resolved):
+        targets = resolved
+    case let .failure(error):
+        return .failure(error)
+    }
+
+    var prepared: [PreparedCapture<Resource>] = []
+    prepared.reserveCapacity(targets.displayIndices.count)
+    for (requestIndex, displayIndex) in targets.displayIndices.enumerated() {
+        let resource: Resource
+        let pointPixelScale: Double
+        switch prepareResource(displayIndex, targets.excludedWindowIndices) {
+        case let .success(value):
+            (resource, pointPixelScale) = value
+        case let .failure(error):
+            return .failure(error)
+        }
+
+        let source = displays[displayIndex]
+        let pixelSize: CapturePixelSize
+        switch resolveOutputDimensions(
+            request: command.displays[requestIndex],
+            pointWidth: source.pointWidth,
+            pointHeight: source.pointHeight,
+            pointPixelScale: pointPixelScale
+        ) {
+        case let .success(size):
+            pixelSize = size
+        case let .failure(error):
+            return .failure(error)
+        }
+
+        prepared.append(PreparedCapture(
+            resource: resource,
+            source: source,
+            pixelSize: pixelSize,
+            excludedWindowIndices: targets.excludedWindowIndices
+        ))
+    }
+    return .success(prepared)
+}
+
+func executePreparedCaptures<Resource>(
+    _ prepared: [PreparedCapture<Resource>],
+    capture: (
+        _ resource: Resource,
+        _ pixelSize: CapturePixelSize
+    ) async -> Result<CapturedFrame, CaptureErrorCode>
+) async -> Result<[CapturedDisplay], CaptureErrorCode> {
+    guard !prepared.isEmpty else { return .failure(.captureFailed) }
+    var displays: [CapturedDisplay] = []
+    displays.reserveCapacity(prepared.count)
+
+    for item in prepared {
+        let frame: CapturedFrame
+        switch await capture(item.resource, item.pixelSize) {
+        case let .success(captured):
+            frame = captured
+        case let .failure(error):
+            return .failure(error)
+        }
+        guard
+            frame.pixelWidth == item.pixelSize.width,
+            frame.pixelHeight == item.pixelSize.height
+        else {
+            return .failure(.captureFailed)
+        }
+        guard !frame.pngData.isEmpty else { return .failure(.encodeFailed) }
+
+        displays.append(CapturedDisplay(
+            id: item.source.id,
+            left: item.source.left,
+            top: item.source.top,
+            pointWidth: item.source.pointWidth,
+            pointHeight: item.source.pointHeight,
+            pixelWidth: frame.pixelWidth,
+            pixelHeight: frame.pixelHeight,
+            pngData: frame.pngData
+        ))
+    }
+    return .success(displays)
 }
 
 func errorResponseLine(_ code: CaptureErrorCode) -> Data {
@@ -299,7 +408,7 @@ private func indicesByID(_ ids: [UInt32]) -> [UInt32: [Int]] {
     return result
 }
 
-private func positiveUInt32Array(_ values: [Any]) -> [UInt32]? {
+private func positiveUInt32Array(_ values: [StrictJSONValue]) -> [UInt32]? {
     var result: [UInt32] = []
     result.reserveCapacity(values.count)
     for value in values {
@@ -309,40 +418,219 @@ private func positiveUInt32Array(_ values: [Any]) -> [UInt32]? {
     return result
 }
 
-private func positiveUInt32(_ value: Any?) -> UInt32? {
-    guard let number = jsonNumber(value), isIntegral(number) else { return nil }
-    guard
-        number.compare(NSNumber(value: 1)) != .orderedAscending,
-        number.compare(NSNumber(value: UInt32.max)) != .orderedDescending
-    else {
-        return nil
+private func positiveUInt32(_ value: StrictJSONValue?) -> UInt32? {
+    guard case let .number(token)? = value, isPlainIntegerToken(token) else { return nil }
+    guard let parsed = UInt32(token), parsed > 0 else { return nil }
+    return parsed
+}
+
+private func positiveInt(_ value: StrictJSONValue?) -> Int? {
+    guard case let .number(token)? = value, isPlainIntegerToken(token) else { return nil }
+    guard let parsed = Int(token), parsed > 0 else { return nil }
+    return parsed
+}
+
+private func isPlainIntegerToken(_ token: String) -> Bool {
+    !token.contains(".") && !token.contains("e") && !token.contains("E")
+}
+
+private func objectDictionary(
+    _ members: [(String, StrictJSONValue)]
+) -> [String: StrictJSONValue]? {
+    var object: [String: StrictJSONValue] = [:]
+    for (key, value) in members {
+        object[key] = value
     }
-    return UInt32(number.uint64Value)
+    return object
 }
 
-private func positiveInt(_ value: Any?) -> Int? {
-    guard let number = jsonNumber(value), isIntegral(number) else { return nil }
-    guard
-        number.compare(NSNumber(value: 1)) != .orderedAscending,
-        number.compare(NSNumber(value: Int.max)) != .orderedDescending
-    else {
-        return nil
+private indirect enum StrictJSONValue {
+    case object([(String, StrictJSONValue)])
+    case array([StrictJSONValue])
+    case string(String)
+    case number(String)
+    case bool(Bool)
+    case null
+}
+
+private enum StrictJSONError: Error {
+    case invalid
+}
+
+private struct StrictJSONParser {
+    private let bytes: [UInt8]
+    private var index = 0
+
+    init(data: Data) {
+        bytes = Array(data)
     }
-    return Int(number.int64Value)
-}
 
-private func jsonNumber(_ value: Any?) -> NSNumber? {
-    guard let number = value as? NSNumber else { return nil }
-    guard CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
-    return number
-}
+    mutating func parse() throws -> StrictJSONValue {
+        skipWhitespace()
+        let value = try parseValue(depth: 0)
+        skipWhitespace()
+        guard index == bytes.count else { throw StrictJSONError.invalid }
+        return value
+    }
 
-private func isIntegral(_ number: NSNumber) -> Bool {
-    var value = number.decimalValue
-    guard !value.isNaN else { return false }
-    var integral = Decimal()
-    NSDecimalRound(&integral, &value, 0, .down)
-    return integral == value
+    private mutating func parseValue(depth: Int) throws -> StrictJSONValue {
+        guard depth <= 16, let byte = currentByte else { throw StrictJSONError.invalid }
+        switch byte {
+        case 0x7b:
+            return try parseObject(depth: depth + 1)
+        case 0x5b:
+            return try parseArray(depth: depth + 1)
+        case 0x22:
+            return .string(try parseString())
+        case 0x74:
+            try consumeLiteral("true")
+            return .bool(true)
+        case 0x66:
+            try consumeLiteral("false")
+            return .bool(false)
+        case 0x6e:
+            try consumeLiteral("null")
+            return .null
+        case 0x2d, 0x30...0x39:
+            return .number(try parseNumber())
+        default:
+            throw StrictJSONError.invalid
+        }
+    }
+
+    private mutating func parseObject(depth: Int) throws -> StrictJSONValue {
+        try consume(0x7b)
+        skipWhitespace()
+        if consumeIfPresent(0x7d) { return .object([]) }
+
+        var members: [(String, StrictJSONValue)] = []
+        var decodedKeys: Set<String> = []
+        while true {
+            guard currentByte == 0x22 else { throw StrictJSONError.invalid }
+            let key = try parseString()
+            guard decodedKeys.insert(key).inserted else { throw StrictJSONError.invalid }
+            skipWhitespace()
+            try consume(0x3a)
+            skipWhitespace()
+            let value = try parseValue(depth: depth)
+            members.append((key, value))
+            skipWhitespace()
+            if consumeIfPresent(0x7d) { return .object(members) }
+            try consume(0x2c)
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseArray(depth: Int) throws -> StrictJSONValue {
+        try consume(0x5b)
+        skipWhitespace()
+        if consumeIfPresent(0x5d) { return .array([]) }
+
+        var values: [StrictJSONValue] = []
+        while true {
+            values.append(try parseValue(depth: depth))
+            skipWhitespace()
+            if consumeIfPresent(0x5d) { return .array(values) }
+            try consume(0x2c)
+            skipWhitespace()
+        }
+    }
+
+    private mutating func parseString() throws -> String {
+        let start = index
+        try consume(0x22)
+        var escaped = false
+        while let byte = currentByte {
+            if byte < 0x20 { throw StrictJSONError.invalid }
+            index += 1
+            if escaped {
+                escaped = false
+                continue
+            }
+            if byte == 0x5c {
+                escaped = true
+                continue
+            }
+            if byte == 0x22 {
+                let token = Data(bytes[start..<index])
+                guard
+                    let decoded = try? JSONSerialization.jsonObject(
+                        with: token,
+                        options: .fragmentsAllowed
+                    ),
+                    let string = decoded as? String
+                else {
+                    throw StrictJSONError.invalid
+                }
+                return string
+            }
+        }
+        throw StrictJSONError.invalid
+    }
+
+    private mutating func parseNumber() throws -> String {
+        let start = index
+        if consumeIfPresent(0x2d), currentByte == nil { throw StrictJSONError.invalid }
+
+        if consumeIfPresent(0x30) {
+            if let byte = currentByte, isDigit(byte) { throw StrictJSONError.invalid }
+        } else {
+            guard let byte = currentByte, byte >= 0x31, byte <= 0x39 else {
+                throw StrictJSONError.invalid
+            }
+            consumeDigits()
+        }
+
+        if consumeIfPresent(0x2e) {
+            guard let byte = currentByte, isDigit(byte) else { throw StrictJSONError.invalid }
+            consumeDigits()
+        }
+        if consumeIfPresent(0x65) || consumeIfPresent(0x45) {
+            _ = consumeIfPresent(0x2b) || consumeIfPresent(0x2d)
+            guard let byte = currentByte, isDigit(byte) else { throw StrictJSONError.invalid }
+            consumeDigits()
+        }
+        return String(decoding: bytes[start..<index], as: UTF8.self)
+    }
+
+    private mutating func consumeLiteral(_ literal: StaticString) throws {
+        let expected = Array(String(describing: literal).utf8)
+        guard index + expected.count <= bytes.count else { throw StrictJSONError.invalid }
+        guard Array(bytes[index..<(index + expected.count)]) == expected else {
+            throw StrictJSONError.invalid
+        }
+        index += expected.count
+    }
+
+    private mutating func consume(_ byte: UInt8) throws {
+        guard consumeIfPresent(byte) else { throw StrictJSONError.invalid }
+    }
+
+    private mutating func consumeIfPresent(_ byte: UInt8) -> Bool {
+        guard currentByte == byte else { return false }
+        index += 1
+        return true
+    }
+
+    private mutating func consumeDigits() {
+        while let byte = currentByte, isDigit(byte) {
+            index += 1
+        }
+    }
+
+    private mutating func skipWhitespace() {
+        while let byte = currentByte, byte == 0x20 || byte == 0x09 || byte == 0x0a || byte == 0x0d {
+            index += 1
+        }
+    }
+
+    private var currentByte: UInt8? {
+        index < bytes.count ? bytes[index] : nil
+    }
+
+    private func isDigit(_ byte: UInt8) -> Bool {
+        byte >= 0x30 && byte <= 0x39
+    }
 }
 
 private struct CaptureSuccessResponse: Encodable {

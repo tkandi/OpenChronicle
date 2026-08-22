@@ -35,42 +35,27 @@ private func captureDisplays(
     }
     let windowSources = content.windows.map { CaptureWindowSource(id: $0.windowID) }
 
-    let targets: ResolvedCaptureTargets
-    switch resolveCaptureTargets(
+    let prepared: [PreparedCapture<SCContentFilter>]
+    switch prepareCaptureSequence(
         command: command,
         displays: displaySources,
-        windows: windowSources
+        windows: windowSources,
+        prepareResource: { displayIndex, excludedWindowIndices in
+            let excludedWindows = excludedWindowIndices.map { content.windows[$0] }
+            let filter = SCContentFilter(
+                display: content.displays[displayIndex],
+                excludingWindows: excludedWindows
+            )
+            return .success((filter, Double(filter.pointPixelScale)))
+        }
     ) {
-    case let .success(resolved):
-        targets = resolved
+    case let .success(sequence):
+        prepared = sequence
     case let .failure(error):
         return .failure(error)
     }
 
-    let excludedWindows = targets.excludedWindowIndices.map { content.windows[$0] }
-    var capturedDisplays: [CapturedDisplay] = []
-    capturedDisplays.reserveCapacity(targets.displayIndices.count)
-
-    for (requestIndex, displayIndex) in targets.displayIndices.enumerated() {
-        let display = content.displays[displayIndex]
-        let source = displaySources[displayIndex]
-
-        // This is the only capture filter in the helper. Reaching it requires
-        // unique resolution of every requested display and excluded window.
-        let filter = SCContentFilter(display: display, excludingWindows: excludedWindows)
-        let pixelSize: CapturePixelSize
-        switch resolveOutputDimensions(
-            request: command.displays[requestIndex],
-            pointWidth: source.pointWidth,
-            pointHeight: source.pointHeight,
-            pointPixelScale: Double(filter.pointPixelScale)
-        ) {
-        case let .success(size):
-            pixelSize = size
-        case let .failure(error):
-            return .failure(error)
-        }
-
+    return await executePreparedCaptures(prepared) { filter, pixelSize in
         let configuration = SCStreamConfiguration()
         configuration.width = pixelSize.width
         configuration.height = pixelSize.height
@@ -91,19 +76,12 @@ private func captureDisplays(
         }
         guard let pngData = encodePNG(image) else { return .failure(.encodeFailed) }
 
-        capturedDisplays.append(CapturedDisplay(
-            id: source.id,
-            left: source.left,
-            top: source.top,
-            pointWidth: source.pointWidth,
-            pointHeight: source.pointHeight,
+        return .success(CapturedFrame(
             pixelWidth: image.width,
             pixelHeight: image.height,
             pngData: pngData
         ))
     }
-
-    return .success(capturedDisplays)
 }
 
 @available(macOS 14.0, *)

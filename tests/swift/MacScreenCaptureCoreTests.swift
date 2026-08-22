@@ -73,6 +73,17 @@ private func testExactCommandDecodes() {
         supportedOS: true
     ))
     precondition(native.displays == [CaptureDisplayRequest(id: 123, width: nil, height: nil)])
+
+    let escapedKeys = requireSuccess(prepareCaptureCommand(
+        Data(#"{"\u0076ersion":1,"\u0064isplays":[{"\u0069d":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#.utf8),
+        supportedOS: true
+    ))
+    precondition(escapedKeys == CaptureCommand(
+        version: 1,
+        displays: [CaptureDisplayRequest(id: 123, width: nil, height: nil)],
+        protectedWindowIDs: [456],
+        overlayWindowIDs: []
+    ))
 }
 
 private func testUnsupportedOSPrecedesCommandParsing() {
@@ -146,6 +157,63 @@ private func testDimensionsMustBePairedPositiveIntegersWithinIntRange() {
     ))
     precondition(minimum.displays[0].width == 1)
     precondition(minimum.displays[0].height == 1)
+}
+
+private func testNumericFieldsRequirePlainIntegerTokens() {
+    let overPrecisionFraction = "1.0000000000000000000000000000000000000001"
+    let invalidCommands = [
+        #"{"version":\#(overPrecisionFraction),"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1e0,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":\#(overPrecisionFraction)}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123e0}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[\#(overPrecisionFraction)],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[456e0],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[\#(overPrecisionFraction)]}"#,
+        #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[789e0]}"#,
+        #"{"version":1,"displays":[{"id":123,"width":\#(overPrecisionFraction),"height":1}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123,"width":1e3,"height":1080}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+    ]
+
+    for raw in invalidCommands {
+        expectFailure(prepareCaptureCommand(Data(raw.utf8), supportedOS: true), .invalidCommand)
+    }
+}
+
+private func testPlainIntegerTokenBoundaries() {
+    let command = requireSuccess(prepareCaptureCommand(
+        Data(#"{"version":1,"displays":[{"id":4294967295,"width":9223372036854775807,"height":1}],"protected_window_ids":[4294967295],"overlay_window_ids":[]}"#.utf8),
+        supportedOS: true
+    ))
+    precondition(command.displays == [CaptureDisplayRequest(
+        id: UInt32.max,
+        width: Int.max,
+        height: 1
+    )])
+    precondition(command.protectedWindowIDs == [UInt32.max])
+
+    let invalidCommands = [
+        #"{"version":1,"displays":[{"id":4294967296}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[4294967296],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123,"width":9223372036854775808,"height":1}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+    ]
+    for raw in invalidCommands {
+        expectFailure(prepareCaptureCommand(Data(raw.utf8), supportedOS: true), .invalidCommand)
+    }
+}
+
+private func testDuplicateObjectMembersAreInvalidAfterKeyDecoding() {
+    let invalidCommands = [
+        #"{"version":1,"version":1,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"\u0076ersion":1,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123}],"protected_window_ids":[456],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123,"id":124}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123,"\u0069d":124}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123,"width":1920,"height":1080,"\u0077idth":1920}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+    ]
+
+    for raw in invalidCommands {
+        expectFailure(prepareCaptureCommand(Data(raw.utf8), supportedOS: true), .invalidCommand)
+    }
 }
 
 private func testResolverReturnsOnlyUniqueExactTargets() {
@@ -300,6 +368,172 @@ private func testOutputDimensionBoundariesFailClosed() {
     }
 }
 
+private struct FakeCaptureResource: Equatable {
+    let displayIndex: Int
+}
+
+private func testCaptureSequencePreparesAllTargetsBeforeProducingPNGs() async {
+    let command = validCommand(
+        displays: [
+            CaptureDisplayRequest(id: 123, width: nil, height: nil),
+            CaptureDisplayRequest(id: 124, width: 800, height: 600),
+        ],
+        protectedWindowIDs: [456, 457],
+        overlayWindowIDs: [789]
+    )
+    let displays = [sourceDisplay(id: 124), sourceDisplay(id: 123)]
+    let windows = [
+        CaptureWindowSource(id: 789),
+        CaptureWindowSource(id: 999),
+        CaptureWindowSource(id: 456),
+        CaptureWindowSource(id: 457),
+    ]
+    var preparationCalls: [(Int, [Int])] = []
+
+    let prepared = requireSuccess(prepareCaptureSequence(
+        command: command,
+        displays: displays,
+        windows: windows,
+        prepareResource: { displayIndex, excludedWindowIndices in
+            preparationCalls.append((displayIndex, excludedWindowIndices))
+            let scale = displayIndex == 1 ? 2.0 : 1.5
+            return .success((FakeCaptureResource(displayIndex: displayIndex), scale))
+        }
+    ))
+
+    precondition(preparationCalls.count == 2)
+    precondition(preparationCalls[0].0 == 1)
+    precondition(preparationCalls[0].1 == [2, 3, 0])
+    precondition(preparationCalls[1].0 == 0)
+    precondition(preparationCalls[1].1 == [2, 3, 0])
+    precondition(prepared.map(\.pixelSize) == [
+        CapturePixelSize(width: 2880, height: 1800),
+        CapturePixelSize(width: 800, height: 600),
+    ])
+
+    var captureCalls: [(FakeCaptureResource, CapturePixelSize)] = []
+    let captured = requireSuccess(await executePreparedCaptures(
+        prepared,
+        capture: { resource, pixelSize in
+            captureCalls.append((resource, pixelSize))
+            return .success(CapturedFrame(
+                pixelWidth: pixelSize.width,
+                pixelHeight: pixelSize.height,
+                pngData: Data([0x89, UInt8(resource.displayIndex)])
+            ))
+        }
+    ))
+
+    precondition(captureCalls.count == 2)
+    precondition(captureCalls[0].0 == FakeCaptureResource(displayIndex: 1))
+    precondition(captureCalls[0].1 == CapturePixelSize(width: 2880, height: 1800))
+    precondition(captureCalls[1].0 == FakeCaptureResource(displayIndex: 0))
+    precondition(captureCalls[1].1 == CapturePixelSize(width: 800, height: 600))
+    precondition(captured.map(\.id) == [123, 124])
+    precondition(captured.map(\.pixelWidth) == [2880, 800])
+    precondition(captured.map(\.pngData) == [Data([0x89, 1]), Data([0x89, 0])])
+}
+
+private func testCaptureSequencePreparationFailuresPreventCapture() async {
+    var prepareCallCount = 0
+    let missingWindow = prepareCaptureSequence(
+        command: validCommand(),
+        displays: [sourceDisplay()],
+        windows: [],
+        prepareResource: { _, _ -> Result<(FakeCaptureResource, Double), CaptureErrorCode> in
+            prepareCallCount += 1
+            return .success((FakeCaptureResource(displayIndex: 0), 2))
+        }
+    )
+    expectFailure(missingWindow, .windowNotFound)
+    precondition(prepareCallCount == 0)
+
+    let twoDisplays = validCommand(displays: [
+        CaptureDisplayRequest(id: 123, width: nil, height: nil),
+        CaptureDisplayRequest(id: 124, width: nil, height: nil),
+    ])
+    prepareCallCount = 0
+    let resourceFailure = prepareCaptureSequence(
+        command: twoDisplays,
+        displays: [sourceDisplay(id: 123), sourceDisplay(id: 124)],
+        windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 789)],
+        prepareResource: { displayIndex, _ -> Result<
+            (FakeCaptureResource, Double), CaptureErrorCode
+        > in
+            prepareCallCount += 1
+            if displayIndex == 1 { return .failure(.contentUnavailable) }
+            return .success((FakeCaptureResource(displayIndex: displayIndex), 2))
+        }
+    )
+    expectFailure(resourceFailure, .contentUnavailable)
+    precondition(prepareCallCount == 2)
+
+    prepareCallCount = 0
+    let dimensionFailure = prepareCaptureSequence(
+        command: twoDisplays,
+        displays: [sourceDisplay(id: 123), sourceDisplay(id: 124)],
+        windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 789)],
+        prepareResource: { displayIndex, _ in
+            prepareCallCount += 1
+            return .success((FakeCaptureResource(displayIndex: displayIndex), displayIndex == 0 ? 2 : 0))
+        }
+    )
+    expectFailure(dimensionFailure, .contentUnavailable)
+    precondition(prepareCallCount == 2)
+}
+
+private func testCaptureSequenceMidstreamFailuresReturnNoPartialDisplays() async {
+    let command = validCommand(displays: [
+        CaptureDisplayRequest(id: 123, width: 100, height: 100),
+        CaptureDisplayRequest(id: 124, width: 100, height: 100),
+        CaptureDisplayRequest(id: 125, width: 100, height: 100),
+    ])
+    let prepared = requireSuccess(prepareCaptureSequence(
+        command: command,
+        displays: [sourceDisplay(id: 123), sourceDisplay(id: 124), sourceDisplay(id: 125)],
+        windows: [CaptureWindowSource(id: 456), CaptureWindowSource(id: 789)],
+        prepareResource: { displayIndex, _ in
+            .success((FakeCaptureResource(displayIndex: displayIndex), 2))
+        }
+    ))
+
+    var captureCallCount = 0
+    let captureFailure = await executePreparedCaptures(
+        prepared,
+        capture: { _, pixelSize in
+            captureCallCount += 1
+            if captureCallCount == 2 { return .failure(.captureFailed) }
+            return .success(CapturedFrame(
+                pixelWidth: pixelSize.width,
+                pixelHeight: pixelSize.height,
+                pngData: Data([1])
+            ))
+        }
+    )
+    expectFailure(captureFailure, .captureFailed)
+    precondition(captureCallCount == 2)
+
+    let wrongSize = await executePreparedCaptures(
+        prepared,
+        capture: { _, _ in
+            .success(CapturedFrame(pixelWidth: 99, pixelHeight: 100, pngData: Data([1])))
+        }
+    )
+    expectFailure(wrongSize, .captureFailed)
+
+    let emptyPNG = await executePreparedCaptures(
+        prepared,
+        capture: { _, pixelSize in
+            .success(CapturedFrame(
+                pixelWidth: pixelSize.width,
+                pixelHeight: pixelSize.height,
+                pngData: Data()
+            ))
+        }
+    )
+    expectFailure(emptyPNG, .encodeFailed)
+}
+
 private func testFixedErrorPayloadsAreExactSingleLines() {
     let expected: [(CaptureErrorCode, String)] = [
         (.unsupportedOS, "unsupported_os"),
@@ -452,16 +686,35 @@ private func testHelperInvalidInputIsOneShotAndSilent(_ helper: String) throws {
     ))
     precondition(fractional.error.isEmpty)
     precondition(!String(decoding: fractional.output, as: UTF8.self).contains(fractionalID))
+
+    let strictInvalidInputs = [
+        #"{"version":1e0,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1.0000000000000000000000000000000000000001,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"\u0076ersion":1,"displays":[{"id":123}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+        #"{"version":1,"displays":[{"id":123,"\u0069d":124}],"protected_window_ids":[456],"overlay_window_ids":[]}"#,
+    ]
+    for input in strictInvalidInputs {
+        let result = try runHelper(helper, input: input + "\n")
+        precondition(result.status == 0)
+        precondition(String(decoding: result.output, as: UTF8.self) == (
+            #"{"version":1,"status":"error","error":"invalid_command"}"# + "\n"
+        ))
+        precondition(result.error.isEmpty)
+        precondition(!String(decoding: result.output, as: UTF8.self).contains("0000000001"))
+    }
 }
 
 @main
 enum MacScreenCaptureCoreTests {
-    static func main() throws {
+    static func main() async throws {
         testExactCommandDecodes()
         testUnsupportedOSPrecedesCommandParsing()
         testMalformedAndNonExactCommandsAreInvalid()
         testIDsMustBePositiveUniqueUInt32Values()
         testDimensionsMustBePairedPositiveIntegersWithinIntRange()
+        testNumericFieldsRequirePlainIntegerTokens()
+        testPlainIntegerTokenBoundaries()
+        testDuplicateObjectMembersAreInvalidAfterKeyDecoding()
         testResolverReturnsOnlyUniqueExactTargets()
         testResolverRejectsMissingAndAmbiguousDisplays()
         testResolverRejectsMissingAndAmbiguousExcludedWindows()
@@ -469,6 +722,9 @@ enum MacScreenCaptureCoreTests {
         testResolverRejectsUnrepresentableDisplayGeometry()
         testOutputDimensionsUseExplicitOrNativePixels()
         testOutputDimensionBoundariesFailClosed()
+        await testCaptureSequencePreparesAllTargetsBeforeProducingPNGs()
+        await testCaptureSequencePreparationFailuresPreventCapture()
+        await testCaptureSequenceMidstreamFailuresReturnNoPartialDisplays()
         testFixedErrorPayloadsAreExactSingleLines()
         try testSuccessPayloadHasOnlyBoundedPublicFields()
         testInvalidSuccessBoundsReturnEncodeFailed()
