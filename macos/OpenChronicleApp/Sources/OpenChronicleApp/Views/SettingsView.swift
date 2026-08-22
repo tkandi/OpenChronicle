@@ -8,6 +8,28 @@ enum SettingsPage: Hashable {
   case advanced
 }
 
+enum ScreenshotPrivacyModeOption: String, CaseIterable, Identifiable {
+  case off
+  case skipMonitor = "skip-monitor"
+  case maskWindow = "mask-window"
+  case excludeWindow = "exclude-window"
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .off:
+      "Off"
+    case .skipMonitor:
+      "Skip matching monitors"
+    case .maskWindow:
+      "Mask matching windows"
+    case .excludeWindow:
+      "Exclude matching windows"
+    }
+  }
+}
+
 struct PrivacyReasonPickerAvailability: Equatable {
   let isDisplayEnabled = true
   let isDetailEnabled = true
@@ -161,8 +183,9 @@ struct SettingsView: View {
               "Privacy mode",
               selection: binding(\.screenshotPrivacyMode, fallback: "skip-monitor")
             ) {
-              Text("Skip matching monitors").tag("skip-monitor")
-              Text("Off").tag("off")
+              ForEach(ScreenshotPrivacyModeOption.allCases) { option in
+                Text(option.title).tag(option.rawValue)
+              }
             }
             Toggle(
               "Fail closed when visible windows cannot be checked",

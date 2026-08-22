@@ -207,8 +207,14 @@ def validate_mapping(raw: dict[str, Any]) -> None:
         str,
         "capture.screenshot_privacy_mode",
     )
-    if privacy_mode is not None and privacy_mode.lower() not in {"off", "skip-monitor"}:
-        raise ConfigEditorError("capture.screenshot_privacy_mode must be off or skip-monitor")
+    if (
+        privacy_mode is not None
+        and privacy_mode.lower() not in config_mod.SCREENSHOT_PRIVACY_MODES
+    ):
+        raise ConfigEditorError(
+            "capture.screenshot_privacy_mode must be off, skip-monitor, mask-window, "
+            "or exclude-window"
+        )
     indicator_style = _require_type(
         capture,
         "privacy_indicator_style",

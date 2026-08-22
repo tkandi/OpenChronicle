@@ -125,6 +125,33 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(updates["capture.privacy_reason_trigger"] as? String, "click")
   }
 
+  func testScreenshotPrivacyWindowModesAreAcceptedFromSnapshots() throws {
+    let payload = snapshotPayload(path: "/tmp/config.toml")
+
+    for mode in ["mask-window", "exclude-window"] {
+      let variant = payload.replacingOccurrences(
+        of: "\"screenshot_privacy_mode\": \"skip-monitor\"",
+        with: "\"screenshot_privacy_mode\": \"\(mode)\""
+      )
+      let snapshot = try JSONDecoder().decode(
+        ConfigurationSnapshot.self,
+        from: Data(variant.utf8)
+      )
+
+      XCTAssertEqual(
+        try XCTUnwrap(ConfigurationDraft(snapshot: snapshot)).screenshotPrivacyMode,
+        mode
+      )
+    }
+  }
+
+  func testScreenshotPrivacyModePickerOffersAllSupportedModes() {
+    XCTAssertEqual(
+      Set(ScreenshotPrivacyModeOption.allCases.map(\.rawValue)),
+      Set(["off", "skip-monitor", "mask-window", "exclude-window"])
+    )
+  }
+
   func testPrivacyIndicatorStyleDefaultsForMissingAndUnknownSnapshotValues() throws {
     let payload = snapshotPayload(path: "/tmp/config.toml")
     let missing = payload.replacingOccurrences(

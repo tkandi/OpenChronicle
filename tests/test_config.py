@@ -88,6 +88,16 @@ screenshot_privacy_fail_closed = false
     assert cfg.capture.screenshot_privacy_mode == "off"
     assert cfg.capture.screenshot_privacy_fail_closed is False
 
+    for value in ("MASK-WINDOW", "EXCLUDE-WINDOW"):
+        path.write_text(
+            f'''
+[capture]
+screenshot_privacy_mode = "{value}"
+'''
+        )
+        cfg = config.load(path)
+        assert cfg.capture.screenshot_privacy_mode == value.lower()
+
     path.write_text(
         """
 [capture]

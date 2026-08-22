@@ -69,6 +69,34 @@ def test_config_indicator_style_is_editable_and_validated(ac_root: Path) -> None
     assert "privacy_indicator_style" in payload["error"]
 
 
+def test_screenshot_privacy_window_modes_patch_validate_and_snapshot(ac_root: Path) -> None:
+    path = ac_root / "config.toml"
+    path.write_text('[capture]\nscreenshot_privacy_mode = "mask-window"\n')
+    runner = CliRunner()
+    _, snapshot = _invoke_json(runner, ["config", "--json"])
+    assert snapshot["values"]["capture"]["screenshot_privacy_mode"] == "mask-window"
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--patch-json"],
+        {
+            "expected_sha256": snapshot["sha256"],
+            "updates": {"capture.screenshot_privacy_mode": "exclude-window"},
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert payload["changed"] is True
+    assert tomllib.loads(path.read_text())["capture"]["screenshot_privacy_mode"] == "exclude-window"
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--validate-json"],
+        {"content": '[capture]\nscreenshot_privacy_mode = "invalid"\n'},
+    )
+    assert result.exit_code == 2
+    assert "screenshot_privacy_mode" in payload["error"]
+
+
 def test_privacy_reason_settings_patch_and_validate(ac_root: Path) -> None:
     path = ac_root / "config.toml"
     path.write_text("[capture]\nprivacy_reason_display = \"hybrid\"\n")

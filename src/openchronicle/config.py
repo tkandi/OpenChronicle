@@ -16,6 +16,9 @@ PRIVACY_INDICATOR_STYLES = frozenset(
 PRIVACY_REASON_DISPLAY_MODES = frozenset({"overlay", "diagnostics", "hybrid"})
 PRIVACY_REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
 PRIVACY_REASON_TRIGGERS = frozenset({"always", "hover", "click"})
+SCREENSHOT_PRIVACY_MODES = frozenset(
+    {"off", "skip-monitor", "mask-window", "exclude-window"}
+)
 
 
 def _str_list(value: Any) -> list[str]:
@@ -65,7 +68,7 @@ class CaptureConfig:
     buffer_max_mb: int = 2000
     include_screenshot: bool = True
     screenshot_monitor: str = "primary"  # "primary" | "all" | "separate"
-    screenshot_privacy_mode: str = "skip-monitor"  # "off" | "skip-monitor"
+    screenshot_privacy_mode: str = "skip-monitor"  # see SCREENSHOT_PRIVACY_MODES
     screenshot_privacy_fail_closed: bool = True
     screenshot_max_width: int = 1920
     screenshot_jpeg_quality: int = 80
@@ -102,7 +105,9 @@ class CaptureConfig:
         self.screenshot_monitor = mode if mode in {"primary", "all", "separate"} else "primary"
         privacy_mode = str(self.screenshot_privacy_mode or "skip-monitor").strip().lower()
         self.screenshot_privacy_mode = (
-            privacy_mode if privacy_mode in {"off", "skip-monitor"} else "skip-monitor"
+            privacy_mode
+            if privacy_mode in SCREENSHOT_PRIVACY_MODES
+            else "skip-monitor"
         )
         self.deny_app_names = _str_list(self.deny_app_names)
         self.deny_bundle_ids = _str_list(self.deny_bundle_ids)
@@ -305,7 +310,7 @@ screenshot_retention_hours = 24        # after 24h, strip screenshot payloads bu
 buffer_max_mb = 2000                   # hard ceiling; oldest absorbed files evicted first (0 to disable)
 include_screenshot = true
 screenshot_monitor = "primary"          # "primary" (legacy single monitor), "all" (one virtual desktop image), or "separate" (screenshots[] per monitor)
-screenshot_privacy_mode = "skip-monitor" # skip monitors containing any visible app/bundle/title denylist match
+screenshot_privacy_mode = "skip-monitor" # off, skip-monitor, mask-window, or exclude-window
 screenshot_privacy_fail_closed = true    # if window/display inventory fails, abort the capture tick
 privacy_indicator_style = "pill"       # off, border, shield, pill, quiet-shield, or banner
 privacy_reason_display = "hybrid"      # overlay, diagnostics, or hybrid
