@@ -46,8 +46,9 @@ that `SCScreenshotManager` captures a single image using that filter:
 windows. Its JSON record adds the optional positive `window_id`. Python `VisibleWindow` carries this
 ID, and `ProtectionSnapshot` carries protected window IDs alongside protected display regions.
 
-Only rule-matched visible windows contribute IDs. IDs are not written to capture JSON, FTS, logs,
-timeline, memory, model input, or MCP responses.
+Only rule-matched visible windows contribute IDs and mask regions. The snapshot keeps both values
+in memory for the immediate screenshot decision. IDs and mask regions are not written to capture
+JSON, FTS, logs, timeline, memory, model input, or MCP responses.
 
 Window-filtered capture is authorized only when every protected region comes from one or more valid,
 uniquely mapped protected window IDs. Diagnostics display leases, pause states, inventory failures,
@@ -105,4 +106,3 @@ error and Python safely falls back to `skip-monitor`.
 - Full Python, Swift, Ruff, arm64/x86_64 helper, wheel isolation, and signed App verification.
 - Live tests for all three protected modes using only a blank Edge InPrivate window and a synthetic
   title marker. Restore `skip-monitor` after acceptance.
-

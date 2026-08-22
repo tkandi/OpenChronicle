@@ -58,11 +58,12 @@ Swift standalone harnesses.
 - Produces: JSON `window_id: UInt32?`
 - Produces: `VisibleWindow.window_id: int | None`
 - Produces: `ProtectionSnapshot.protected_window_ids: frozenset[int]`
+- Produces: `ProtectionSnapshot.protected_window_regions: tuple[ScreenRegion, ...]`
 - Produces: a boolean/invariant proving all protected regions are window-filterable
 
 - [ ] Write RED tests for valid IDs, missing/duplicate IDs, matched window ID collection, and
   diagnostics/pause/failure exclusion from window filtering.
-- [ ] Implement positive-ID parsing and protected ID aggregation without persistence.
+- [ ] Implement positive-ID parsing plus protected ID/region aggregation without persistence.
 - [ ] Run Swift/Python GREEN tests and marker boundary tests.
 - [ ] Commit the task.
 
