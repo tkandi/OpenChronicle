@@ -153,8 +153,10 @@ frontmost PID's focused AX window cannot be matched exactly, every on-screen lay
 that PID is emitted as an active candidate. AX is blocked only when a candidate display
 intersects a protected display; uncertainty on a separate display does not become a global AX
 failure. Helper exit, malformed output, and invalid or absent display inventory remain
-fixed-code `failed` states. These certainty flags and detected metadata remain local and are
-never sent to the overlay IPC.
+fixed-code `failed` states. These certainty flags and detected metadata remain inside the local
+privacy subsystem. Under the later reason-diagnostics design, a user-approved `exact` overlay
+may receive bounded app, bundle, title, or rule fields only for a display already protected by
+the same snapshot. Category/tiered commands and unprotected displays receive no exact fields.
 
 ### Native overlay helper
 
@@ -170,8 +172,10 @@ It runs as an accessory AppKit process without a Dock icon. One borderless, non-
 - rendered above ordinary application windows.
 
 Python sends newline-delimited JSON commands over stdin. The helper acknowledges a generation
-on stdout only after the corresponding panels have been updated on the main thread. A command
-contains no sensitive title or app text, only state, style, generation, and display geometry.
+on stdout only after the corresponding panels have been updated on the main thread. Commands
+normally contain only state, style, generation, display geometry, and fixed reason codes. With
+user-approved `exact` detail they may additionally contain bounded exact reason fields, but only
+inside the payload for a display already excluded by that same generation.
 
 Example command:
 
@@ -293,4 +297,6 @@ config editor and normalized to `pill` by the regular config loader as a final f
 
 Logs may contain generation numbers, state names, style names, display identifiers, and helper
 errors. They must not contain denied window titles, application names, bundle identifiers, or
-screen contents. Overlay commands likewise contain no denylist values or detected window text.
+screen contents. Bounded exact values may cross only the local overlay IPC for already protected
+displays; they must not be logged, persisted, included in acknowledgements, or sent to any
+unprotected display.

@@ -1,17 +1,30 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from pathlib import Path
 
 import pytest
 
 from openchronicle import daemon as daemon_mod
 from openchronicle.capture import window_meta
-from openchronicle.capture.privacy import ProtectionFailureReason
+from openchronicle.capture.privacy import (
+    DisplayInfo,
+    ProtectionFailureReason,
+    ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
+)
+from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
 from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsGuardSnapshot
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
-from openchronicle.capture.protection_monitor import ProtectionDecision
-from openchronicle.config import Config
+from openchronicle.capture.protection_monitor import (
+    PrivacyProtectionMonitor,
+    ProtectionDecision,
+)
+from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.config import CaptureConfig, Config
 
 
 class FakeMonitor:
@@ -107,6 +120,20 @@ class FakeSessionManager:
         self.force_end_calls.append(reason)
 
 
+class RejectingOverlay:
+    def render(self, _snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+        return False
+
+    def clear(self, _generation: int, timeout: float = 0.5) -> bool:
+        return False
+
+    def mark_terminal(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def _configure_daemon(monkeypatch, monitor: FakeMonitor, session: FakeSessionManager) -> Config:
     async def park_forever(*_args, **_kwargs) -> None:
         await asyncio.Event().wait()
@@ -125,6 +152,60 @@ def _configure_daemon(monkeypatch, monitor: FakeMonitor, session: FakeSessionMan
     cfg = Config()
     cfg.mcp.auto_start = False
     return cfg
+
+
+def test_unconfirmed_indicator_publishes_fixed_diagnostic_without_exact_values(
+    ac_root: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "private-indicator-reason-marker"
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+            VisibleWindow("Edge", "edge", marker, ScreenRegion(110, 0, 80, 90)),
+        ),
+        displays=displays,
+    )
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="pill",
+            deny_window_title_patterns=[marker],
+        ),
+        config_path=ac_root / "missing.toml",
+        overlay=RejectingOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
+        decision = monitor.decision_for_capture(force=True)
+
+    category = PrivacyDiagnosticsServer._snapshot_payload(
+        decision,
+        detail="category",
+        created_at="2026-08-22T12:00:00.000000Z",
+    )
+    exact = PrivacyDiagnosticsServer._snapshot_payload(
+        decision,
+        detail="exact",
+        created_at="2026-08-22T12:00:00.000000Z",
+    )
+
+    assert decision.indicator_confirmed is False
+    assert category["reasons"] == [
+        {
+            "code": ProtectionReasonCode.INDICATOR_UNCONFIRMED.value,
+            "display_id": None,
+        }
+    ]
+    assert marker not in json.dumps(category, ensure_ascii=False)
+    assert marker in json.dumps(exact, ensure_ascii=False)
+    assert marker not in caplog.text
 
 
 @pytest.mark.asyncio

@@ -21,10 +21,16 @@ from openchronicle.capture.privacy import (
     InventoryReadResult,
     ProtectionFailureReason,
     ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
 )
 from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
 from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsLeaseManager
-from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
+from openchronicle.capture.protection import (
+    ProtectionSnapshot,
+    ProtectionState,
+    build_protection_snapshot,
+)
 from openchronicle.capture.protection_monitor import (
     PrivacyProtectionMonitor,
     ProtectionDecision,
@@ -562,6 +568,69 @@ def test_wrong_peer_pid_and_lease_cannot_release_guard(tmp_path: Path) -> None:
         _stop_test_server(server)
 
 
+def test_stale_release_cannot_clear_a_newer_lease(tmp_path: Path) -> None:
+    callbacks = FakeProtectionCallbacks()
+    server = _start_test_server(tmp_path, callbacks=callbacks)
+    guard_path = server.socket_path.parent / "privacy-reveal.guard"
+    try:
+        with _connect(server.socket_path) as client:
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "acquire_exact",
+                    "pid": os.getpid(),
+                    "display_id": 1,
+                },
+            )
+            first = _read_message(client)
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "release_exact",
+                    "pid": os.getpid(),
+                    "lease_id": first["lease_id"],
+                },
+            )
+            assert _read_message(client)["released"] is True
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "acquire_exact",
+                    "pid": os.getpid(),
+                    "display_id": 2,
+                },
+            )
+            second = _read_message(client)
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "release_exact",
+                    "pid": os.getpid(),
+                    "lease_id": first["lease_id"],
+                },
+            )
+            rejected = _read_message(client)
+
+        assert second["lease_id"] != first["lease_id"]
+        assert rejected == {
+            "schema_version": 1,
+            "type": "error",
+            "code": "invalid_lease",
+        }
+        assert json.loads(guard_path.read_text()) == {
+            "schema_version": 1,
+            "lease_id": second["lease_id"],
+            "pid": os.getpid(),
+            "display_ids": [2],
+        }
+    finally:
+        _stop_test_server(server)
+
+
 @pytest.mark.parametrize(
     ("pid", "display_id"),
     [
@@ -630,7 +699,33 @@ def test_move_protects_both_displays_until_destination_is_confirmed(
     )
     server = _start_test_server(tmp_path, callbacks=callbacks, manager=manager)
     observed: list[frozenset[int]] = []
-    callbacks.wait_observer = lambda _display_id: observed.append(manager.snapshot().display_ids)
+    persisted: list[list[int]] = []
+    protected: list[frozenset[int]] = []
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(
+        windows=(VisibleWindow("Cursor", "cursor", "main.py", displays[0].region, True),),
+        displays=displays,
+    )
+
+    def observe_guard(_display_id: int) -> None:
+        guard = manager.snapshot()
+        observed.append(guard.display_ids)
+        persisted.append(json.loads((runtime_dir / "privacy-reveal.guard").read_text())["display_ids"])
+        protected.append(
+            build_protection_snapshot(
+                CaptureConfig(screenshot_monitor="separate"),
+                inventory,
+                paused=False,
+                generation=len(protected) + 1,
+                now=time.monotonic(),
+                diagnostic_display_ids=guard.display_ids,
+            ).protected_display_ids
+        )
+
+    callbacks.wait_observer = observe_guard
     try:
         with _connect(server.socket_path) as client:
             _send_message(
@@ -656,6 +751,8 @@ def test_move_protects_both_displays_until_destination_is_confirmed(
             moved = _read_message(client)
 
         assert observed == [frozenset({1}), frozenset({1, 2})]
+        assert persisted == [[1], [1, 2]]
+        assert protected == [frozenset({1}), frozenset({1, 2})]
         assert manager.snapshot().display_ids == frozenset({2})
         assert callbacks.refresh_requests == 3
         assert moved["lease_id"] == acquired["lease_id"]

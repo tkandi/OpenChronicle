@@ -173,6 +173,39 @@ the field remain intact, while comments embedded inside the changed array are
 replaced along with the array. Unchanged denylist fields retain their original
 formatting.
 
+## Protection Diagnostics
+
+The **Diagnostics** sidebar item opens **Protection Diagnostics**. It shows one
+row per display with protection state, screenshot and AX blocking, primary
+reason, additional-reason count, generation age, and indicator confirmation.
+Selecting a display shows its bounded reason list.
+
+The Capture page controls where reasons appear (`overlay`, `diagnostics`, or
+`hybrid`), their detail (`category`, `exact`, or `tiered`), and overlay reveal
+(`always`, `hover`, or `click`). Defaults are `hybrid`, `exact`, and `hover`.
+Exact mode automatically requests a protected-display lease when the page is
+visible. Tiered mode starts with categories and exposes **Show Exact Values** /
+**Hide Exact Values** explicitly. Category mode never requests exact fields.
+
+Exact fields remain concealed until the diagnostics window's display is
+protected by a newer confirmed generation. Moving the window first conceals
+exact text, protects both old and new displays, confirms the destination, and
+only then releases the old display and reveals again. Leaving the page or
+choosing hide releases normally. A stale release cannot clear a newer lease.
+
+`hover` observes pointer movement without making the overlay consume mouse
+events, so hover and clicks continue to reach the underlying application.
+`click` enables only the small reason hit target; the rest of the overlay stays
+click-through. Overlay panels remain non-activating and never take keyboard
+focus. With indicator style `off` or reason location `diagnostics`, the saved
+reveal trigger has no overlay effect.
+
+On diagnostics socket or overlay disconnection, the app synchronously discards
+exact-bearing snapshots and publishes only category-safe data while reconnecting.
+The daemon retains the non-sensitive guard and its screenshot/AX protection
+until a valid release or confirmed process death. The diagnostics service is an
+owner-only local Unix socket and is not an MCP or network diagnostics surface.
+
 ## Privacy protection indicators
 
 The Capture settings page can select `off`, `border`, `shield`, `pill`,

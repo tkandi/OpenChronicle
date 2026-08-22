@@ -31,7 +31,11 @@ from .protection import (
     build_protection_snapshot,
     failure_requires_fail_closed,
 )
-from .protection_reason import ProtectionReason
+from .protection_reason import (
+    DisplayProtectionReasons,
+    ProtectionReason,
+    ProtectionReasonCode,
+)
 
 logger = get("openchronicle.capture")
 _MONITOR_JOIN_TIMEOUT = 0.25
@@ -220,6 +224,22 @@ class PrivacyProtectionMonitor:
             self._raise_if_stopped()
             rendered = self._render(snapshot)
             indicator_confirmed = rendered or snapshot.indicator_style == "off"
+            if not indicator_confirmed and not (
+                snapshot.state is ProtectionState.FAILED
+                and not failure_requires_fail_closed(self._cfg, snapshot)
+            ):
+                snapshot = replace(
+                    snapshot,
+                    display_reasons=DisplayProtectionReasons.from_reasons(
+                        snapshot.display_reasons.reasons
+                        + (
+                            ProtectionReason(
+                                ProtectionReasonCode.INDICATOR_UNCONFIRMED,
+                                display_id=None,
+                            ),
+                        )
+                    ),
+                )
             self._raise_if_stopped()
             decision = ProtectionDecision(
                 snapshot,

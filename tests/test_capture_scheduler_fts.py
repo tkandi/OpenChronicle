@@ -28,6 +28,7 @@ from openchronicle.capture.protection_monitor import (
     PrivacyProtectionMonitor,
     ProtectionDecision,
 )
+from openchronicle.capture.protection_reason import ProtectionReasonCode
 from openchronicle.config import CaptureConfig
 from openchronicle.store import fts
 
@@ -553,9 +554,11 @@ def test_diagnostics_guard_uses_monitor_gate_without_leaking_exact_reason(
     assert marker not in json.dumps(out)
 
 
+@pytest.mark.parametrize("lease_display_id", [1, 2])
 def test_diagnostics_guard_in_all_mode_skips_virtual_desktop_screenshot(
     ac_root: Path,
     monkeypatch,
+    lease_display_id: int,
 ) -> None:
     displays = (
         DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
@@ -571,7 +574,7 @@ def test_diagnostics_guard_in_all_mode_skips_virtual_desktop_screenshot(
         process_alive=lambda _pid: True,
     )
     manager.load()
-    manager.acquire(pid=os.getpid(), display_id=2)
+    manager.acquire(pid=os.getpid(), display_id=lease_display_id)
     monitor = PrivacyProtectionMonitor(
         cfg,
         config_path=ac_root / "missing-config.toml",
@@ -1142,8 +1145,9 @@ def test_post_ax_validation_blocks_write_without_screenshot(
 
 
 def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(
-    ac_root: Path, monkeypatch,
+    ac_root: Path, monkeypatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
+    marker = "private-window-after-initial-decision"
     displays = (
         DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
         DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
@@ -1156,7 +1160,7 @@ def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(
     )
     protected_inventory = WindowInventory(
         windows=(
-            VisibleWindow("Edge", "edge", "InPrivate", ScreenRegion(0, 0, 80, 90)),
+            VisibleWindow("Edge", "edge", marker, ScreenRegion(0, 0, 80, 90)),
             VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
         ),
         displays=displays,
@@ -1179,7 +1183,7 @@ def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(
     monitor = PrivacyProtectionMonitor(
         CaptureConfig(
             screenshot_monitor="separate",
-            deny_window_title_patterns=["InPrivate"],
+            deny_window_title_patterns=[marker],
         ),
         config_path=ac_root / "missing.toml",
         overlay=Overlay(),
@@ -1208,20 +1212,100 @@ def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(
     )
 
     try:
-        out = scheduler_mod._build_capture(
-            CaptureConfig(
-                screenshot_monitor="separate",
-                deny_window_title_patterns=["InPrivate"],
-            ),
-            provider,
-            None,
-            protection_monitor=monitor,
-        )
+        with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
+            out = scheduler_mod._build_capture(
+                CaptureConfig(
+                    screenshot_monitor="separate",
+                    deny_window_title_patterns=[marker],
+                ),
+                provider,
+                None,
+                protection_monitor=monitor,
+            )
+            latest = monitor.decision_for_capture(force=False)
     finally:
         monitor.stop()
 
     assert out is None
     assert provider.calls == 1
+    latest_reasons = latest.snapshot.reasons_for_display(1)
+    assert latest_reasons[0].code is ProtectionReasonCode.WINDOW_TITLE_RULE
+    assert latest_reasons[0].window_title == marker
+    assert latest_reasons[0].rule == marker
+    assert marker not in caplog.text
+
+
+def test_diagnostics_lease_acquired_during_ax_discards_in_memory_ax(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "private-ax-discard-marker"
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+        ),
+        displays=displays,
+    )
+    cfg = CaptureConfig(screenshot_monitor="separate")
+    manager = DiagnosticsLeaseManager(
+        ac_root / "runtime" / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    manager.load()
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=manager.snapshot,
+        watchdog_seconds=10.0,
+    )
+
+    class LeaseDuringAXProvider(_FakeProvider):
+        def capture_frontmost(
+            self, *, focused_window_only: bool = True
+        ) -> AXCaptureResult | None:
+            manager.acquire(pid=os.getpid(), display_id=1)
+            monitor.request_refresh()
+            return super().capture_frontmost(focused_window_only=focused_window_only)
+
+    provider = LeaseDuringAXProvider(raw_json=_edge_ax_tree("https://safe.example", marker))
+    monkeypatch.setattr(
+        scheduler_mod.window_meta,
+        "active_window",
+        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_: (_ for _ in ()).throw(
+            AssertionError("lease-invalidated capture must not screenshot")
+        ),
+    )
+
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            None,
+            protection_monitor=monitor,
+        )
+        latest = monitor.decision_for_capture(force=False)
+    finally:
+        monitor.stop()
+
+    assert out is None
+    assert provider.calls == 1
+    assert latest.snapshot.ax_blocked is True
+    assert (
+        latest.snapshot.reasons_for_display(1)[0].code
+        is ProtectionReasonCode.DIAGNOSTICS_REVEAL
+    )
 
 
 def test_post_ax_validation_uses_latest_generation_confirmation_and_regions(

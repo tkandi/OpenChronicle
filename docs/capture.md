@@ -84,6 +84,46 @@ The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
   it cannot display the yellow failure state and screenshot capture remains
   stopped until the helper is confirmed again.
 
+### Protection reasons and diagnostics
+
+Protection reasons are derived from the same immutable snapshot that drives the
+screenshot and active-window AX gates. They include app, bundle, and title-rule
+matches; conservative unknown-title protection; `all`-mode inheritance;
+diagnostics self-protection; pause state; fixed inventory failures; and an
+`indicator_unconfirmed` code when a required overlay generation is not
+acknowledged. Reasons from every matching window are combined per display,
+deduplicated, priority ordered, and bounded to eight. A global pause or failure
+reason applies to every display.
+
+Category payloads contain only fixed reason codes and display IDs. Bounded exact
+fields can contain an app name, bundle ID, window title, matched rule, source
+display, or effective resume time, but they remain inside the privacy subsystem.
+The overlay receives exact fields only for a display already excluded by that
+same protection snapshot. Category and tiered overlay modes never receive them.
+
+Protection Diagnostics uses
+`~/.openchronicle/runtime/privacy-diagnostics.sock`, an owner-only Unix-domain
+socket in a mode `0700` runtime directory; the socket itself is mode `0600`.
+It is not exposed over TCP, HTTP, or MCP. Category snapshots need no lease.
+Exact reveal is ordered as follows:
+
+1. The app identifies the display containing the diagnostics window and writes
+   a guard containing only a lease nonce, app PID, and display ID.
+2. The monitor refreshes, protects that display, and waits for a newer confirmed
+   generation. With indicator style `off`, capture-policy publication is the
+   confirmation boundary.
+3. Only then may the socket send exact fields for that lease. During a move, the
+   old and new displays stay protected until the destination is confirmed.
+4. A matching release removes the guard. A stale release is rejected, and a
+   disconnect retains protection until process death is confirmed.
+
+Any diagnostics lease in `all` mode suppresses the complete virtual-desktop
+screenshot. In `separate` mode, safe displays may still be captured. Exact
+reason values are never added to capture JSON, screenshots, capture or privacy
+logs, FTS, timeline, session or memory files, model requests, model-failure
+events, normal status JSON, MCP tools/resources, or the on-disk diagnostics
+guard.
+
 Protection detection locally inspects the normal layer-0 on-screen CoreGraphics
 inventory: owner or app name, bundle identifier, title, CoreGraphics position
 and size, and AX-derived active state. AX can supply a blank CoreGraphics title

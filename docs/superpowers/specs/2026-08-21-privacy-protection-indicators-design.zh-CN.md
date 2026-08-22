@@ -103,7 +103,7 @@ monitor 会统一完成 denylist 窗口区域、活动窗口与物理显示器�
 
 inventory 从 CoreGraphics `optionOnScreenOnly` 结果开始，只保留 alpha 大于零、尺寸为正的 layer-0 窗口。非空 CG 标题标记为可用。空标题只有在同 PID、`CGWindowID` 全局唯一且精确匹配时才允许读取对应 AX 标题；几何信息永远不能授权身份。如果精确匹配或标题读取不可用，helper 仍输出该 CG 记录并设置 `title_available = false`，不会因为一个无关窗口而使整个 inventory 失败。
 
-存在标题 deny pattern 时，未知标题窗口只保守保护其几何范围相交的显示器；精确 app/bundle deny 仍正常生效。如果前台 PID 的 focused AX window 无法精确匹配，该 PID 的所有 on-screen layer-0 CG 窗口都会标记为活动候选。只有候选显示器与受保护显示器相交时才阻止 AX；另一块显示器上的不确定性不会升级为全局 AX 故障。helper 退出、输出解析失败以及缺失或非法 display inventory 仍产生固定原因码的 `failed` 状态。这些确定性标志和检测值只留在本机，不进入浮层 IPC。
+存在标题 deny pattern 时，未知标题窗口只保守保护其几何范围相交的显示器；精确 app/bundle deny 仍正常生效。如果前台 PID 的 focused AX window 无法精确匹配，该 PID 的所有 on-screen layer-0 CG 窗口都会标记为活动候选。只有候选显示器与受保护显示器相交时才阻止 AX；另一块显示器上的不确定性不会升级为全局 AX 故障。helper 退出、输出解析失败以及缺失或非法 display inventory 仍产生固定原因码的 `failed` 状态。这些确定性标志和检测值只留在本机隐私子系统内。后续原因诊断设计允许用户批准的 `exact` 浮层只向同一快照已经保护的显示器发送有长度上限的 app、bundle、标题或规则字段；category/tiered 命令和未受保护显示器不得收到具体字段。
 
 ### 原生浮层 helper
 
@@ -116,7 +116,7 @@ inventory 从 CoreGraphics `optionOnScreenOnly` 结果开始，只保留 alpha �
 - 根据 CoreGraphics 显示器边界和 `NSScreen` 几何信息定位；
 - 显示在普通应用窗口之上。
 
-Python 通过 stdin 发送逐行 JSON 命令。只有在主线程完成对应 panel 更新后，helper 才会通过 stdout 确认该 generation。命令不包含敏感窗口标题或应用文字，只包含状态、样式、generation 和显示器几何信息。
+Python 通过 stdin 发送逐行 JSON 命令。只有在主线程完成对应 panel 更新后，helper 才会通过 stdout 确认该 generation。命令通常只包含状态、样式、generation、显示器几何信息和固定原因码。用户批准 `exact` 详情后，命令可以额外包含有长度上限的具体原因字段，但只能放入同一 generation 已经排除的显示器 payload。
 
 命令示例：
 
@@ -207,4 +207,4 @@ daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_sty
 
 ## 隐私与日志
 
-日志可以记录 generation 编号、状态名称、样式名称、显示器 identifier 和 helper 错误，但不得包含 denylist 窗口标题、应用名称、bundle identifier 或屏幕内容。浮层命令同样不包含 denylist 值或检测到的窗口文字。
+日志可以记录 generation 编号、状态名称、样式名称、显示器 identifier 和 helper 错误，但不得包含 denylist 窗口标题、应用名称、bundle identifier 或屏幕内容。有长度上限的具体值只能通过本地浮层 IPC 发送给已经受保护的显示器；不得记录、持久化、写入确认消息或发送到未受保护显示器。
