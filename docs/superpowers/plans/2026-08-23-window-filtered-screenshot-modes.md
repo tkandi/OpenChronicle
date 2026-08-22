@@ -84,6 +84,11 @@ Swift standalone harnesses.
   window IDs, and per-display output dimensions.
 - Produces JSON response schema version 1 with PNG images and display geometry, or fixed error code.
 
+The exact wire schema and fixed error codes are defined in the design spec. The helper processes
+exactly one line and exits. Protected and overlay IDs are separate, all IDs are positive unique
+UInt32 values, the two lists are disjoint, and `protected_window_ids` must not be empty. Each
+display's `width` and `height` are both omitted for native pixels or both positive integers.
+
 - [ ] Write pure Swift RED tests for command validation, target resolution, missing/duplicate
   display or excluded-window IDs, output dimensions, unsupported OS, and response bounds.
 - [ ] Implement the pure resolver and fixed wire protocol.

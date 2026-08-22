@@ -34,6 +34,46 @@ windows. New window-filtered modes use a bundled Swift helper based on ScreenCap
 6. Python applies an opaque rectangle in `mask-window`, leaves the image unmasked in
    `exclude-window`, resizes/encodes JPEG, and stitches per-display images for `all` mode.
 
+The helper is a one-request process with this version-1 JSON wire shape (one line on stdin and one
+line on stdout):
+
+```json
+{
+  "version": 1,
+  "displays": [{"id": 123, "width": 1920, "height": 1080}],
+  "protected_window_ids": [456],
+  "overlay_window_ids": [789]
+}
+```
+
+Display `width` and `height` are either both positive integers or both omitted to request native
+pixels. Protected IDs are non-empty; both ID lists contain unique positive UInt32 values and are
+disjoint. A successful response is:
+
+```json
+{
+  "version": 1,
+  "status": "ok",
+  "displays": [{
+    "id": 123,
+    "left": 0,
+    "top": 0,
+    "point_width": 1920,
+    "point_height": 1080,
+    "pixel_width": 1920,
+    "pixel_height": 1080,
+    "png_base64": "..."
+  }]
+}
+```
+
+Errors use `{"version":1,"status":"error","error":"<fixed-code>"}` with no titles,
+application names, rule values, private IDs, paths, or OS error text. The fixed codes are
+`unsupported_os`, `invalid_command`, `content_unavailable`, `display_not_found`,
+`window_not_found`, `ambiguous_display`, `ambiguous_window`, `capture_failed`, and
+`encode_failed`. The helper rejects an empty protected-ID list so it cannot accidentally become an
+unfiltered general screenshot path.
+
 Apple documents that `SCContentFilter` can capture a display while excluding specific windows and
 that `SCScreenshotManager` captures a single image using that filter:
 
