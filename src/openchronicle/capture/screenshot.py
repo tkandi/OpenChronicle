@@ -4,13 +4,23 @@ from __future__ import annotations
 
 import base64
 import io
+import json
+import math
+import os
+import platform
+import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from ..logger import get
-from .privacy import ScreenRegion
+from .privacy import DisplayInfo, ScreenRegion
 
 logger = get("openchronicle.capture")
+_FILTERED_CAPTURE_TIMEOUT = 15
+_MAX_CAPTURE_DIMENSION = 32768
+_MAX_CAPTURE_PIXELS = 128_000_000
+_MASK_COLOR = (128, 128, 128)
 
 
 @dataclass
@@ -25,6 +35,12 @@ class Screenshot:
     monitor_width: int | None = None
     monitor_height: int | None = None
     monitor_is_all: bool = False
+
+
+@dataclass
+class _FilteredDisplayImage:
+    display: DisplayInfo
+    image: Any
 
 
 def grab(
@@ -209,3 +225,495 @@ def _monitor_intersects_region(mon: dict[str, Any], region: ScreenRegion) -> boo
         and top < region_bottom
         and bottom > region.top
     )
+
+
+def grab_filtered_many(
+    *,
+    monitor_mode: str,
+    privacy_mode: str,
+    displays: Any,
+    protected_window_ids: Any,
+    protected_window_regions: Any,
+    overlay_window_ids: Any,
+    max_width: int,
+    jpeg_quality: int,
+) -> list[Screenshot] | None:
+    """Return source-filtered screenshots, or ``None`` when filtering is unavailable.
+
+    This path intentionally never falls back to ``mss``. Its caller must decide whether
+    the existing skip-monitor behavior is appropriate after a filtered capture fails.
+    """
+    try:
+        if monitor_mode not in {"primary", "separate", "all"}:
+            return None
+        if privacy_mode not in {"mask-window", "exclude-window"}:
+            return None
+        if not _valid_output_options(max_width, jpeg_quality):
+            return None
+
+        inventory = _validated_displays(displays)
+        protected_ids = _validated_window_ids(protected_window_ids, require_nonempty=True)
+        overlay_ids = _validated_window_ids(overlay_window_ids, require_nonempty=False)
+        regions = _validated_regions(protected_window_regions)
+        if (
+            inventory is None
+            or protected_ids is None
+            or overlay_ids is None
+            or regions is None
+            or len(protected_ids) != len(regions)
+            or set(protected_ids) & set(overlay_ids)
+        ):
+            return None
+
+        targets = _capture_targets(inventory, monitor_mode)
+        if not targets:
+            return None
+        raw = _run_filtered_capture_helper(targets, protected_ids, overlay_ids)
+        frames = _decode_filtered_response(raw, targets)
+        if frames is None:
+            return None
+
+        if privacy_mode == "mask-window":
+            for frame in frames:
+                _mask_protected_regions(frame.image, frame.display, regions)
+
+        if monitor_mode == "all":
+            combined = _stitch_filtered_displays(frames)
+            if combined is None:
+                return None
+            image, region = combined
+            return [
+                _filtered_screenshot(
+                    image,
+                    monitor_index=0,
+                    monitor_region=region,
+                    monitor_is_all=True,
+                    max_width=max_width,
+                    jpeg_quality=jpeg_quality,
+                )
+            ]
+
+        return [
+            _filtered_screenshot(
+                frame.image,
+                monitor_index=inventory.index(frame.display) + 1,
+                monitor_region=frame.display.region,
+                monitor_is_all=False,
+                max_width=max_width,
+                jpeg_quality=jpeg_quality,
+            )
+            for frame in frames
+        ]
+    except Exception:  # noqa: BLE001 - this boundary must fail closed without payload logging
+        return None
+
+
+def _valid_output_options(max_width: Any, jpeg_quality: Any) -> bool:
+    return (
+        isinstance(max_width, int)
+        and not isinstance(max_width, bool)
+        and 0 <= max_width <= _MAX_CAPTURE_DIMENSION
+        and isinstance(jpeg_quality, int)
+        and not isinstance(jpeg_quality, bool)
+        and 1 <= jpeg_quality <= 100
+    )
+
+
+def _validated_displays(value: Any) -> tuple[DisplayInfo, ...] | None:
+    try:
+        displays = tuple(value)
+    except TypeError:
+        return None
+    if not displays or any(not isinstance(display, DisplayInfo) for display in displays):
+        return None
+    if sum(display.is_primary is True for display in displays) != 1:
+        return None
+    ids: set[int] = set()
+    for display in displays:
+        if not _is_positive_uint32(display.id) or display.id in ids:
+            return None
+        ids.add(display.id)
+        region = display.region
+        if not isinstance(region, ScreenRegion) or not _is_valid_region(region):
+            return None
+        if not isinstance(display.is_primary, bool):
+            return None
+    if any(_regions_overlap(first.region, second.region) for index, first in enumerate(displays) for second in displays[index + 1 :]):
+        return None
+    return displays
+
+
+def _validated_window_ids(value: Any, *, require_nonempty: bool) -> tuple[int, ...] | None:
+    try:
+        ids = tuple(value)
+    except TypeError:
+        return None
+    if (require_nonempty and not ids) or any(not _is_positive_uint32(window_id) for window_id in ids):
+        return None
+    if len(set(ids)) != len(ids):
+        return None
+    return tuple(sorted(ids))
+
+
+def _validated_regions(value: Any) -> tuple[ScreenRegion, ...] | None:
+    try:
+        regions = tuple(value)
+    except TypeError:
+        return None
+    if any(not isinstance(region, ScreenRegion) or not _is_valid_region(region) for region in regions):
+        return None
+    return regions
+
+
+def _is_positive_uint32(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 0xFFFFFFFF
+
+
+def _is_valid_region(region: ScreenRegion) -> bool:
+    values = (region.left, region.top, region.width, region.height)
+    return all(
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        for value in values
+    ) and (
+        region.width > 0
+        and region.height > 0
+        and math.isfinite(region.left + region.width)
+        and math.isfinite(region.top + region.height)
+    )
+
+
+def _regions_overlap(left: ScreenRegion, right: ScreenRegion) -> bool:
+    return (
+        left.left < right.left + right.width
+        and left.left + left.width > right.left
+        and left.top < right.top + right.height
+        and left.top + left.height > right.top
+    )
+
+
+def _capture_targets(
+    displays: tuple[DisplayInfo, ...], monitor_mode: str
+) -> tuple[DisplayInfo, ...]:
+    if monitor_mode == "primary":
+        return tuple(display for display in displays if display.is_primary)
+    return displays
+
+
+def _run_filtered_capture_helper(
+    displays: tuple[DisplayInfo, ...],
+    protected_window_ids: tuple[int, ...],
+    overlay_window_ids: tuple[int, ...],
+) -> dict[str, Any] | None:
+    helper = _resolve_filtered_capture_helper()
+    if helper is None:
+        return None
+    request = {
+        "version": 1,
+        "displays": [{"id": display.id} for display in displays],
+        "protected_window_ids": list(protected_window_ids),
+        "overlay_window_ids": list(overlay_window_ids),
+    }
+    try:
+        proc = subprocess.run(
+            [str(helper)],
+            input=json.dumps(request, separators=(",", ":")) + "\n",
+            capture_output=True,
+            text=True,
+            timeout=_FILTERED_CAPTURE_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0 or proc.stderr or not _is_single_response_line(proc.stdout):
+        return None
+    try:
+        payload = json.loads(proc.stdout[:-1], object_pairs_hook=_no_duplicate_json_object)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _is_single_response_line(value: Any) -> bool:
+    return isinstance(value, str) and value.endswith("\n") and value.count("\n") == 1 and bool(value[:-1])
+
+
+def _no_duplicate_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _decode_filtered_response(
+    payload: dict[str, Any] | None,
+    expected_displays: tuple[DisplayInfo, ...],
+) -> list[_FilteredDisplayImage] | None:
+    if not isinstance(payload, dict) or set(payload) != {"version", "status", "displays"}:
+        return None
+    if (
+        type(payload.get("version")) is not int
+        or payload["version"] != 1
+        or payload.get("status") != "ok"
+    ):
+        return None
+    rows = payload.get("displays")
+    if not isinstance(rows, list) or len(rows) != len(expected_displays):
+        return None
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+
+    frames: list[_FilteredDisplayImage] = []
+    for row, expected in zip(rows, expected_displays, strict=True):
+        decoded = _decode_filtered_display(row, expected, Image)
+        if decoded is None:
+            return None
+        frames.append(decoded)
+    return frames
+
+
+def _decode_filtered_display(
+    row: Any,
+    expected: DisplayInfo,
+    image_cls: Any,
+) -> _FilteredDisplayImage | None:
+    expected_keys = {
+        "id",
+        "left",
+        "top",
+        "point_width",
+        "point_height",
+        "pixel_width",
+        "pixel_height",
+        "png_base64",
+    }
+    if not isinstance(row, dict) or set(row) != expected_keys:
+        return None
+    region = expected.region
+    if (
+        type(row.get("id")) is not int
+        or row["id"] != expected.id
+        or not _is_json_number(row.get("left"))
+        or not _is_json_number(row.get("top"))
+        or not _is_json_number(row.get("point_width"))
+        or not _is_json_number(row.get("point_height"))
+        or row["left"] != region.left
+        or row["top"] != region.top
+        or row["point_width"] != region.width
+        or row["point_height"] != region.height
+    ):
+        return None
+    pixel_width = row.get("pixel_width")
+    pixel_height = row.get("pixel_height")
+    if not _is_valid_pixel_size(pixel_width, pixel_height):
+        return None
+    png_base64 = row.get("png_base64")
+    if not isinstance(png_base64, str) or not png_base64:
+        return None
+    try:
+        png_data = base64.b64decode(png_base64, validate=True)
+        verified = image_cls.open(io.BytesIO(png_data))
+        if verified.format != "PNG" or getattr(verified, "is_animated", False):
+            return None
+        verified.verify()
+        image = image_cls.open(io.BytesIO(png_data))
+        image.load()
+        if image.size != (pixel_width, pixel_height):
+            return None
+        scale_x = pixel_width / region.width
+        scale_y = pixel_height / region.height
+        if not math.isclose(scale_x, scale_y, rel_tol=0.02, abs_tol=0.02):
+            return None
+        return _FilteredDisplayImage(expected, image.convert("RGB"))
+    except (OSError, ValueError, base64.binascii.Error):
+        return None
+
+
+def _is_json_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+    )
+
+
+def _is_valid_pixel_size(width: Any, height: Any) -> bool:
+    return (
+        isinstance(width, int)
+        and not isinstance(width, bool)
+        and isinstance(height, int)
+        and not isinstance(height, bool)
+        and 0 < width <= _MAX_CAPTURE_DIMENSION
+        and 0 < height <= _MAX_CAPTURE_DIMENSION
+        and width * height <= _MAX_CAPTURE_PIXELS
+    )
+
+
+def _mask_protected_regions(
+    image: Any,
+    display: DisplayInfo,
+    regions: tuple[ScreenRegion, ...],
+) -> None:
+    from PIL import ImageDraw
+
+    display_region = display.region
+    scale_x = image.width / display_region.width
+    scale_y = image.height / display_region.height
+    draw = ImageDraw.Draw(image)
+    for region in regions:
+        left = max(display_region.left, region.left)
+        top = max(display_region.top, region.top)
+        right = min(display_region.left + display_region.width, region.left + region.width)
+        bottom = min(display_region.top + display_region.height, region.top + region.height)
+        if left >= right or top >= bottom:
+            continue
+        pixel_left = max(0, math.floor((left - display_region.left) * scale_x))
+        pixel_top = max(0, math.floor((top - display_region.top) * scale_y))
+        pixel_right = min(image.width, math.ceil((right - display_region.left) * scale_x))
+        pixel_bottom = min(image.height, math.ceil((bottom - display_region.top) * scale_y))
+        if pixel_left < pixel_right and pixel_top < pixel_bottom:
+            draw.rectangle(
+                (pixel_left, pixel_top, pixel_right - 1, pixel_bottom - 1),
+                fill=_MASK_COLOR,
+            )
+
+
+def _stitch_filtered_displays(
+    frames: list[_FilteredDisplayImage],
+) -> tuple[Any, ScreenRegion] | None:
+    try:
+        from PIL import Image
+    except ImportError:
+        return None
+    if not frames:
+        return None
+    left = min(frame.display.region.left for frame in frames)
+    top = min(frame.display.region.top for frame in frames)
+    right = max(frame.display.region.left + frame.display.region.width for frame in frames)
+    bottom = max(frame.display.region.top + frame.display.region.height for frame in frames)
+    region = ScreenRegion(left, top, right - left, bottom - top)
+    if not _is_valid_region(region):
+        return None
+    scale = max(
+        frame.image.width / frame.display.region.width
+        for frame in frames
+    )
+    scale = max(
+        scale,
+        max(frame.image.height / frame.display.region.height for frame in frames),
+    )
+    width = math.ceil(region.width * scale)
+    height = math.ceil(region.height * scale)
+    if not _is_valid_pixel_size(width, height):
+        return None
+    canvas = Image.new("RGB", (width, height), _MASK_COLOR)
+    for frame in frames:
+        display = frame.display.region
+        pixel_left = math.floor((display.left - left) * scale)
+        pixel_top = math.floor((display.top - top) * scale)
+        pixel_right = math.ceil((display.left + display.width - left) * scale)
+        pixel_bottom = math.ceil((display.top + display.height - top) * scale)
+        target_width = pixel_right - pixel_left
+        target_height = pixel_bottom - pixel_top
+        if target_width <= 0 or target_height <= 0:
+            return None
+        image = frame.image
+        if image.size != (target_width, target_height):
+            image = image.resize((target_width, target_height), Image.Resampling.LANCZOS)
+        canvas.paste(image, (pixel_left, pixel_top))
+    return canvas, region
+
+
+def _filtered_screenshot(
+    image: Any,
+    *,
+    monitor_index: int,
+    monitor_region: ScreenRegion,
+    monitor_is_all: bool,
+    max_width: int,
+    jpeg_quality: int,
+) -> Screenshot:
+    from PIL import Image
+
+    if max_width and image.width > max_width:
+        ratio = max_width / image.width
+        image = image.resize(
+            (max_width, max(1, int(image.height * ratio))),
+            Image.Resampling.LANCZOS,
+        )
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=jpeg_quality, optimize=True)
+    return Screenshot(
+        image_base64=base64.b64encode(output.getvalue()).decode("ascii"),
+        width=image.width,
+        height=image.height,
+        monitor_index=monitor_index,
+        monitor_left=_int_or_none(monitor_region.left),
+        monitor_top=_int_or_none(monitor_region.top),
+        monitor_width=_int_or_none(monitor_region.width),
+        monitor_height=_int_or_none(monitor_region.height),
+        monitor_is_all=monitor_is_all,
+    )
+
+
+def _resolve_filtered_capture_helper() -> Path | None:
+    if platform.system() != "Darwin":
+        return None
+    override = os.environ.get("OPENCHRONICLE_SCREEN_CAPTURE_HELPER")
+    if override:
+        path = Path(override).expanduser().resolve()
+        return path if path.is_file() and os.access(path, os.X_OK) else None
+
+    candidates: list[Path] = []
+    try:
+        from importlib.resources import files as package_files
+
+        bundled = Path(str(package_files("openchronicle").joinpath("_bundled")))
+        candidates.append(bundled)
+    except (ModuleNotFoundError, ValueError):
+        pass
+    candidates.append(Path(__file__).resolve().parents[3] / "resources")
+    for directory in candidates:
+        binary = directory / "mac-screen-capture"
+        if _ensure_filtered_capture_helper(binary):
+            return binary
+    return None
+
+
+def _ensure_filtered_capture_helper(binary: Path) -> bool:
+    main = binary.with_suffix(".swift")
+    core = binary.with_name("mac-screen-capture-core.swift")
+    if not main.is_file() or not core.is_file():
+        return binary.is_file() and os.access(binary, os.X_OK)
+    if _filtered_capture_helper_is_fresh(binary, main, core):
+        return True
+    build_script = binary.with_name("build-mac-screen-capture.sh")
+    if not build_script.is_file():
+        return False
+    try:
+        result = subprocess.run(
+            ["/bin/bash", str(build_script)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(binary.parent),
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0 and _filtered_capture_helper_is_fresh(binary, main, core)
+
+
+def _filtered_capture_helper_is_fresh(binary: Path, main: Path, core: Path) -> bool:
+    try:
+        return (
+            binary.is_file()
+            and os.access(binary, os.X_OK)
+            and binary.stat().st_mtime >= main.stat().st_mtime
+            and binary.stat().st_mtime >= core.stat().st_mtime
+        )
+    except OSError:
+        return False
