@@ -14,6 +14,7 @@ def _window(
     app: str = "",
     bundle: str = "",
     title: str = "",
+    alternate_title: str = "",
     left: float = 0,
     title_available: bool = True,
 ) -> privacy.VisibleWindow:
@@ -23,6 +24,7 @@ def _window(
         title=title,
         region=privacy.ScreenRegion(left=left, top=0, width=100, height=100),
         title_available=title_available,
+        alternate_title=alternate_title,
     )
 
 
@@ -68,6 +70,39 @@ def test_visible_window_rule_matches_keep_every_matching_rule_and_value() -> Non
     assert all(match.app_name == "Private Browser" for match in matches)
     assert all(match.bundle_id == "com.example.private" for match in matches)
     assert all(match.window_title == "New InPrivate Window" for match in matches)
+
+
+def test_visible_window_rule_matches_primary_title_before_alternate_title() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["Secret", "InPrivate"])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(
+            title="Secret browsing",
+            alternate_title="Google - Microsoft Edge (InPrivate)",
+        ),
+    )
+
+    assert [(match.rule, match.window_title) for match in matches] == [
+        ("Secret", "Secret browsing"),
+        ("InPrivate", "Google - Microsoft Edge (InPrivate)"),
+    ]
+
+
+def test_visible_window_rule_matches_deduplicate_casefolded_rule_across_titles() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["INPRIVATE", "inprivate"])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(
+            title="New InPrivate Window",
+            alternate_title="Google - Microsoft Edge (InPrivate)",
+        ),
+    )
+
+    assert [(match.rule, match.window_title) for match in matches] == [
+        ("INPRIVATE", "New InPrivate Window"),
+    ]
 
 
 def test_unknown_window_title_has_no_invented_title_rule_or_value() -> None:
@@ -152,6 +187,7 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
                     "app_name": "Cursor",
                     "bundle_id": "com.cursor.Cursor",
                     "title": "main.py",
+                    "alternate_title": "main.py - Cursor",
                     "left": 100,
                     "top": 20,
                     "width": 90,
@@ -181,6 +217,7 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
         privacy.DisplayInfo(2, privacy.ScreenRegion(100, 0, 100, 100), False),
     )
     assert inventory.windows[0].is_active is True
+    assert inventory.windows[0].alternate_title == "main.py - Cursor"
     assert inventory.windows[0].title_available is False
     assert inventory.windows[0].is_active_candidate is True
 
@@ -213,6 +250,7 @@ def test_read_window_inventory_defaults_uncertainty_flags_for_legacy_helper(monk
     assert inventory is not None
     assert inventory.windows[0].title_available is True
     assert inventory.windows[0].is_active_candidate is False
+    assert inventory.windows[0].alternate_title == ""
 
 
 def test_read_window_inventory_rejects_empty_displays(monkeypatch) -> None:

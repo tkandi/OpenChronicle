@@ -74,6 +74,40 @@ def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     assert snapshot.ax_blocked is True
 
 
+def test_alternate_title_rule_keeps_the_matching_title_in_exact_reason() -> None:
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        deny_window_title_patterns=["InPrivate"],
+    )
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Microsoft Edge",
+                "com.microsoft.edgemac",
+                "Google",
+                RIGHT.region,
+                alternate_title="Google - Microsoft Edge (InPrivate)",
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(cfg, inventory, paused=False, generation=8, now=11.0)
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({2})
+    assert [
+        (reason.code, reason.rule, reason.window_title)
+        for reason in snapshot.reasons_for_display(2)
+    ] == [
+        (
+            ProtectionReasonCode.WINDOW_TITLE_RULE,
+            "InPrivate",
+            "Google - Microsoft Edge (InPrivate)",
+        ),
+    ]
+
+
 def test_all_marks_every_display_and_active_candidate_blocks_ax() -> None:
     cfg = CaptureConfig(
         screenshot_monitor="all",

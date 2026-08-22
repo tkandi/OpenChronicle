@@ -46,6 +46,7 @@ class VisibleWindow:
     is_active: bool = False
     title_available: bool = True
     is_active_candidate: bool = False
+    alternate_title: str = ""
 
 
 @dataclass(frozen=True)
@@ -201,16 +202,21 @@ def visible_window_rule_matches(
             )
         )
     else:
-        matches.extend(
-            VisibleWindowRuleMatch(
-                ProtectionReasonCode.WINDOW_TITLE_RULE,
-                rule,
-                app_name,
-                bundle_id,
-                window_title,
-            )
-            for rule in _regex_matching_rules(window.title, cfg.deny_window_title_patterns)
-        )
+        seen_title_rules: set[str] = set()
+        for title in (window.title, window.alternate_title):
+            for rule in _regex_matching_rules(title, cfg.deny_window_title_patterns):
+                if rule.casefold() in seen_title_rules:
+                    continue
+                seen_title_rules.add(rule.casefold())
+                matches.append(
+                    VisibleWindowRuleMatch(
+                        ProtectionReasonCode.WINDOW_TITLE_RULE,
+                        rule,
+                        app_name,
+                        bundle_id,
+                        title,
+                    )
+                )
     return tuple(dict.fromkeys(matches))
 
 
@@ -323,6 +329,7 @@ def _parse_visible_window(row: Any) -> VisibleWindow:
         is_active=_optional_bool(row, "is_active", False),
         title_available=_optional_bool(row, "title_available", True),
         is_active_candidate=_optional_bool(row, "is_active_candidate", False),
+        alternate_title=str(row.get("alternate_title") or ""),
     )
 
 
