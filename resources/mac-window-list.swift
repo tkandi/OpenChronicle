@@ -27,6 +27,7 @@ struct WindowRecord: Codable {
     let is_active: Bool
     let title_available: Bool
     let is_active_candidate: Bool
+    let window_id: UInt32?
 }
 
 struct Output: Codable {
@@ -117,7 +118,9 @@ private func axWindowSources(
     return sources
 }
 
+#if !TESTING
 @main
+#endif
 enum MacWindowList {
     static func main() {
         if #available(macOS 10.15, *), !CGPreflightScreenCaptureAccess() {
@@ -216,7 +219,8 @@ enum MacWindowList {
                 height: source.metadata.bounds.height,
                 is_active: resolved.isActive,
                 title_available: resolved.titleAvailable,
-                is_active_candidate: resolved.isActiveCandidate
+                is_active_candidate: resolved.isActiveCandidate,
+                window_id: source.metadata.windowID
             )
         }
 

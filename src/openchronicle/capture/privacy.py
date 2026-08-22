@@ -47,6 +47,7 @@ class VisibleWindow:
     title_available: bool = True
     is_active_candidate: bool = False
     alternate_title: str = ""
+    window_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -330,6 +331,7 @@ def _parse_visible_window(row: Any) -> VisibleWindow:
         title_available=_optional_bool(row, "title_available", True),
         is_active_candidate=_optional_bool(row, "is_active_candidate", False),
         alternate_title=str(row.get("alternate_title") or ""),
+        window_id=_optional_window_id(row),
     )
 
 
@@ -337,6 +339,15 @@ def _optional_bool(row: dict[str, Any], key: str, default: bool) -> bool:
     value = row.get(key, default)
     if not isinstance(value, bool):
         raise TypeError(f"{key} is not a boolean")
+    return value
+
+
+def _optional_window_id(row: dict[str, Any]) -> int | None:
+    value = row.get("window_id")
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 0xFFFFFFFF:
+        raise ValueError("window_id is not a positive CoreGraphics window ID")
     return value
 
 

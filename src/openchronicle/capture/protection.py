@@ -62,6 +62,9 @@ class ProtectionSnapshot:
     display_reasons: DisplayProtectionReasons = field(default_factory=DisplayProtectionReasons)
     diagnostics_guard_invalid: bool = False
     diagnostics_guard_active: bool = False
+    protected_window_ids: frozenset[int] = frozenset()
+    protected_window_regions: tuple[ScreenRegion, ...] = ()
+    window_filterable: bool = False
 
     @property
     def protected_regions(self) -> list[ScreenRegion]:
@@ -278,6 +281,20 @@ def build_protection_snapshot(
             ProtectionReason(ProtectionReasonCode(derived_failure_reason.value), display_id=None)
         )
 
+    protected_window_regions = tuple(window.region for window, _matches in sensitive_windows)
+    window_ids = tuple(window.window_id for window, _matches in sensitive_windows)
+    protected_window_ids = frozenset(
+        window_id
+        for window_id in window_ids
+        if isinstance(window_id, int) and not isinstance(window_id, bool) and 0 < window_id <= 0xFFFFFFFF
+    )
+    window_filterable = (
+        state is ProtectionState.PROTECTED
+        and bool(sensitive_windows)
+        and not diagnostics_guard_active
+        and len(protected_window_ids) == len(window_ids)
+    )
+
     return ProtectionSnapshot(
         generation=generation,
         state=state,
@@ -296,4 +313,7 @@ def build_protection_snapshot(
         display_reasons=DisplayProtectionReasons.from_reasons(reasons),
         diagnostics_guard_invalid=effective_guard_invalid,
         diagnostics_guard_active=diagnostics_guard_active,
+        protected_window_ids=protected_window_ids,
+        protected_window_regions=protected_window_regions,
+        window_filterable=window_filterable,
     )

@@ -74,6 +74,131 @@ def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     assert snapshot.ax_blocked is True
 
 
+def test_window_filtering_collects_rule_matched_ids_and_original_regions() -> None:
+    first_region = ScreenRegion(-220, 10, 300, 200)
+    second_region = ScreenRegion(110, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Private Browser",
+                "com.example.private",
+                "Private",
+                first_region,
+                window_id=73,
+            ),
+            VisibleWindow(
+                "Passwords",
+                "com.apple.Passwords",
+                "Passwords",
+                second_region,
+                window_id=74,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Private Browser", "Passwords"]),
+        inventory,
+        paused=False,
+        generation=8,
+        now=11.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_window_ids == frozenset({73, 74})
+    assert snapshot.protected_window_regions == (first_region, second_region)
+    assert snapshot.window_filterable is True
+
+
+@pytest.mark.parametrize("window_ids", [(None, 74), (73, 73)])
+def test_missing_or_duplicate_ids_cannot_authorize_window_filtering(
+    window_ids: tuple[int | None, int],
+) -> None:
+    first_region = ScreenRegion(0, 0, 80, 90)
+    second_region = ScreenRegion(110, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Private Browser", "private", "Private", first_region, window_id=window_ids[0]),
+            VisibleWindow("Passwords", "passwords", "Passwords", second_region, window_id=window_ids[1]),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Private Browser", "Passwords"]),
+        inventory,
+        paused=False,
+        generation=9,
+        now=12.0,
+    )
+
+    assert snapshot.protected_window_regions == (first_region, second_region)
+    assert snapshot.window_filterable is False
+
+
+@pytest.mark.parametrize(
+    ("paused", "failure_reason", "diagnostic_display_ids"),
+    [
+        (True, None, frozenset()),
+        (False, ProtectionFailureReason.HELPER_EXIT, frozenset()),
+        (False, None, frozenset({1})),
+    ],
+)
+def test_pause_failure_and_diagnostics_do_not_authorize_window_filtering(
+    paused: bool,
+    failure_reason: ProtectionFailureReason | None,
+    diagnostic_display_ids: frozenset[int],
+) -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Private Browser",
+                "private",
+                "Private",
+                ScreenRegion(0, 0, 80, 90),
+                window_id=73,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Private Browser"]),
+        inventory,
+        paused=paused,
+        generation=10,
+        now=13.0,
+        failure_reason=failure_reason,
+        diagnostic_display_ids=diagnostic_display_ids,
+    )
+
+    assert snapshot.window_filterable is False
+
+
+def test_all_mode_inheritance_does_not_revoke_window_filterability() -> None:
+    region = ScreenRegion(0, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Private Browser", "private", "Private", region, window_id=73),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(screenshot_monitor="all", deny_app_names=["Private Browser"]),
+        inventory,
+        paused=False,
+        generation=11,
+        now=14.0,
+    )
+
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.protected_window_ids == frozenset({73})
+    assert snapshot.protected_window_regions == (region,)
+    assert snapshot.window_filterable is True
+
+
 def test_alternate_title_rule_keeps_the_matching_title_in_exact_reason() -> None:
     cfg = CaptureConfig(
         screenshot_monitor="separate",

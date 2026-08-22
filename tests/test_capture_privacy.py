@@ -5,6 +5,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from openchronicle.capture import privacy, screenshot
 from openchronicle.config import CaptureConfig
 
@@ -46,6 +48,25 @@ def test_sensitive_window_regions_match_all_metadata_fields(monkeypatch) -> None
 
     assert regions is not None
     assert [region.left for region in regions] == [0, 100, 200]
+
+
+def test_visible_window_parses_only_positive_integer_window_ids() -> None:
+    row = {
+        "app_name": "Private Browser",
+        "bundle_id": "com.example.private",
+        "title": "Private",
+        "left": 10,
+        "top": 20,
+        "width": 300,
+        "height": 200,
+    }
+
+    assert privacy._parse_visible_window({**row, "window_id": 73}).window_id == 73
+    assert privacy._parse_visible_window(row).window_id is None
+
+    for invalid_id in (0, -1, 1.0, True, "73"):
+        with pytest.raises((TypeError, ValueError)):
+            privacy._parse_visible_window({**row, "window_id": invalid_id})
 
 
 def test_visible_window_rule_matches_keep_every_matching_rule_and_value() -> None:

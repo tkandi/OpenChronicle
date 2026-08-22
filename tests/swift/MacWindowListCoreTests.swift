@@ -9,6 +9,28 @@ private func expectMatches(
     precondition(resolution.axIndexByCGIndex == expected, file: file, line: line)
 }
 
+private func testWindowRecordEncodesCoreGraphicsWindowID() {
+    let record = WindowRecord(
+        app_name: "Private Browser",
+        bundle_id: "com.example.private",
+        title: "Private",
+        alternate_title: nil,
+        left: -220,
+        top: 10,
+        width: 300,
+        height: 200,
+        is_active: false,
+        title_available: true,
+        is_active_candidate: false,
+        window_id: 73
+    )
+
+    let data = try! JSONEncoder().encode(record)
+    let payload = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
+
+    precondition((payload["window_id"] as? NSNumber)?.uint32Value == 73)
+}
+
 private func testExactIdentityAuthorizesNormalLayerFallback() {
     let cgWindows = [
         OnScreenCGWindow(
@@ -494,6 +516,7 @@ private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
 @main
 enum MacWindowListCoreTests {
     static func main() {
+        testWindowRecordEncodesCoreGraphicsWindowID()
         testExactIdentityAuthorizesNormalLayerFallback()
         testNonWindowLayersCannotAuthorizeFallback()
         testPIDAndWindowIDMustBothMatch()
