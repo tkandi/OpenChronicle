@@ -21,6 +21,7 @@ private final class FakePrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport
   var onDisconnect: ((Error?) -> Void)?
   private(set) var connectCount = 0
   private(set) var closeCount = 0
+  private(set) var flushCount = 0
   private(set) var sent: [PrivacyDiagnosticsRequest] = []
   var failingActions: Set<PrivacyDiagnosticsAction> = []
   var onSend: ((PrivacyDiagnosticsRequest) -> Void)?
@@ -39,6 +40,10 @@ private final class FakePrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport
 
   func close() {
     closeCount += 1
+  }
+
+  func flushPendingWrites(timeout: TimeInterval) throws {
+    flushCount += 1
   }
 
   func deliverLease(
@@ -226,6 +231,53 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
         $0.reasons.allSatisfy { $0.windowTitle == nil && $0.rule == nil }
       }
     )
+  }
+
+  func testPageLeaveAfterDisconnectUsesCleanupTransportToReleaseKnownLease() {
+    let marker = "disconnect-page-leave-private-marker"
+    let scheduler = ReconnectSchedulerRecorder()
+    let first = FakePrivacyDiagnosticsTransport()
+    let cleanup = FakePrivacyDiagnosticsTransport()
+    var transports = [first, cleanup]
+    let controller = PrivacyDiagnosticsController(
+      transportFactory: { transports.removeFirst() },
+      displayModeProvider: { .hybrid },
+      detailProvider: { .exact },
+      pidProvider: { 123 },
+      reconnectScheduler: scheduler.schedule
+    )
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    first.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+    first.deliverSnapshot(generation: 42, exact: true, exactValue: marker)
+    XCTAssertTrue(controller.debugRetainsExactValue(marker))
+
+    first.disconnect()
+    XCTAssertFalse(controller.debugRetainsExactValue(marker))
+    var discardedBeforeRelease = false
+    var releaseSentBeforeClose = false
+    cleanup.onSend = { request in
+      if request.action == .releaseExact {
+        discardedBeforeRelease =
+          controller.debugExactCandidate == nil
+          && !controller.debugRetainsExactValue(marker)
+          && !controller.showsExactValues
+          && controller.displayDiagnostics.allSatisfy {
+            $0.reasons.allSatisfy { $0.windowTitle == nil && $0.rule == nil }
+          }
+        releaseSentBeforeClose = cleanup.closeCount == 0
+      }
+    }
+
+    controller.setPageVisible(false)
+
+    XCTAssertTrue(discardedBeforeRelease)
+    XCTAssertTrue(releaseSentBeforeClose)
+    XCTAssertEqual(cleanup.connectCount, 1)
+    XCTAssertEqual(cleanup.sent.map(\.action), [.releaseExact])
+    XCTAssertEqual(cleanup.flushCount, 1)
+    XCTAssertEqual(cleanup.closeCount, 1)
+    XCTAssertEqual(scheduler.delays, [0.25])
   }
 
   func testPageLeaveHidesBeforeSendingRelease() {
@@ -808,6 +860,34 @@ final class UnixPrivacyDiagnosticsTransportTests: XCTestCase {
     )
     transport.close()
     transport.close()
+  }
+
+  func testFlushPendingWritesDeliversReleaseBeforeImmediateClose() throws {
+    let fixture = try UnixSocketFixture()
+    defer { fixture.close() }
+    let requestReceived = expectation(description: "server received release")
+    var requestObject: [String: AnyHashable]?
+    fixture.acceptOne { data, _client in
+      requestObject = try? JSONSerialization.jsonObject(with: data) as? [String: AnyHashable]
+      requestReceived.fulfill()
+    }
+
+    let transport = UnixPrivacyDiagnosticsTransport(socketURL: fixture.socketURL)
+    try transport.connect()
+    try transport.send(.releaseExact(pid: 123, leaseID: "lease-1"))
+    try transport.flushPendingWrites(timeout: 1.0)
+    transport.close()
+
+    wait(for: [requestReceived], timeout: 2.0)
+    XCTAssertEqual(
+      requestObject,
+      [
+        "schema_version": 1,
+        "action": "release_exact",
+        "pid": 123,
+        "lease_id": "lease-1",
+      ]
+    )
   }
 }
 

@@ -113,6 +113,7 @@ protocol PrivacyDiagnosticsTransport: AnyObject {
   var onDisconnect: ((Error?) -> Void)? { get set }
   func connect() throws
   func send(_ request: PrivacyDiagnosticsRequest) throws
+  func flushPendingWrites(timeout: TimeInterval) throws
   func close()
 }
 
@@ -228,6 +229,44 @@ final class UnixPrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport {
         try flushWrites(expectedDescriptor: descriptor)
       } catch {
         terminate(error: PrivacyDiagnosticsTransportError.writeFailed, notify: true)
+        throw PrivacyDiagnosticsTransportError.writeFailed
+      }
+    }
+  }
+
+  func flushPendingWrites(timeout: TimeInterval) throws {
+    try ioQueue.sync {
+      guard descriptor >= 0 else {
+        throw PrivacyDiagnosticsTransportError.notConnected
+      }
+      let expectedDescriptor = descriptor
+      let deadline = DispatchTime.now() + max(0.0, timeout)
+      while !outgoing.isEmpty {
+        try flushWrites(expectedDescriptor: expectedDescriptor)
+        guard !outgoing.isEmpty else { return }
+
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now < deadline.uptimeNanoseconds else {
+          throw PrivacyDiagnosticsTransportError.writeFailed
+        }
+        let remaining = deadline.uptimeNanoseconds - now
+        let roundedMilliseconds =
+          remaining / 1_000_000 + (remaining % 1_000_000 == 0 ? 0 : 1)
+        let timeoutMilliseconds = Int32(
+          min(UInt64(Int32.max), max(1, roundedMilliseconds))
+        )
+        var writable = pollfd(
+          fd: expectedDescriptor,
+          events: Int16(POLLOUT),
+          revents: 0
+        )
+        let result = Darwin.poll(&writable, 1, timeoutMilliseconds)
+        if result > 0 {
+          continue
+        }
+        if result < 0, errno == EINTR {
+          continue
+        }
         throw PrivacyDiagnosticsTransportError.writeFailed
       }
     }

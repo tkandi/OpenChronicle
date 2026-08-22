@@ -9,6 +9,8 @@ typealias PrivacyDiagnosticsReconnectScheduler = (
 
 @MainActor
 final class PrivacyDiagnosticsController: ObservableObject {
+  private static let cleanupFlushTimeout: TimeInterval = 0.25
+
   nonisolated(unsafe) static let defaultReconnectScheduler: PrivacyDiagnosticsReconnectScheduler = {
     delay,
     action in
@@ -500,7 +502,7 @@ final class PrivacyDiagnosticsController: ObservableObject {
   }
 
   private func releaseAndCloseConnection() {
-    bestEffortRelease(connectForCleanup: false)
+    bestEffortRelease(connectForCleanup: true)
     closeConnection()
   }
 
@@ -508,6 +510,7 @@ final class PrivacyDiagnosticsController: ObservableObject {
     guard let leaseID else { return }
     if let transport {
       try? transport.send(.releaseExact(pid: pidProvider(), leaseID: leaseID))
+      try? transport.flushPendingWrites(timeout: Self.cleanupFlushTimeout)
       return
     }
     guard connectForCleanup else { return }
@@ -516,6 +519,7 @@ final class PrivacyDiagnosticsController: ObservableObject {
     do {
       try cleanupTransport.connect()
       try cleanupTransport.send(.releaseExact(pid: pidProvider(), leaseID: leaseID))
+      try cleanupTransport.flushPendingWrites(timeout: Self.cleanupFlushTimeout)
     } catch {
       return
     }
