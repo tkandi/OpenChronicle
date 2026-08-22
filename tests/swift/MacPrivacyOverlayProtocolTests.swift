@@ -21,7 +21,7 @@ enum MacPrivacyOverlayProtocolTests {
         let unresolvedAck = try JSONDecoder().decode(Acknowledgement.self, from: unresolved.output)
         precondition(unresolvedAck.generation == 12)
         precondition(unresolvedAck.rendered == false)
-        precondition(unresolvedAck.error == "unresolved-display")
+        precondition(unresolvedAck.error == "unresolved-window-id")
 
         let exactMarker = "exact-private-marker-must-not-escape"
         let reasonCommand = #"{"generation":13,"state":"protected","style":"pill","displays":[],"all_displays":false,"reason_display":"hybrid","reason_detail":"exact","reason_trigger":"hover","reasons":[{"code":"window_title_rule","window_title":"\#(exactMarker)"}]}"# + "\n"
@@ -31,7 +31,7 @@ enum MacPrivacyOverlayProtocolTests {
         let reasonAck = try JSONDecoder().decode(Acknowledgement.self, from: reasonResult.output)
         precondition(reasonAck.generation == 13)
         precondition(reasonAck.rendered == false)
-        precondition(reasonAck.error == "unresolved-display")
+        precondition(reasonAck.error == "unresolved-window-id")
 
         let resumeMarker = "2026-08-22T18:30:00+08:00"
         try expectUnresolved(
@@ -108,7 +108,7 @@ enum MacPrivacyOverlayProtocolTests {
         let acknowledgement = try JSONDecoder().decode(Acknowledgement.self, from: result.output)
         precondition(acknowledgement.generation == generation)
         precondition(acknowledgement.rendered == false)
-        precondition(acknowledgement.error == "unresolved-display")
+        precondition(acknowledgement.error == "unresolved-window-id")
     }
 
     private static func runReasonCommand(

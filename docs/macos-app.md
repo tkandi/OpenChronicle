@@ -216,6 +216,28 @@ is fail-closed. The overlay helper is a separate process, so no visible
 indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
+### Filtered screenshots
+
+`capture.screenshot_privacy_mode` offers four capture policies. `off` keeps the
+ordinary display capture path and disables the background window monitor and
+indicator. `skip-monitor` uses the display-level fallback and omits a display
+that intersects a protected window. `mask-window` and `exclude-window` require
+macOS 14 or later: their ScreenCaptureKit helper source-excludes protected
+windows and every confirmed OpenChronicle indicator or input-panel window for
+the same decision generation. `mask-window` then paints the protected window
+bounds gray; `exclude-window` leaves the pixels behind those excluded windows
+visible.
+
+Filtered capture is authorized only when the window inventory, protected window
+IDs and regions, and indicator acknowledgement are complete and current. An
+unavailable helper, unsupported macOS version, missing or duplicate IDs, or a
+changed protection decision discards the filtered frame and uses a fresh
+`skip-monitor` decision instead. `mask-window` and `exclude-window` never
+fall back to an unfiltered screenshot; they remain screenshot-fail-closed when
+the fallback cannot safely omit the protected display. See
+[Capture](capture.md#screenshot-privacy-modes) for the complete fallback and
+multi-display behavior.
+
 The decision inventory is limited to alpha-positive, positive-size, normal
 layer-0 windows returned by CoreGraphics as on-screen. It locally inspects owner
 or app name, bundle identifier, title, CoreGraphics position and size, and

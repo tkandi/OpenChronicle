@@ -64,6 +64,9 @@ packages = ["src/openchronicle"]
 
 [tool.hatch.build.targets.sdist]
 exclude = [
+    "/macos/OpenChronicleApp/.build",
+    "/resources/mac-window-list",
+    "/resources/mac-privacy-overlay",
     "/resources/mac-screen-capture",
 ]
 

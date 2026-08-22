@@ -68,11 +68,20 @@ def test_screen_capture_sources_are_declared_for_wheel() -> None:
     )
 
 
-def test_screen_capture_binary_is_excluded_from_sdist() -> None:
+@pytest.mark.parametrize(
+    "generated_path",
+    [
+        "/resources/mac-window-list",
+        "/resources/mac-privacy-overlay",
+        "/resources/mac-screen-capture",
+        "/macos/OpenChronicleApp/.build",
+    ],
+)
+def test_generated_macos_artifacts_are_excluded_from_sdist(generated_path: str) -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text())
     excludes = pyproject["tool"]["hatch"]["build"]["targets"]["sdist"]["exclude"]
 
-    assert "/resources/mac-screen-capture" in excludes
+    assert generated_path in excludes
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="requires the macOS Swift SDK")
