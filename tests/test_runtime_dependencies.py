@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import os
 import platform
 import shutil
@@ -12,6 +13,30 @@ import tomllib
 from pathlib import Path
 
 import pytest
+
+_MACH_O_MAGIC = frozenset(
+    (
+        b"\xfe\xed\xfa\xce",
+        b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
+    )
+)
+
+
+def _archive_mach_o_entries(archive: tarfile.TarFile) -> list[str]:
+    entries = []
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        contents = archive.extractfile(member)
+        if contents is not None and contents.read(4) in _MACH_O_MAGIC:
+            entries.append(member.name)
+    return entries
 
 
 def test_litellm_tool_call_response_path_imports() -> None:
@@ -69,6 +94,30 @@ def test_screen_capture_sources_are_declared_for_wheel() -> None:
     )
 
 
+@pytest.mark.parametrize(
+    "magic",
+    (
+        b"\xfe\xed\xfa\xce",
+        b"\xfe\xed\xfa\xcf",
+        b"\xce\xfa\xed\xfe",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+        b"\xca\xfe\xba\xbf",
+        b"\xbf\xba\xfe\xca",
+    ),
+)
+def test_archive_mach_o_scanner_detects_thin_and_fat_magic(tmp_path: Path, magic: bytes) -> None:
+    archive_path = tmp_path / "archive.tar.gz"
+    member = tarfile.TarInfo("artifact")
+    member.size = len(magic)
+    with tarfile.open(archive_path, "w:gz") as archive:
+        archive.addfile(member, io.BytesIO(magic))
+
+    with tarfile.open(archive_path) as archive:
+        assert _archive_mach_o_entries(archive) == ["artifact"]
+
+
 def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> None:
     project = tmp_path / "project"
     resources = project / "resources"
@@ -121,13 +170,6 @@ def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
 
     archive_path = next(dist.glob("*.tar.gz"))
-    mach_o_magic = {
-        b"\xfe\xed\xfa\xce",
-        b"\xfe\xed\xfa\xcf",
-        b"\xce\xfa\xed\xfe",
-        b"\xcf\xfa\xed\xfe",
-        b"\xca\xfe\xba\xbe",
-    }
     with tarfile.open(archive_path) as archive:
         members = [member for member in archive.getmembers() if member.isfile()]
         names = {member.name.split("/", 1)[1] for member in members}
@@ -139,10 +181,7 @@ def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> 
         ))
         assert not any(name.startswith("macos/OpenChronicleApp/.build/") for name in names)
         assert not any(name.startswith(".build/") for name in names)
-        assert all(
-            archive.extractfile(member).read(4) not in mach_o_magic
-            for member in members
-        )
+        assert not _archive_mach_o_entries(archive)
 
 
 @pytest.mark.skipif(platform.system() != "Darwin", reason="requires the macOS Swift SDK")
