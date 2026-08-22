@@ -443,6 +443,35 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertFalse(controller.showsExactValues)
   }
 
+  func testActivePolicyChangeToOverlayReleasesKnownLeaseExactlyOnce() {
+    let transport = FakePrivacyDiagnosticsTransport()
+    var displayMode = PrivacyReasonDisplayOption.hybrid
+    var detail = PrivacyReasonDetailOption.exact
+    let controller = PrivacyDiagnosticsController(
+      transportFactory: { transport },
+      displayModeProvider: { displayMode },
+      detailProvider: { detail },
+      pidProvider: { 123 }
+    )
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    transport.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+    transport.deliverSnapshot(generation: 42, exact: true)
+    XCTAssertTrue(controller.showsExactValues)
+
+    displayMode = .overlay
+    detail = .category
+    controller.activeConfigurationDidChange()
+
+    XCTAssertFalse(controller.showsExactValues)
+    XCTAssertEqual(
+      transport.sent.filter { $0.action == .releaseExact },
+      [.releaseExact(pid: 123, leaseID: "lease-1")]
+    )
+    XCTAssertEqual(transport.flushCount, 1)
+    XCTAssertEqual(transport.closeCount, 1)
+  }
+
   func testStaleLeaseAcknowledgementForOldDisplayIsRejected() {
     let (controller, transport) = makeExactController(confirmedOn: 1)
     controller.setDisplay(2)

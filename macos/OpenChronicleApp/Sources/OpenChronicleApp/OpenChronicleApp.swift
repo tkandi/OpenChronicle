@@ -37,6 +37,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     )
     Self.permissions?.refresh()
     Self.backend?.refresh()
+    _ = Self.configuration?.observeBackendPID(Self.backend?.snapshot.pid)
     Self.loginItem?.refresh()
     Self.backend?.startIfNeeded(
       accessibilityGranted: Self.permissions?.accessibilityGranted == true
@@ -47,6 +48,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Self.permissions?.refresh()
         Self.capturePause?.tick()
         Self.backend?.refresh()
+        if Self.configuration?.observeBackendPID(Self.backend?.snapshot.pid) == true {
+          Self.privacyDiagnostics?.activeConfigurationDidChange()
+        }
         Self.loginItem?.refresh()
         Self.modelFailureNotifications?.poll()
         Self.backend?.startIfNeeded(
@@ -186,7 +190,7 @@ struct OpenChronicleDesktopApp: App {
     let capturePause = CapturePauseController(backend: backend)
     let privacyDiagnostics = PrivacyDiagnosticsController(
       activeConfigurationProvider: { [weak configuration] in
-        configuration?.snapshot
+        configuration?.activeSnapshot
       }
     )
     _backend = StateObject(wrappedValue: backend)

@@ -246,6 +246,53 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertFalse(descriptor.detail?.contains(marker) == true)
   }
 
+  func testZeroDisplayGlobalFailuresProduceVisibleReasonSections() {
+    let presentation = ProtectionDiagnosticsDetailPresentation.make(
+      selectedDisplayID: nil,
+      displays: [],
+      globalReasons: [
+        ProtectionReasonDiagnostic(code: .inventoryUnavailable, displayID: nil),
+        ProtectionReasonDiagnostic(code: .pauseStateUnavailable, displayID: nil),
+      ],
+      detail: .category,
+      showsExactValues: false
+    )
+
+    XCTAssertNil(presentation.emptyMessage)
+    XCTAssertEqual(presentation.sections.count, 1)
+    XCTAssertEqual(presentation.sections[0].title, "Global reasons")
+    XCTAssertEqual(
+      presentation.sections[0].descriptors.map(\.title),
+      ["Display inventory unavailable", "Pause state unavailable"]
+    )
+  }
+
+  func testZeroDisplayGlobalExactValuesRemainConcealedInPresentation() {
+    let marker = "private-global-diagnostic-marker"
+    let presentation = ProtectionDiagnosticsDetailPresentation.make(
+      selectedDisplayID: nil,
+      displays: [],
+      globalReasons: [
+        ProtectionReasonDiagnostic(
+          code: .helperParse,
+          displayID: nil,
+          windowTitle: marker,
+          rule: marker
+        )
+      ],
+      detail: .exact,
+      showsExactValues: false
+    )
+
+    let descriptor = presentation.sections[0].descriptors[0]
+    XCTAssertEqual(
+      descriptor.detail,
+      ProtectionReasonPresentationDescriptor.hiddenExactValuePlaceholder
+    )
+    XCTAssertFalse(descriptor.title.contains(marker))
+    XCTAssertFalse(descriptor.detail?.contains(marker) == true)
+  }
+
   func testPrivacyDraftEmitsArrayChangesAndRejectsBlankRules() throws {
     let payload = privacySnapshotPayload(path: "/tmp/config.toml")
     let snapshot = try JSONDecoder().decode(
@@ -344,6 +391,95 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(
       updates["capture.deny_app_names"] as? [String],
       ["Mail", "Passwords"]
+    )
+  }
+
+  @MainActor
+  func testRuntimePolicyPromotesSavedSnapshotOnlyAfterBackendPIDChanges() async throws {
+    let root = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let configFile = root.appendingPathComponent("config.toml")
+    try Data("[capture]\nprivacy_reason_display = \"hybrid\"\n".utf8).write(to: configFile)
+    let savedMarker = root.appendingPathComponent("saved")
+    let executable = root.appendingPathComponent("fake-openchronicle")
+    let initialPayload = snapshotPayload(path: configFile.path)
+    let savedPayload = initialPayload
+      .replacingOccurrences(of: "\"sha256\": \"abc123\"", with: "\"sha256\": \"next123\"")
+      .replacingOccurrences(
+        of: "\"privacy_reason_display\": \"hybrid\"",
+        with: "\"privacy_reason_display\": \"overlay\""
+      )
+      .replacingOccurrences(
+        of: "\"privacy_reason_detail\": \"exact\"",
+        with: "\"privacy_reason_detail\": \"category\""
+      )
+    let script = """
+      #!/bin/sh
+      case "$*" in
+        "config --json")
+          if [ -f '\(savedMarker.path)' ]; then
+            printf '%s\\n' '\(savedPayload)'
+          else
+            printf '%s\\n' '\(initialPayload)'
+          fi
+          ;;
+        "config --patch-json")
+          cat >/dev/null
+          touch '\(savedMarker.path)'
+          printf '%s\\n' '{"ok":true,"changed":true,"path":"\(configFile.path)","backup":null,"sha256":"next123"}'
+          ;;
+        *)
+          printf '%s\\n' '{"ok":false,"error":"unexpected arguments"}'
+          exit 9
+          ;;
+      esac
+      """
+    try Data(script.utf8).write(to: executable)
+    try FileManager.default.setAttributes(
+      [.posixPermissions: 0o755],
+      ofItemAtPath: executable.path
+    )
+    let controller = ConfigurationController(
+      paths: RuntimePaths(root: root),
+      locator: BackendLocator(
+        environment: ["OPENCHRONICLE_BIN": executable.path],
+        homeDirectory: root,
+        bundleResources: nil
+      )
+    )
+
+    await controller.load()
+    XCTAssertEqual(controller.activeSnapshot, controller.snapshot)
+    XCTAssertTrue(controller.observeBackendPID(111))
+    XCTAssertEqual(
+      PrivacyReasonRuntimePolicy(snapshot: controller.activeSnapshot),
+      PrivacyReasonRuntimePolicy(display: .hybrid, detail: .exact)
+    )
+
+    controller.updateDraft(\.privacyReasonDisplay, value: "overlay")
+    controller.updateDraft(\.privacyReasonDetail, value: "category")
+    let saved = await controller.saveCommon()
+    XCTAssertTrue(saved)
+    XCTAssertEqual(controller.snapshot?.sha256, "next123")
+    XCTAssertEqual(
+      PrivacyReasonRuntimePolicy(snapshot: controller.activeSnapshot),
+      PrivacyReasonRuntimePolicy(display: .hybrid, detail: .exact)
+    )
+    XCTAssertFalse(controller.observeBackendPID(111))
+    XCTAssertEqual(
+      PrivacyReasonRuntimePolicy(snapshot: controller.activeSnapshot),
+      PrivacyReasonRuntimePolicy(display: .hybrid, detail: .exact)
+    )
+
+    XCTAssertFalse(controller.observeBackendPID(nil))
+    XCTAssertTrue(controller.observeBackendPID(222))
+    XCTAssertEqual(controller.activeSnapshot, controller.snapshot)
+    XCTAssertEqual(
+      PrivacyReasonRuntimePolicy(snapshot: controller.activeSnapshot),
+      PrivacyReasonRuntimePolicy(display: .overlay, detail: .category)
     )
   }
 }

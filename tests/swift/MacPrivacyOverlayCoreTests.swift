@@ -29,6 +29,7 @@ enum MacPrivacyOverlayCoreTests {
 
         testRevealState()
         testReasonPresentation()
+        testTimedPauseResumePresentation()
 
         let protectedPresentation = IndicatorPresentation.make(state: .protected, style: .pill)
         precondition(protectedPresentation.text == "已保护")
@@ -109,6 +110,48 @@ enum MacPrivacyOverlayCoreTests {
             maximumLines: 3
         )
         precondition(overflow == ["窗口标题规则", "窗口标题规则", "+3"])
+    }
+
+    private static func testTimedPauseResumePresentation() {
+        let present = try! JSONDecoder().decode(
+            OverlayReason.self,
+            from: Data(
+                #"{"code":"timed_pause","effective_resume_at":"2026-08-22T18:30:00+08:00"}"#.utf8
+            )
+        )
+        precondition(present.effectiveResumeAt == "2026-08-22T18:30:00+08:00")
+        precondition(
+            present.presentationText(includeExactValues: true)
+                == "定时暂停 · 恢复: 2026-08-22T18:30:00+08:00"
+        )
+        precondition(present.presentationText(includeExactValues: false) == "定时暂停")
+
+        let missing = try! JSONDecoder().decode(
+            OverlayReason.self,
+            from: Data(#"{"code":"timed_pause"}"#.utf8)
+        )
+        precondition(missing.effectiveResumeAt == nil)
+        precondition(missing.presentationText(includeExactValues: true) == "定时暂停")
+
+        let longResume = "prefix\n" + String(repeating: "x", count: 170)
+            + "private-control-suffix"
+        let bounded = OverlayReason(
+            code: "timed_pause",
+            displayID: nil,
+            sourceDisplayID: nil,
+            appName: nil,
+            bundleID: nil,
+            windowTitle: nil,
+            rule: nil,
+            effectiveResumeAt: longResume
+        )
+        let boundedValue = bounded.presentationText(includeExactValues: true)
+            .components(separatedBy: "恢复: ").last!
+        precondition(boundedValue.count == 160)
+        precondition(boundedValue.hasSuffix("…"))
+        precondition(!boundedValue.contains("\n"))
+        precondition(!boundedValue.contains("private-control-suffix"))
+        precondition(bounded.presentationText(includeExactValues: false) == "定时暂停")
     }
 
     private static func testControllerRendering() {

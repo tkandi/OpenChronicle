@@ -199,6 +199,40 @@ def test_diagnostics_guard_is_published_and_waitable(inventory, fake_overlay) ->
     assert published == [decision]
 
 
+def test_guard_only_monitor_ignores_normal_rules_and_becomes_inactive_after_release(
+    inventory,
+    fake_overlay,
+) -> None:
+    guard = MutableGuard(display_ids=frozenset({1}))
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="pill",
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=guard.snapshot,
+        diagnostics_guard_only=True,
+    )
+
+    guarded = monitor.decision_for_capture(force=True)
+    guard.display_ids = frozenset()
+    monitor.request_refresh()
+    released = monitor.decision_for_capture(force=True)
+
+    assert guarded.snapshot.state is ProtectionState.PROTECTED
+    assert guarded.snapshot.protected_display_ids == frozenset({1})
+    assert [reason.code for reason in guarded.snapshot.reasons_for_display(1)] == [
+        ProtectionReasonCode.DIAGNOSTICS_REVEAL
+    ]
+    assert released.snapshot.state is ProtectionState.INACTIVE
+    assert released.snapshot.protected_display_ids == frozenset()
+    assert released.snapshot.display_reasons.reasons == ()
+
+
 def test_wait_rejects_stale_or_unconfirmed_display_generation(
     inventory,
     fake_overlay,

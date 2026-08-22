@@ -120,10 +120,10 @@ struct MainWindowView: View {
         page: .runtime
       )
     case .protectionDiagnostics:
-      if configuration.snapshot != nil {
+      if configuration.activeSnapshot != nil {
         ProtectionDiagnosticsView(
           controller: privacyDiagnostics,
-          detailOption: activePrivacyReasonDetail
+          detailOption: activePrivacyReasonPolicy.detail
         )
       } else {
         VStack(spacing: 8) {
@@ -139,7 +139,7 @@ struct MainWindowView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .task {
-          if configuration.snapshot == nil && !configuration.isLoading {
+          if configuration.activeSnapshot == nil && !configuration.isLoading {
             await configuration.load()
           }
         }
@@ -161,9 +161,7 @@ struct MainWindowView: View {
     configuration.hasFormChanges || configuration.hasRawChanges
   }
 
-  private var activePrivacyReasonDetail: PrivacyReasonDetailOption {
-    PrivacyReasonDetailOption(
-      rawValue: configuration.snapshot?.values?.capture.privacyReasonDetail ?? ""
-    ) ?? .defaultValue
+  private var activePrivacyReasonPolicy: PrivacyReasonRuntimePolicy {
+    PrivacyReasonRuntimePolicy(snapshot: configuration.activeSnapshot)
   }
 }

@@ -439,6 +439,70 @@ def test_active_candidate_without_privacy_display_does_not_block_ax() -> None:
     assert snapshot.ax_blocked is False
 
 
+def test_unmapped_active_candidate_without_guard_preserves_ordinary_behavior() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(250, 0, 80, 90),
+                is_active_candidate=True,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(screenshot_privacy_fail_closed=False),
+        inventory,
+        paused=False,
+        generation=14,
+        now=17.0,
+    )
+
+    assert snapshot.state is ProtectionState.INACTIVE
+    assert snapshot.failure_reason is None
+    assert snapshot.active_candidate_display_ids == frozenset()
+    assert snapshot.ax_blocked is False
+
+
+def test_guarded_unmapped_active_candidate_fails_closed_with_fixed_reason() -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(250, 0, 80, 90),
+                is_active_candidate=True,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        cfg,
+        inventory,
+        paused=False,
+        generation=15,
+        now=18.0,
+        diagnostic_display_ids=frozenset({2}),
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.failure_reason is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+    assert snapshot.diagnostics_guard_active is True
+    assert snapshot.diagnostics_guard_invalid is False
+    assert snapshot.active_candidate_display_ids == frozenset()
+    assert snapshot.ax_blocked is True
+    assert failure_requires_fail_closed(cfg, snapshot) is True
+    assert [reason.code for reason in snapshot.reasons_for_display(None)] == [
+        ProtectionReasonCode.ACTIVE_WINDOW_UNMAPPED
+    ]
+
+
 def test_empty_displays_fail_closed_for_sensitive_active_window() -> None:
     cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
     inventory = WindowInventory(

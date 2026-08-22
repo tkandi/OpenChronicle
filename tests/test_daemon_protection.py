@@ -17,7 +17,10 @@ from openchronicle.capture.privacy import (
     WindowInventory,
 )
 from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
-from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsGuardSnapshot
+from openchronicle.capture.privacy_diagnostics_guard import (
+    DiagnosticsGuardSnapshot,
+    DiagnosticsLeaseManager,
+)
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_monitor import (
     PrivacyProtectionMonitor,
@@ -31,6 +34,7 @@ class FakeMonitor:
     def __init__(self, events: list[str] | None = None) -> None:
         self.start_calls = 0
         self.stop_calls = 0
+        self.refresh_requests = 0
         self.events = events
         self.listeners = []
 
@@ -48,7 +52,7 @@ class FakeMonitor:
         self.listeners.append(listener)
 
     def request_refresh(self) -> None:
-        return None
+        self.refresh_requests += 1
 
     def wait_for_display_protection(
         self,
@@ -294,6 +298,7 @@ async def test_daemon_privacy_mode_off_bypasses_background_monitor(
 ) -> None:
     session = FakeSessionManager()
     seen_monitor = object()
+    manager = FakeLeaseManager(ac_root / "runtime" / "privacy-reveal.guard")
 
     def unexpected_monitor(*_args, **_kwargs):
         raise AssertionError("privacy mode off must not construct a background monitor")
@@ -307,6 +312,7 @@ async def test_daemon_privacy_mode_off_bypasses_background_monitor(
 
     monkeypatch.setattr(daemon_mod, "PrivacyProtectionMonitor", unexpected_monitor)
     monkeypatch.setattr(daemon_mod, "PrivacyOverlayClient", lambda: object())
+    monkeypatch.setattr(daemon_mod, "DiagnosticsLeaseManager", lambda _path: manager)
     monkeypatch.setattr(daemon_mod.session_tick, "build_manager", lambda _cfg: session)
     monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
     monkeypatch.setattr(daemon_mod.session_tick, "run_check_cuts", park_forever)
@@ -317,8 +323,156 @@ async def test_daemon_privacy_mode_off_bypasses_background_monitor(
 
     await daemon_mod._run(cfg, capture_only=True)
 
+    assert manager.load_calls == 1
     assert seen_monitor is None
     assert session.force_end_calls == ["daemon-shutdown"]
+
+
+@pytest.mark.parametrize("guard_kind", ["live", "invalid"])
+@pytest.mark.asyncio
+async def test_mode_off_restart_starts_guard_only_services_for_persisted_guard(
+    ac_root: Path,
+    monkeypatch,
+    guard_kind: str,
+) -> None:
+    guard_path = daemon_mod.paths.privacy_diagnostics_guard()
+    guard_path.parent.mkdir(parents=True, exist_ok=True)
+    if guard_kind == "live":
+        writer = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: True)
+        writer.load()
+        writer.acquire(pid=123, display_id=2)
+    else:
+        guard_path.write_text("{invalid", encoding="utf-8")
+    manager = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: True)
+    monitor = FakeMonitor()
+    session = FakeSessionManager()
+    build_calls: list[dict] = []
+    seen_monitor = None
+    servers: list[FakeDiagnosticsServer] = []
+
+    async def capture_once_then_return(*_args, protection_monitor=None, **_kwargs) -> None:
+        nonlocal seen_monitor
+        seen_monitor = protection_monitor
+
+    def build_monitor(_cfg, **kwargs):
+        build_calls.append(kwargs)
+        return monitor
+
+    def build_server(socket_path, lease_manager, **kwargs):
+        server = FakeDiagnosticsServer(socket_path, lease_manager, **kwargs)
+        servers.append(server)
+        return server
+
+    cfg = _configure_daemon(monkeypatch, monitor, session)
+    cfg.capture.screenshot_privacy_mode = "off"
+    monkeypatch.setattr(daemon_mod, "DiagnosticsLeaseManager", lambda _path: manager)
+    monkeypatch.setattr(daemon_mod, "_build_protection_monitor", build_monitor)
+    monkeypatch.setattr(daemon_mod, "PrivacyDiagnosticsServer", build_server)
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
+
+    await daemon_mod._run(cfg, capture_only=True)
+
+    loaded = manager.snapshot()
+    assert build_calls[0]["guard_only"] is True
+    assert build_calls[0]["diagnostics_guard_reader"]() == loaded
+    assert loaded.fail_closed_all is (guard_kind == "invalid")
+    assert loaded.display_ids == (frozenset({2}) if guard_kind == "live" else frozenset())
+    assert seen_monitor is monitor
+    assert monitor.start_calls == 1
+    assert monitor.stop_calls == 1
+    assert len(servers) == 1
+    assert servers[0].start_calls == 1
+    assert servers[0].stop_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mode_off_restart_prunes_confirmed_dead_guard_without_starting_services(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    guard_path = daemon_mod.paths.privacy_diagnostics_guard()
+    writer = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: True)
+    writer.load()
+    writer.acquire(pid=123, display_id=2)
+    manager = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: False)
+    session = FakeSessionManager()
+    seen_monitor = object()
+
+    def unexpected_monitor(*_args, **_kwargs):
+        raise AssertionError("a pruned dead guard must not start privacy services")
+
+    async def capture_once_then_return(*_args, protection_monitor=None, **_kwargs) -> None:
+        nonlocal seen_monitor
+        seen_monitor = protection_monitor
+
+    async def park_forever(*_args, **_kwargs) -> None:
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(daemon_mod, "DiagnosticsLeaseManager", lambda _path: manager)
+    monkeypatch.setattr(daemon_mod, "_build_protection_monitor", unexpected_monitor)
+    monkeypatch.setattr(daemon_mod, "PrivacyDiagnosticsServer", unexpected_monitor)
+    monkeypatch.setattr(daemon_mod.session_tick, "build_manager", lambda _cfg: session)
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
+    monkeypatch.setattr(daemon_mod.session_tick, "run_check_cuts", park_forever)
+    monkeypatch.setattr(daemon_mod.session_tick, "run_daily_safety_net", park_forever)
+    cfg = Config()
+    cfg.capture.screenshot_privacy_mode = "off"
+    cfg.mcp.auto_start = False
+
+    await daemon_mod._run(cfg, capture_only=True)
+
+    assert manager.snapshot() == DiagnosticsGuardSnapshot(frozenset(), False)
+    assert not guard_path.exists()
+    assert seen_monitor is None
+
+
+@pytest.mark.asyncio
+async def test_mode_off_restart_keeps_services_after_releasing_loaded_guard(
+    ac_root: Path,
+    monkeypatch,
+) -> None:
+    guard_path = daemon_mod.paths.privacy_diagnostics_guard()
+    writer = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: True)
+    writer.load()
+    lease = writer.acquire(pid=123, display_id=2)
+    manager = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: True)
+    monitor = FakeMonitor()
+    session = FakeSessionManager()
+    seen_monitor = None
+    server_started = False
+
+    async def capture_once_then_return(*_args, protection_monitor=None, **_kwargs) -> None:
+        nonlocal seen_monitor
+        seen_monitor = protection_monitor
+        assert manager.snapshot() == DiagnosticsGuardSnapshot(frozenset(), False)
+
+    class ReleasingDiagnosticsServer(FakeDiagnosticsServer):
+        def start(self) -> None:
+            nonlocal server_started
+            super().start()
+            server_started = True
+            manager.release(lease.lease_id, pid=123)
+            monitor.request_refresh()
+
+    cfg = _configure_daemon(monkeypatch, monitor, session)
+    cfg.capture.screenshot_privacy_mode = "off"
+    monkeypatch.setattr(daemon_mod, "DiagnosticsLeaseManager", lambda _path: manager)
+    monkeypatch.setattr(
+        daemon_mod,
+        "_build_protection_monitor",
+        lambda _cfg, **kwargs: monitor if kwargs["guard_only"] else None,
+    )
+    monkeypatch.setattr(daemon_mod, "PrivacyDiagnosticsServer", ReleasingDiagnosticsServer)
+    monkeypatch.setattr(daemon_mod.capture_scheduler, "run_forever", capture_once_then_return)
+
+    await daemon_mod._run(cfg, capture_only=True)
+
+    assert server_started is True
+    assert seen_monitor is monitor
+    assert monitor.start_calls == 1
+    assert monitor.refresh_requests == 1
+    assert monitor.stop_calls == 1
+    assert not guard_path.exists()
 
 
 @pytest.mark.asyncio

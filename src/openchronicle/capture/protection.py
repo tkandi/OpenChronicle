@@ -163,6 +163,14 @@ def build_protection_snapshot(
         for display in displays
         if any(_regions_intersect(display.region, window.region) for window in active_candidates)
     )
+    has_unmapped_guarded_active_candidate = diagnostics_guard_active and any(
+        not any(
+            _display_is_usable(display)
+            and _regions_intersect(display.region, window.region)
+            for display in displays
+        )
+        for window in active_candidates
+    )
     sensitive_windows = (
         [
             (window, matches)
@@ -187,7 +195,9 @@ def build_protection_snapshot(
             derived_failure_reason = ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
         elif len(active_windows) > 1:
             derived_failure_reason = ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS
-        elif active_window is not None and active_display_id is None:
+        elif (
+            active_window is not None and active_display_id is None
+        ) or has_unmapped_guarded_active_candidate:
             derived_failure_reason = ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
         elif has_unmapped_sensitive_window:
             derived_failure_reason = ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED

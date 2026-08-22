@@ -1,6 +1,39 @@
 import AppKit
 import SwiftUI
 
+struct WindowScreenGeometry: Equatable {
+  let displayID: UInt32?
+  let frame: CGRect
+}
+
+enum WindowDisplaySelection {
+  static func singleIntersectingDisplayID(
+    windowFrame: CGRect,
+    screens: [WindowScreenGeometry]
+  ) -> UInt32? {
+    guard isValid(frame: windowFrame), screens.allSatisfy({ isValid(frame: $0.frame) }) else {
+      return nil
+    }
+    let intersecting = screens.filter { screen in
+      let overlap = windowFrame.intersection(screen.frame)
+      return !overlap.isNull && overlap.width > 0 && overlap.height > 0
+    }
+    guard intersecting.count == 1, let displayID = intersecting[0].displayID, displayID > 0 else {
+      return nil
+    }
+    return displayID
+  }
+
+  private static func isValid(frame: CGRect) -> Bool {
+    frame.origin.x.isFinite
+      && frame.origin.y.isFinite
+      && frame.width.isFinite
+      && frame.height.isFinite
+      && frame.width > 0
+      && frame.height > 0
+  }
+}
+
 extension ProtectionDisplayDiagnostic: Identifiable {}
 
 enum ProtectionReasonDetailTruncation: Equatable {
@@ -90,6 +123,72 @@ struct ProtectionReasonPresentationDescriptor: Equatable {
     case .unknown:
       return "questionmark.circle"
     }
+  }
+}
+
+struct ProtectionReasonPresentationSection: Equatable {
+  let title: String
+  let descriptors: [ProtectionReasonPresentationDescriptor]
+}
+
+struct ProtectionDiagnosticsDetailPresentation: Equatable {
+  let sections: [ProtectionReasonPresentationSection]
+  let emptyMessage: String?
+
+  static func make(
+    selectedDisplayID: Int?,
+    displays: [ProtectionDisplayDiagnostic],
+    globalReasons: [ProtectionReasonDiagnostic],
+    detail: PrivacyReasonDetailOption,
+    showsExactValues: Bool
+  ) -> ProtectionDiagnosticsDetailPresentation {
+    var sections: [ProtectionReasonPresentationSection] = []
+    if !globalReasons.isEmpty {
+      sections.append(
+        section(
+          title: "Global reasons",
+          reasons: globalReasons,
+          detail: detail,
+          showsExactValues: showsExactValues
+        )
+      )
+    }
+    if let selectedDisplayID,
+      let display = displays.first(where: { $0.id == selectedDisplayID })
+    {
+      sections.append(
+        section(
+          title: "Display \(display.id) reasons",
+          reasons: display.reasons,
+          detail: detail,
+          showsExactValues: showsExactValues
+        )
+      )
+    }
+    return ProtectionDiagnosticsDetailPresentation(
+      sections: sections,
+      emptyMessage: sections.isEmpty
+        ? (displays.isEmpty ? "No reasons reported" : "Select a display")
+        : nil
+    )
+  }
+
+  private static func section(
+    title: String,
+    reasons: [ProtectionReasonDiagnostic],
+    detail: PrivacyReasonDetailOption,
+    showsExactValues: Bool
+  ) -> ProtectionReasonPresentationSection {
+    ProtectionReasonPresentationSection(
+      title: title,
+      descriptors: reasons.map {
+        ProtectionReasonPresentationDescriptor(
+          reason: $0,
+          detail: detail,
+          showsExactValues: showsExactValues
+        )
+      }
+    )
   }
 }
 
@@ -274,56 +373,58 @@ struct ProtectionDiagnosticsView: View {
 
   @ViewBuilder
   private var detailPane: some View {
-    if let selectedDisplay {
-      VStack(alignment: .leading, spacing: 0) {
-        HStack {
-          Text("Display \(selectedDisplay.id) reasons")
-            .font(.headline)
-          Spacer()
-          Text("\(selectedDisplay.reasons.count)")
-            .monospacedDigit()
-            .foregroundStyle(.secondary)
-        }
-        .padding(.horizontal, 16)
-        .frame(height: 38)
-
-        Divider()
-        if selectedDisplay.reasons.isEmpty {
-          Text("No reasons reported")
-            .foregroundStyle(.secondary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-          ScrollView {
-            LazyVStack(alignment: .leading, spacing: 0) {
-              ForEach(Array(selectedDisplay.reasons.enumerated()), id: \.offset) {
-                index,
-                reason in
-                if index > 0 {
-                  Divider()
-                }
-                ProtectionReasonDetailRow(
-                  descriptor: ProtectionReasonPresentationDescriptor(
-                    reason: reason,
-                    detail: detailOption,
-                    showsExactValues: controller.showsExactValues
-                  )
-                )
-              }
+    let presentation = ProtectionDiagnosticsDetailPresentation.make(
+      selectedDisplayID: selectedDisplayID,
+      displays: controller.displayDiagnostics,
+      globalReasons: controller.globalReasons,
+      detail: detailOption,
+      showsExactValues: controller.showsExactValues
+    )
+    if presentation.sections.isEmpty {
+      Text(presentation.emptyMessage ?? "No reasons reported")
+        .foregroundStyle(.secondary)
+        .frame(maxWidth: .infinity, minHeight: 190, maxHeight: 270)
+    } else {
+      ScrollView {
+        LazyVStack(alignment: .leading, spacing: 0) {
+          ForEach(Array(presentation.sections.enumerated()), id: \.offset) {
+            sectionIndex,
+            section in
+            if sectionIndex > 0 {
+              Divider()
+            }
+            HStack {
+              Text(section.title)
+                .font(.headline)
+              Spacer()
+              Text("\(section.descriptors.count)")
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
             }
             .padding(.horizontal, 16)
+            .frame(height: 38)
+
+            Divider()
+            if section.descriptors.isEmpty {
+              Text("No reasons reported")
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, minHeight: 64)
+            } else {
+              ForEach(Array(section.descriptors.enumerated()), id: \.offset) {
+                reasonIndex,
+                descriptor in
+                if reasonIndex > 0 {
+                  Divider()
+                }
+                ProtectionReasonDetailRow(descriptor: descriptor)
+              }
+              .padding(.horizontal, 16)
+            }
           }
         }
       }
       .frame(minHeight: 190, idealHeight: 230, maxHeight: 270)
-    } else {
-      Text("Select a display")
-        .foregroundStyle(.secondary)
-        .frame(maxWidth: .infinity, minHeight: 190, maxHeight: 270)
     }
-  }
-
-  private var selectedDisplay: ProtectionDisplayDiagnostic? {
-    controller.displayDiagnostics.first { $0.id == selectedDisplayID }
   }
 
   private func selectAvailableDisplay(from displayIDs: [Int]) {
@@ -411,7 +512,13 @@ private struct ProtectionReasonDetailRow: View {
   }
 }
 
-private struct WindowScreenObserver: NSViewRepresentable {
+typealias WindowScreenSettleScheduler = (
+  _ delay: TimeInterval,
+  _ action: @escaping () -> Void
+) -> () -> Void
+typealias WindowFrameProvider = @MainActor (NSWindow) -> CGRect
+
+struct WindowScreenObserver: NSViewRepresentable {
   let onDisplayChange: (UInt32?) -> Void
 
   func makeCoordinator() -> Coordinator {
@@ -436,12 +543,50 @@ private struct WindowScreenObserver: NSViewRepresentable {
     coordinator.detach()
   }
 
+  @MainActor
   final class Coordinator: NSObject {
-    var onDisplayChange: (UInt32?) -> Void
-    private weak var window: NSWindow?
+    private static let settleDelay: TimeInterval = 0.15
 
-    init(onDisplayChange: @escaping (UInt32?) -> Void) {
+    var onDisplayChange: (UInt32?) -> Void
+    private let screenGeometryProvider: () -> [WindowScreenGeometry]
+    private let windowFrameProvider: WindowFrameProvider
+    private let settleScheduler: WindowScreenSettleScheduler
+    private weak var window: NSWindow?
+    private var pendingSettleCancellation: (() -> Void)?
+    private var settleGeneration = 0
+    private var isMoving = false
+    private var isLiveResizing = false
+
+    init(
+      onDisplayChange: @escaping (UInt32?) -> Void,
+      screenGeometryProvider: @escaping () -> [WindowScreenGeometry] = {
+        NSScreen.screens.map { screen in
+          let number = screen.deviceDescription[
+            NSDeviceDescriptionKey("NSScreenNumber")
+          ] as? NSNumber
+          let displayID: UInt32?
+          if let number,
+            number.int64Value > 0,
+            number.uint64Value <= UInt64(UInt32.max)
+          {
+            displayID = UInt32(number.uint64Value)
+          } else {
+            displayID = nil
+          }
+          return WindowScreenGeometry(displayID: displayID, frame: screen.frame)
+        }
+      },
+      windowFrameProvider: @escaping WindowFrameProvider = { $0.frame },
+      settleScheduler: @escaping WindowScreenSettleScheduler = { delay, action in
+        let workItem = DispatchWorkItem(block: action)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
+        return { workItem.cancel() }
+      }
+    ) {
       self.onDisplayChange = onDisplayChange
+      self.screenGeometryProvider = screenGeometryProvider
+      self.windowFrameProvider = windowFrameProvider
+      self.settleScheduler = settleScheduler
     }
 
     func attach(to window: NSWindow?) {
@@ -449,48 +594,143 @@ private struct WindowScreenObserver: NSViewRepresentable {
       detach()
       self.window = window
       if let window {
-        NotificationCenter.default.addObserver(
-          self,
-          selector: #selector(windowDidChangeScreen(_:)),
-          name: NSWindow.didChangeScreenNotification,
-          object: window
+        observe(NSWindow.willMoveNotification, #selector(windowWillMove(_:)), window: window)
+        observe(NSWindow.didMoveNotification, #selector(windowDidMove(_:)), window: window)
+        observe(
+          NSWindow.willStartLiveResizeNotification,
+          #selector(windowWillStartLiveResize(_:)),
+          window: window
         )
+        observe(NSWindow.didResizeNotification, #selector(windowDidResize(_:)), window: window)
+        observe(
+          NSWindow.didEndLiveResizeNotification,
+          #selector(windowDidEndLiveResize(_:)),
+          window: window
+        )
+        observe(
+          NSWindow.didChangeScreenNotification,
+          #selector(windowDidChangeScreen(_:)),
+          window: window
+        )
+        publishDisplayID(for: window)
+      } else {
+        onDisplayChange(nil)
       }
-      publishDisplayID()
     }
 
     func detach() {
+      let hadWindow = window != nil
+      cancelPendingSettle()
       if let window {
-        NotificationCenter.default.removeObserver(
-          self,
-          name: NSWindow.didChangeScreenNotification,
-          object: window
-        )
+        NotificationCenter.default.removeObserver(self, name: nil, object: window)
       }
       window = nil
+      isMoving = false
+      isLiveResizing = false
+      if hadWindow {
+        onDisplayChange(nil)
+      }
+    }
+
+    private func observe(_ name: Notification.Name, _ selector: Selector, window: NSWindow) {
+      NotificationCenter.default.addObserver(
+        self,
+        selector: selector,
+        name: name,
+        object: window
+      )
+    }
+
+    @objc private func windowWillMove(_ notification: Notification) {
+      guard currentWindow(from: notification) != nil else { return }
+      isMoving = true
+      concealAndCancelSettle()
+    }
+
+    @objc private func windowDidMove(_ notification: Notification) {
+      guard let window = currentWindow(from: notification) else { return }
+      isMoving = false
+      concealAndScheduleSettle(for: window)
+    }
+
+    @objc private func windowWillStartLiveResize(_ notification: Notification) {
+      guard currentWindow(from: notification) != nil else { return }
+      isLiveResizing = true
+      concealAndCancelSettle()
+    }
+
+    @objc private func windowDidResize(_ notification: Notification) {
+      guard let window = currentWindow(from: notification) else { return }
+      if isLiveResizing {
+        concealAndCancelSettle()
+      } else {
+        concealAndScheduleSettle(for: window)
+      }
+    }
+
+    @objc private func windowDidEndLiveResize(_ notification: Notification) {
+      guard let window = currentWindow(from: notification) else { return }
+      isLiveResizing = false
+      concealAndScheduleSettle(for: window)
     }
 
     @objc private func windowDidChangeScreen(_ notification: Notification) {
-      publishDisplayID()
+      guard let window = currentWindow(from: notification) else { return }
+      if isMoving || isLiveResizing {
+        concealAndCancelSettle()
+      } else {
+        concealAndScheduleSettle(for: window)
+      }
     }
 
-    private func publishDisplayID() {
-      guard
-        let number = window?.screen?.deviceDescription[
-          NSDeviceDescriptionKey("NSScreenNumber")
-        ] as? NSNumber,
-        number.int64Value > 0,
-        number.uint64Value <= UInt64(UInt32.max)
+    private func currentWindow(from notification: Notification) -> NSWindow? {
+      guard let notifiedWindow = notification.object as? NSWindow,
+        notifiedWindow === window
       else {
-        onDisplayChange(nil)
-        return
+        return nil
       }
-      onDisplayChange(UInt32(number.uint64Value))
+      return notifiedWindow
+    }
+
+    private func concealAndCancelSettle() {
+      cancelPendingSettle()
+      onDisplayChange(nil)
+    }
+
+    private func concealAndScheduleSettle(for window: NSWindow) {
+      concealAndCancelSettle()
+      let generation = settleGeneration
+      pendingSettleCancellation = settleScheduler(Self.settleDelay) { [weak self, weak window] in
+        guard let self, let window,
+          self.settleGeneration == generation,
+          self.window === window
+        else {
+          return
+        }
+        self.pendingSettleCancellation = nil
+        self.settleGeneration += 1
+        self.publishDisplayID(for: window)
+      }
+    }
+
+    private func cancelPendingSettle() {
+      settleGeneration += 1
+      pendingSettleCancellation?()
+      pendingSettleCancellation = nil
+    }
+
+    private func publishDisplayID(for window: NSWindow) {
+      onDisplayChange(
+        WindowDisplaySelection.singleIntersectingDisplayID(
+          windowFrame: windowFrameProvider(window),
+          screens: screenGeometryProvider()
+        )
+      )
     }
   }
 }
 
-private final class ScreenObserverView: NSView {
+final class ScreenObserverView: NSView {
   var onWindowChange: ((NSWindow?) -> Void)?
 
   override func viewDidMoveToWindow() {

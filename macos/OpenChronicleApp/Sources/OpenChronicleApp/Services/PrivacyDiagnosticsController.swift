@@ -88,12 +88,10 @@ final class PrivacyDiagnosticsController: ObservableObject {
         UnixPrivacyDiagnosticsTransport(socketURL: paths.privacyDiagnosticsSocket)
       },
       displayModeProvider: {
-        let rawValue = activeConfigurationProvider()?.values?.capture.privacyReasonDisplay
-        return PrivacyReasonDisplayOption(rawValue: rawValue ?? "") ?? .defaultValue
+        PrivacyReasonRuntimePolicy(snapshot: activeConfigurationProvider()).display
       },
       detailProvider: {
-        let rawValue = activeConfigurationProvider()?.values?.capture.privacyReasonDetail
-        return PrivacyReasonDetailOption(rawValue: rawValue ?? "") ?? .defaultValue
+        PrivacyReasonRuntimePolicy(snapshot: activeConfigurationProvider()).detail
       },
       pidProvider: pidProvider,
       reconnectScheduler: reconnectScheduler
@@ -149,6 +147,18 @@ final class PrivacyDiagnosticsController: ObservableObject {
     exactRequested = false
     hideExactSynchronously(clearPublishedModels: false)
     releaseLeaseIfPossible(reacquire: false)
+  }
+
+  func activeConfigurationDidChange() {
+    guard !stopped, pageVisible else { return }
+    exactRequested = detailProvider() == .exact
+    if !exactRequested {
+      hideExactSynchronously(clearPublishedModels: false)
+      if shouldSubscribe {
+        releaseLeaseIfPossible(reacquire: false)
+      }
+    }
+    applyActivePolicy()
   }
 
   func shutdown() {

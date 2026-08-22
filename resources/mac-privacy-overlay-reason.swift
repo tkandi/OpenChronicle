@@ -14,6 +14,7 @@ struct OverlayReason: Codable, Equatable {
     let bundleID: String?
     let windowTitle: String?
     let rule: String?
+    let effectiveResumeAt: String?
 
     enum CodingKeys: String, CodingKey {
         case code
@@ -23,6 +24,27 @@ struct OverlayReason: Codable, Equatable {
         case bundleID = "bundle_id"
         case windowTitle = "window_title"
         case rule
+        case effectiveResumeAt = "effective_resume_at"
+    }
+
+    init(
+        code: String,
+        displayID: UInt32?,
+        sourceDisplayID: UInt32?,
+        appName: String?,
+        bundleID: String?,
+        windowTitle: String?,
+        rule: String?,
+        effectiveResumeAt: String? = nil
+    ) {
+        self.code = code
+        self.displayID = displayID
+        self.sourceDisplayID = sourceDisplayID
+        self.appName = appName
+        self.bundleID = bundleID
+        self.windowTitle = windowTitle
+        self.rule = rule
+        self.effectiveResumeAt = effectiveResumeAt
     }
 
     func presentationText(includeExactValues: Bool) -> String {
@@ -34,6 +56,7 @@ struct OverlayReason: Codable, Equatable {
             bundleID.map { "标识: \(boundedReasonValue($0))" },
             windowTitle.map { "标题: \(boundedReasonValue($0))" },
             rule.map { "规则: \(boundedReasonValue($0))" },
+            effectiveResumeAt.map { "恢复: \(boundedReasonValue($0))" },
         ].compactMap { $0 }
         return ([category] + details).joined(separator: " · ")
     }

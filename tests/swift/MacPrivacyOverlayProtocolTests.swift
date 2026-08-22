@@ -33,6 +33,49 @@ enum MacPrivacyOverlayProtocolTests {
         precondition(reasonAck.rendered == false)
         precondition(reasonAck.error == "unresolved-display")
 
+        let resumeMarker = "2026-08-22T18:30:00+08:00"
+        try expectUnresolved(
+            helper,
+            generation: 14,
+            reasonDetail: "exact",
+            reason: ["code": "timed_pause", "effective_resume_at": resumeMarker]
+        )
+        try expectUnresolved(
+            helper,
+            generation: 15,
+            reasonDetail: "exact",
+            reason: ["code": "timed_pause"]
+        )
+        try expectUnresolved(
+            helper,
+            generation: 16,
+            reasonDetail: "exact",
+            reason: [
+                "code": "timed_pause",
+                "effective_resume_at": String(repeating: "x", count: 170) + "\ncontrol-suffix",
+            ]
+        )
+        try expectUnresolved(
+            helper,
+            generation: 17,
+            reasonDetail: "category",
+            reason: ["code": "timed_pause", "effective_resume_at": resumeMarker]
+        )
+
+        let invalidResumeType = try runReasonCommand(
+            helper,
+            generation: 18,
+            reasonDetail: "exact",
+            reason: ["code": "timed_pause", "effective_resume_at": 123]
+        )
+        let invalidResumeAck = try JSONDecoder().decode(
+            Acknowledgement.self,
+            from: invalidResumeType.output
+        )
+        precondition(invalidResumeAck.generation == -1)
+        precondition(invalidResumeAck.rendered == false)
+        precondition(invalidResumeAck.error == "invalid-command")
+
         let privateMarker = "private-marker-must-not-escape"
         let invalid = try runHelper(helper, input: "{\(privateMarker)}\n")
         precondition(invalid.status == 0)
@@ -43,6 +86,50 @@ enum MacPrivacyOverlayProtocolTests {
         precondition(invalidAck.error == "invalid-command")
 
         print("MacPrivacyOverlayProtocolTests passed")
+    }
+
+    private static func expectUnresolved(
+        _ helper: String,
+        generation: Int,
+        reasonDetail: String,
+        reason: [String: Any]
+    ) throws {
+        let result = try runReasonCommand(
+            helper,
+            generation: generation,
+            reasonDetail: reasonDetail,
+            reason: reason
+        )
+        precondition(result.status == 0)
+        let outputText = String(decoding: result.output, as: UTF8.self)
+        for value in reason.values.compactMap({ $0 as? String }) {
+            precondition(!outputText.contains(value))
+        }
+        let acknowledgement = try JSONDecoder().decode(Acknowledgement.self, from: result.output)
+        precondition(acknowledgement.generation == generation)
+        precondition(acknowledgement.rendered == false)
+        precondition(acknowledgement.error == "unresolved-display")
+    }
+
+    private static func runReasonCommand(
+        _ helper: String,
+        generation: Int,
+        reasonDetail: String,
+        reason: [String: Any]
+    ) throws -> (output: Data, status: Int32) {
+        let payload: [String: Any] = [
+            "generation": generation,
+            "state": "paused",
+            "style": "pill",
+            "displays": [],
+            "all_displays": false,
+            "reason_display": "hybrid",
+            "reason_detail": reasonDetail,
+            "reason_trigger": "always",
+            "reasons": [reason],
+        ]
+        let encoded = try JSONSerialization.data(withJSONObject: payload)
+        return try runHelper(helper, input: String(decoding: encoded, as: UTF8.self) + "\n")
     }
 
     private static func runHelper(_ helper: String, input: String) throws -> (output: Data, status: Int32) {

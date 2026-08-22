@@ -158,6 +158,7 @@ struct ConfigurationCommandRunner {
 @MainActor
 final class ConfigurationController: ObservableObject {
   @Published private(set) var snapshot: ConfigurationSnapshot?
+  @Published private(set) var activeSnapshot: ConfigurationSnapshot?
   @Published var draft: ConfigurationDraft?
   @Published private(set) var privacySnapshot: PrivacyConfigurationSnapshot?
   @Published var privacyDraft: PrivacyConfigurationDraft?
@@ -175,6 +176,7 @@ final class ConfigurationController: ObservableObject {
   private var originalDraft: ConfigurationDraft?
   private var originalPrivacyDraft: PrivacyConfigurationDraft?
   private var savedRawText = ""
+  private var observedBackendPID: Int32?
 
   init(
     paths: RuntimePaths = .live(),
@@ -210,6 +212,15 @@ final class ConfigurationController: ObservableObject {
 
   var isBusy: Bool {
     isLoading || isLoadingPrivacy || isSaving || isValidating
+  }
+
+  @discardableResult
+  func observeBackendPID(_ pid: Int32?) -> Bool {
+    guard pid != observedBackendPID else { return false }
+    observedBackendPID = pid
+    guard pid != nil, let snapshot, snapshot.valid else { return false }
+    activeSnapshot = snapshot
+    return true
   }
 
   func updateDraft<Value>(
@@ -411,6 +422,9 @@ final class ConfigurationController: ObservableObject {
       let configURL = URL(fileURLWithPath: fetched.path)
       let content = try String(contentsOf: configURL, encoding: .utf8)
       snapshot = fetched
+      if activeSnapshot == nil, fetched.valid {
+        activeSnapshot = fetched
+      }
       rawText = content
       savedRawText = content
       privacySnapshot = nil

@@ -35,14 +35,16 @@ def _build_protection_monitor(
     cfg: Config,
     *,
     diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
+    guard_only: bool = False,
 ) -> PrivacyProtectionMonitor | None:
-    if cfg.capture.screenshot_privacy_mode != "skip-monitor":
+    if cfg.capture.screenshot_privacy_mode != "skip-monitor" and not guard_only:
         return None
     return PrivacyProtectionMonitor(
         cfg.capture,
         config_path=paths.config_file(),
         overlay=PrivacyOverlayClient(),
         diagnostics_guard_reader=diagnostics_guard_reader,
+        diagnostics_guard_only=guard_only,
     )
 
 
@@ -82,12 +84,19 @@ async def _run(cfg: Config, *, capture_only: bool = False) -> None:
     tasks: list[asyncio.Task] = []
     done_task: asyncio.Task | None = None
     try:
-        if cfg.capture.screenshot_privacy_mode == "skip-monitor":
-            lease_manager = DiagnosticsLeaseManager(paths.privacy_diagnostics_guard())
-            lease_manager.load()
+        lease_manager = DiagnosticsLeaseManager(paths.privacy_diagnostics_guard())
+        loaded_guard = lease_manager.load()
+        normal_protection_enabled = (
+            cfg.capture.screenshot_privacy_mode == "skip-monitor"
+        )
+        persisted_guard_requires_protection = (
+            loaded_guard.fail_closed_all or bool(loaded_guard.display_ids)
+        )
+        if normal_protection_enabled or persisted_guard_requires_protection:
             protection_monitor = _build_protection_monitor(
                 cfg,
                 diagnostics_guard_reader=lease_manager.snapshot,
+                guard_only=not normal_protection_enabled,
             )
         if protection_monitor is not None:
             if lease_manager is None:

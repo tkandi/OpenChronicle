@@ -1,4 +1,4 @@
-enum PrivacyReasonDisplayOption: String, CaseIterable, Identifiable {
+enum PrivacyReasonDisplayOption: String, CaseIterable, Identifiable, Equatable {
   case overlay
   case diagnostics
   case hybrid
@@ -32,7 +32,7 @@ enum PrivacyReasonDisplayOption: String, CaseIterable, Identifiable {
   }
 }
 
-enum PrivacyReasonDetailOption: String, CaseIterable, Identifiable {
+enum PrivacyReasonDetailOption: String, CaseIterable, Identifiable, Equatable {
   case category
   case exact
   case tiered
@@ -97,5 +97,24 @@ enum PrivacyReasonTriggerOption: String, CaseIterable, Identifiable {
     case .hover: return "cursorarrow"
     case .click: return "hand.tap"
     }
+  }
+}
+
+struct PrivacyReasonRuntimePolicy: Equatable {
+  let display: PrivacyReasonDisplayOption
+  let detail: PrivacyReasonDetailOption
+
+  init(display: PrivacyReasonDisplayOption, detail: PrivacyReasonDetailOption) {
+    self.display = display
+    self.detail = detail
+  }
+
+  init(snapshot: ConfigurationSnapshot?) {
+    display = PrivacyReasonDisplayOption(
+      rawValue: snapshot?.values?.capture.privacyReasonDisplay ?? ""
+    ) ?? .defaultValue
+    detail = PrivacyReasonDetailOption(
+      rawValue: snapshot?.values?.capture.privacyReasonDetail ?? ""
+    ) ?? .defaultValue
   }
 }

@@ -150,7 +150,7 @@ class PrivacyDiagnosticsServer:
         self._wake_writer: socket.socket | None = None
         self._thread: threading.Thread | None = None
         self._started = False
-        self._owns_socket_path = False
+        self._owned_socket_identity: tuple[int, int] | None = None
 
     @property
     def thread(self) -> threading.Thread | None:
@@ -169,17 +169,22 @@ class PrivacyDiagnosticsServer:
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             wake_reader: socket.socket | None = None
             wake_writer: socket.socket | None = None
+            bound_socket_identity: tuple[int, int] | None = None
             try:
                 listener.bind(str(self.socket_path))
-                self._owns_socket_path = True
+                bound_stat = self.socket_path.lstat()
+                bound_socket_identity = (bound_stat.st_dev, bound_stat.st_ino)
                 os.chmod(self.socket_path, 0o600)
                 socket_stat = self.socket_path.lstat()
                 if (
                     not stat.S_ISSOCK(socket_stat.st_mode)
                     or socket_stat.st_uid != os.getuid()
                     or stat.S_IMODE(socket_stat.st_mode) != 0o600
+                    or (socket_stat.st_dev, socket_stat.st_ino)
+                    != bound_socket_identity
                 ):
                     raise RuntimeError("privacy diagnostics socket permissions are unsafe")
+                self._owned_socket_identity = bound_socket_identity
                 listener.listen(_ACCEPT_BACKLOG)
                 listener.setblocking(False)
                 wake_reader, wake_writer = socket.socketpair()
@@ -191,7 +196,8 @@ class PrivacyDiagnosticsServer:
                     wake_reader.close()
                 if wake_writer is not None:
                     wake_writer.close()
-                self._unlink_owned_socket()
+                self._owned_socket_identity = None
+                self._unlink_socket_identity(bound_socket_identity)
                 raise
 
             self._listener = listener
@@ -491,7 +497,12 @@ class PrivacyDiagnosticsServer:
             return
         protected_generation = self._refresh_and_wait(display_id, baseline)
         if protected_generation is None:
-            self._queue_payload(selector, clients, client, _error("protection_timeout"))
+            rollback_error = self._rollback_unacknowledged_acquire(
+                lease.lease_id,
+                pid=pid,
+                clients=clients,
+            )
+            self._queue_payload(selector, clients, client, _error(rollback_error))
             return
 
         client.lease_id = lease.lease_id
@@ -515,6 +526,27 @@ class PrivacyDiagnosticsServer:
             decision = publication.decision if publication is not None else None
             if self._exact_is_authorized(client, decision):
                 self._queue_snapshot(selector, clients, client, publication)
+
+    def _rollback_unacknowledged_acquire(
+        self,
+        lease_id: str,
+        *,
+        pid: int,
+        clients: dict[int, _ClientState],
+    ) -> str:
+        try:
+            self._lease_manager.release(lease_id, pid=pid)
+        except (OSError, RuntimeError, ValueError):
+            error_code = "guard_unavailable"
+        else:
+            self._clear_lease_authorizations(clients, lease_id)
+            error_code = "protection_timeout"
+        try:
+            self._request_refresh()
+        except Exception:
+            if error_code == "protection_timeout":
+                return "refresh_failed"
+        return error_code
 
     def _handle_move(
         self,
@@ -1006,14 +1038,26 @@ class PrivacyDiagnosticsServer:
         self.socket_path.unlink()
 
     def _unlink_owned_socket(self) -> None:
-        if not self._owns_socket_path:
+        socket_identity = self._owned_socket_identity
+        self._owned_socket_identity = None
+        self._unlink_socket_identity(socket_identity)
+
+    def _unlink_socket_identity(
+        self,
+        socket_identity: tuple[int, int] | None,
+    ) -> None:
+        if socket_identity is None:
             return
         try:
             socket_stat = self.socket_path.lstat()
         except FileNotFoundError:
-            self._owns_socket_path = False
             return
-        if stat.S_ISSOCK(socket_stat.st_mode) and socket_stat.st_uid == os.getuid():
+        except OSError:
+            return
+        if (
+            (socket_stat.st_dev, socket_stat.st_ino) == socket_identity
+            and stat.S_ISSOCK(socket_stat.st_mode)
+            and socket_stat.st_uid == os.getuid()
+        ):
             with contextlib.suppress(OSError):
                 self.socket_path.unlink()
-        self._owns_socket_path = False

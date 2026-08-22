@@ -25,7 +25,10 @@ from openchronicle.capture.privacy import (
     WindowInventory,
 )
 from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
-from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsLeaseManager
+from openchronicle.capture.privacy_diagnostics_guard import (
+    DiagnosticsGuardSnapshot,
+    DiagnosticsLeaseManager,
+)
 from openchronicle.capture.protection import (
     ProtectionSnapshot,
     ProtectionState,
@@ -494,7 +497,9 @@ def test_exact_snapshot_follows_lease_only_after_confirmed_generation(tmp_path: 
         _stop_test_server(server)
 
 
-def test_acquire_timeout_never_sends_exact_and_retains_guard(tmp_path: Path) -> None:
+def test_acquire_timeout_rolls_back_guard_and_allows_conflict_free_retry(
+    tmp_path: Path,
+) -> None:
     callbacks = FakeProtectionCallbacks(confirmed=False)
     server = _start_test_server(tmp_path, callbacks=callbacks)
     guard_path = server.socket_path.parent / "privacy-reveal.guard"
@@ -513,8 +518,129 @@ def test_acquire_timeout_never_sends_exact_and_retains_guard(tmp_path: Path) -> 
             "type": "error",
             "code": "protection_timeout",
         }
-        assert guard_path.exists()
+        assert not guard_path.exists()
+        assert callbacks.refresh_requests == 2
+
+        callbacks.confirmed = True
+        acquired = _round_trip(
+            server.socket_path,
+            {
+                "schema_version": 1,
+                "action": "acquire_exact",
+                "pid": os.getpid(),
+                "display_id": 2,
+            },
+        )
+        assert acquired["type"] == "lease"
+        released = _round_trip(
+            server.socket_path,
+            {
+                "schema_version": 1,
+                "action": "release_exact",
+                "pid": os.getpid(),
+                "lease_id": acquired["lease_id"],
+            },
+        )
+        assert released["released"] is True
+        assert not guard_path.exists()
+    finally:
+        _stop_test_server(server)
+
+
+def test_acquire_timeout_rollback_failure_stays_closed_until_dead_pid_recovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "private-rollback-error-marker"
+    callbacks = FakeProtectionCallbacks(confirmed=False)
+    runtime_dir = tmp_path / "runtime"
+    manager = DiagnosticsLeaseManager(
+        runtime_dir / "privacy-reveal.guard",
+        process_alive=lambda _pid: True,
+    )
+    original_release = manager.release
+
+    def fail_release(_lease_id: str, *, pid: int):
+        raise OSError(marker)
+
+    monkeypatch.setattr(manager, "release", fail_release)
+    server = _start_test_server(tmp_path, callbacks=callbacks, manager=manager)
+    guard_path = runtime_dir / "privacy-reveal.guard"
+    try:
+        response = _round_trip(
+            server.socket_path,
+            {
+                "schema_version": 1,
+                "action": "acquire_exact",
+                "pid": os.getpid(),
+                "display_id": 2,
+            },
+        )
+
+        assert response == {
+            "schema_version": 1,
+            "type": "error",
+            "code": "guard_unavailable",
+        }
         assert json.loads(guard_path.read_text())["display_ids"] == [2]
+        assert manager.snapshot() == DiagnosticsGuardSnapshot(frozenset({2}), False)
+        assert callbacks.refresh_requests == 2
+        assert marker not in caplog.text
+    finally:
+        monkeypatch.setattr(manager, "release", original_release)
+        _stop_test_server(server)
+
+    restarted = DiagnosticsLeaseManager(guard_path, process_alive=lambda _pid: False)
+    assert restarted.load() == DiagnosticsGuardSnapshot(frozenset(), False)
+    assert not guard_path.exists()
+
+
+def test_move_timeout_keeps_the_known_lease_releasable(tmp_path: Path) -> None:
+    callbacks = FakeProtectionCallbacks()
+    server = _start_test_server(tmp_path, callbacks=callbacks)
+    guard_path = server.socket_path.parent / "privacy-reveal.guard"
+    try:
+        with _connect(server.socket_path) as client:
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "acquire_exact",
+                    "pid": os.getpid(),
+                    "display_id": 1,
+                },
+            )
+            acquired = _read_message(client)
+            callbacks.confirmed = False
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "move_exact",
+                    "pid": os.getpid(),
+                    "lease_id": acquired["lease_id"],
+                    "display_id": 2,
+                },
+            )
+            assert _read_message(client) == {
+                "schema_version": 1,
+                "type": "error",
+                "code": "protection_timeout",
+            }
+            assert json.loads(guard_path.read_text())["display_ids"] == [1, 2]
+
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "release_exact",
+                    "pid": os.getpid(),
+                    "lease_id": acquired["lease_id"],
+                },
+            )
+            assert _read_message(client)["released"] is True
+        assert not guard_path.exists()
     finally:
         _stop_test_server(server)
 
@@ -881,6 +1007,38 @@ def test_second_server_cannot_replace_a_live_socket(tmp_path: Path) -> None:
     finally:
         second.stop()
         _stop_test_server(server)
+
+
+def test_stop_does_not_unlink_a_same_user_replacement_socket(tmp_path: Path) -> None:
+    server = _start_test_server(tmp_path)
+    replacement = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    replacement_path = server.socket_path.with_name("replacement.sock")
+    try:
+        replacement.bind(str(replacement_path))
+        os.chmod(replacement_path, 0o600)
+        replacement.listen(1)
+        replacement_identity = (
+            replacement_path.lstat().st_dev,
+            replacement_path.lstat().st_ino,
+        )
+        server.socket_path.unlink()
+        replacement_path.replace(server.socket_path)
+
+        server.stop()
+        server.stop()
+
+        current = server.socket_path.lstat()
+        assert (current.st_dev, current.st_ino) == replacement_identity
+        assert stat.S_ISSOCK(current.st_mode)
+        assert current.st_uid == os.getuid()
+        assert server.thread is not None
+        assert not server.thread.is_alive()
+    finally:
+        server.stop()
+        replacement.close()
+        server.socket_path.unlink(missing_ok=True)
+        replacement_path.unlink(missing_ok=True)
+        os.chdir(getattr(server, "_test_original_cwd", Path.cwd()))
 
 
 def test_stop_is_idempotent_and_unlinks_socket(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ from .privacy import (
 from .privacy_diagnostics_guard import DiagnosticsGuardSnapshot
 from .privacy_overlay import PrivacyOverlayClient
 from .protection import (
+    SNAPSHOT_FRESH_SECONDS,
     ProtectionSnapshot,
     ProtectionState,
     build_protection_snapshot,
@@ -62,6 +63,7 @@ class PrivacyProtectionMonitor:
         watchdog_seconds: float = 1.0,
         before_overlay_call: Callable[[], None] | None = None,
         diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
+        diagnostics_guard_only: bool = False,
         decision_listener: Callable[[ProtectionDecision], None] | None = None,
     ) -> None:
         self._cfg = cfg
@@ -72,6 +74,7 @@ class PrivacyProtectionMonitor:
         self._watchdog_seconds = max(0.0, watchdog_seconds)
         self._before_overlay_call = before_overlay_call or (lambda: None)
         self._diagnostics_guard_reader = diagnostics_guard_reader
+        self._diagnostics_guard_only = diagnostics_guard_only
         self._indicator_style = cfg.privacy_indicator_style
         self._config_mtime_ns: int | None = None
         self._generation = 0
@@ -204,22 +207,51 @@ class PrivacyProtectionMonitor:
             self._reload_indicator_style()
             with self._state_lock:
                 covered_request_epoch = self._requested_epoch
-            paused, inventory, failure_reason, pause_reason = self._read_protection_inputs()
             diagnostics_guard = self._read_diagnostics_guard()
             self._raise_if_stopped()
             now = time.monotonic()
             generation = self._generation + 1
-            snapshot = build_protection_snapshot(
-                replace(self._cfg, privacy_indicator_style=self._indicator_style),
-                inventory,
-                paused=paused,
-                generation=generation,
-                now=now,
-                failure_reason=failure_reason,
-                pause_reason=pause_reason,
-                diagnostic_display_ids=diagnostics_guard.display_ids,
-                diagnostics_guard_invalid=diagnostics_guard.fail_closed_all,
-            )
+            if self._diagnostics_guard_only and not (
+                diagnostics_guard.fail_closed_all or diagnostics_guard.display_ids
+            ):
+                snapshot = ProtectionSnapshot(
+                    generation=generation,
+                    state=ProtectionState.INACTIVE,
+                    capture_mode=self._cfg.screenshot_monitor,
+                    indicator_style=self._indicator_style,
+                    displays=(),
+                    protected_display_ids=frozenset(),
+                    active_display_id=None,
+                    created_monotonic=now,
+                    fresh_until=now + SNAPSHOT_FRESH_SECONDS,
+                    reason_display=self._cfg.privacy_reason_display,
+                    reason_detail=self._cfg.privacy_reason_detail,
+                    reason_trigger=self._cfg.privacy_reason_trigger,
+                )
+            else:
+                paused, inventory, failure_reason, pause_reason = self._read_protection_inputs()
+                snapshot_cfg = replace(
+                    self._cfg,
+                    privacy_indicator_style=self._indicator_style,
+                )
+                if self._diagnostics_guard_only:
+                    snapshot_cfg = replace(
+                        snapshot_cfg,
+                        deny_app_names=[],
+                        deny_bundle_ids=[],
+                        deny_window_title_patterns=[],
+                    )
+                snapshot = build_protection_snapshot(
+                    snapshot_cfg,
+                    inventory,
+                    paused=paused,
+                    generation=generation,
+                    now=now,
+                    failure_reason=failure_reason,
+                    pause_reason=pause_reason,
+                    diagnostic_display_ids=diagnostics_guard.display_ids,
+                    diagnostics_guard_invalid=diagnostics_guard.fail_closed_all,
+                )
             self._log_failure_transition(snapshot)
             self._raise_if_stopped()
             rendered = self._render(snapshot)
