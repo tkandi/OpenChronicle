@@ -586,6 +586,49 @@ def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmatio
     assert fake_overlay.clear_generations == [decision.snapshot.generation]
 
 
+@pytest.mark.parametrize("privacy_mode", ["mask-window", "exclude-window"])
+def test_window_filtered_inventory_failure_renders_failed_indicator_and_logs_closed_policy(
+    inventory,
+    fake_overlay,
+    privacy_mode: str,
+) -> None:
+    cfg = CaptureConfig(
+        screenshot_privacy_mode=privacy_mode,
+        privacy_indicator_style="pill",
+        screenshot_privacy_fail_closed=False,
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: InventoryReadResult(
+            None, ProtectionFailureReason.HELPER_EXIT
+        ),
+        pause_reader=lambda: False,
+    )
+
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
+        decision = monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
+
+    assert failure_requires_fail_closed(cfg, decision.snapshot) is True
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert decision.indicator_confirmed is True
+    assert fake_overlay.render_calls == 1
+    assert fake_overlay.snapshots == [decision.snapshot]
+    assert fake_overlay.clear_calls == 0
+    assert messages == ["privacy protection failed closed: reason=helper_exit"]
+
+
 def test_pause_reader_failure_stays_closed_when_inventory_policy_is_fail_open(
     ac_root, monkeypatch, inventory, fake_overlay,
 ) -> None:

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import hashlib
 import json
+import math
 import queue
 import threading
 import time
@@ -31,12 +32,8 @@ _WINDOW_FILTERED_PRIVACY_MODES = frozenset({"mask-window", "exclude-window"})
 
 def _decision_is_terminal(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
     snapshot = decision.snapshot
-    return snapshot.state is ProtectionState.PAUSED or (
-        snapshot.state is ProtectionState.FAILED
-        and (
-            cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES
-            or failure_requires_fail_closed(cfg, snapshot)
-        )
+    return snapshot.state is ProtectionState.PAUSED or failure_requires_fail_closed(
+        cfg, snapshot
     )
 
 
@@ -44,7 +41,6 @@ def _decision_blocks_ax(cfg: CaptureConfig, decision: ProtectionDecision) -> boo
     snapshot = decision.snapshot
     return (
         snapshot.state is not ProtectionState.FAILED
-        or cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES
         or failure_requires_fail_closed(cfg, snapshot)
     ) and snapshot.ax_blocked
 
@@ -122,26 +118,60 @@ def _filtered_authorization_key(decision: ProtectionDecision) -> tuple[object, .
     )
 
 
-def _grab_skip_monitor_fallback(
+def _fallback_regions_are_valid(decision: ProtectionDecision) -> bool:
+    snapshot = decision.snapshot
+    if snapshot.state is ProtectionState.PROTECTED:
+        if not snapshot.protected_display_ids:
+            return False
+        displays_by_id = {display.id: display for display in snapshot.displays}
+        if len(displays_by_id) != len(snapshot.displays):
+            return False
+        if not snapshot.protected_display_ids <= displays_by_id.keys():
+            return False
+        regions = snapshot.protected_regions
+        return len(regions) == len(snapshot.protected_display_ids) and all(
+            all(
+                math.isfinite(value)
+                for value in (region.left, region.top, region.width, region.height)
+            )
+            and region.width > 0
+            and region.height > 0
+            for region in regions
+        )
+    return not snapshot.protected_display_ids and not snapshot.protected_regions
+
+
+def _grab_fresh_skip_monitor_fallback(
     cfg: CaptureConfig,
-    decision: ProtectionDecision,
+    protection_monitor: PrivacyProtectionMonitor,
     *,
     category: str,
-) -> list[screenshot.Screenshot]:
-    snapshot = decision.snapshot
-    blocked_regions = snapshot.protected_regions
-    if snapshot.state is ProtectionState.PROTECTED and (
-        not snapshot.protected_display_ids or not blocked_regions
-    ):
+) -> tuple[list[screenshot.Screenshot], ProtectionDecision] | None:
+    latest = protection_monitor.decision_for_capture(force=True)
+    if _decision_is_terminal(cfg, latest):
+        return None
+    if not _fallback_regions_are_valid(latest):
         logger.warning("screenshot fallback skipped: category=invalid_protected_regions")
-        return []
+        return [], latest
+
+    authorization = _filtered_authorization_key(latest)
     logger.info("screenshot fallback: category=%s", category)
-    return screenshot.grab_many(
+    shots = screenshot.grab_many(
         monitor_mode=cfg.screenshot_monitor,
         max_width=cfg.screenshot_max_width,
         jpeg_quality=cfg.screenshot_jpeg_quality,
-        blocked_regions=blocked_regions,
+        blocked_regions=latest.snapshot.protected_regions,
     )
+    after_capture = protection_monitor.decision_for_capture(force=True)
+    if _decision_is_terminal(cfg, after_capture):
+        return None
+    if (
+        not _fallback_regions_are_valid(after_capture)
+        or _filtered_authorization_key(after_capture) != authorization
+    ):
+        logger.warning("screenshot fallback discarded: category=authorization_changed")
+        return [], after_capture
+    return shots, after_capture
 
 
 def _now_iso() -> str:
@@ -223,12 +253,15 @@ def _build_capture(
 
     if cfg.include_screenshot:
         if decision is None:
-            blocked_regions = privacy.sensitive_window_regions(cfg)
-            if blocked_regions is None:
-                logger.warning(
-                    "screenshot skipped: category=visible_window_inventory_unavailable"
-                )
-                return out
+            if cfg.screenshot_privacy_mode == "off":
+                blocked_regions = []
+            else:
+                blocked_regions = privacy.sensitive_window_regions(cfg)
+                if blocked_regions is None:
+                    logger.warning(
+                        "screenshot skipped: category=visible_window_inventory_unavailable"
+                    )
+                    return out
             shots = screenshot.grab_many(
                 monitor_mode=cfg.screenshot_monitor,
                 max_width=cfg.screenshot_max_width,
@@ -248,11 +281,14 @@ def _build_capture(
                 jpeg_quality=cfg.screenshot_jpeg_quality,
             )
             if shots is None:
-                shots = _grab_skip_monitor_fallback(
+                fallback = _grab_fresh_skip_monitor_fallback(
                     cfg,
-                    decision,
+                    protection_monitor,
                     category="filtered_helper_unavailable",
                 )
+                if fallback is None:
+                    return None
+                shots, decision = fallback
             else:
                 latest = protection_monitor.decision_for_capture(force=True)
                 if _decision_is_terminal(cfg, latest):
@@ -261,18 +297,24 @@ def _build_capture(
                     not _filtered_capture_is_eligible(cfg, latest)
                     or _filtered_authorization_key(latest) != authorization
                 ):
-                    shots = _grab_skip_monitor_fallback(
+                    fallback = _grab_fresh_skip_monitor_fallback(
                         cfg,
-                        latest,
+                        protection_monitor,
                         category="filtered_authorization_changed",
                     )
+                    if fallback is None:
+                        return None
+                    shots, latest = fallback
                 decision = latest
         else:
-            shots = _grab_skip_monitor_fallback(
+            fallback = _grab_fresh_skip_monitor_fallback(
                 cfg,
-                decision,
+                protection_monitor,
                 category="filtered_ineligible",
             )
+            if fallback is None:
+                return None
+            shots, decision = fallback
         if shots:
             shot_dicts = [screenshot.to_dict(shot) for shot in shots]
             if cfg.screenshot_monitor == "separate":

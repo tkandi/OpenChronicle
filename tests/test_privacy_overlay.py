@@ -494,6 +494,27 @@ def test_clear_requires_an_empty_acknowledged_window_id_set(
     assert client.confirmed_window_ids(snapshot.generation) == ()
 
 
+def test_render_failure_acknowledgement_is_unconfirmed_with_no_window_ids(
+    snapshot: ProtectionSnapshot, tmp_path: Path
+) -> None:
+    helper = _helper_script(
+        tmp_path,
+        "import json, sys\n"
+        "for line in sys.stdin:\n"
+        "    command = json.loads(line)\n"
+        "    print(json.dumps({\n"
+        "        'generation': command['generation'],\n"
+        "        'rendered': False,\n"
+        "        'error': 'unresolved-window-id',\n"
+        "        'window_ids': [],\n"
+        "    }), flush=True)",
+    )
+    client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
+
+    assert client.render(snapshot, timeout=0.2) is False
+    assert client.confirmed_window_ids(snapshot.generation) == ()
+
+
 def test_off_style_does_not_start_a_transport(snapshot: ProtectionSnapshot) -> None:
     starts = 0
 

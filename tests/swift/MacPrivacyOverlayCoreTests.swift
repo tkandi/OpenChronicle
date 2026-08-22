@@ -59,6 +59,7 @@ enum MacPrivacyOverlayCoreTests {
         testControllerRendering()
         testControllerAcknowledgesEveryPanelWindowID()
         testControllerKeepsRenderingWhenAnyWindowIDIsUnavailable()
+        testControllerRejectsDuplicateWindowIDsWithoutHidingPanels()
         testHoverStaysMouseThrough()
         testCompactClickKeepsTargetSizedVisualPanel()
         testClickUsesOnlyIndicatorHitTarget()
@@ -310,7 +311,33 @@ enum MacPrivacyOverlayCoreTests {
 
         controller.applyWithWindowIDs(reasonCommand(trigger: .click, style: .border)) {
             rendered, windowIDs in
-            precondition(rendered)
+            precondition(!rendered)
+            precondition(windowIDs.isEmpty)
+        }
+        precondition(visualPanel.isVisible)
+        precondition(inputPanel.isVisible)
+    }
+
+    private static func testControllerRejectsDuplicateWindowIDsWithoutHidingPanels() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let visualPanel = RecordingPanel(contentRect: .zero)
+        let inputPanel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { visualPanel },
+            inputPanelFactory: { inputPanel },
+            pointerProvider: { NSPoint(x: 400, y: 300) },
+            timerFactory: { _, _ in {} },
+            windowNumberProvider: { _ in 41 }
+        )
+
+        controller.applyWithWindowIDs(reasonCommand(trigger: .click, style: .border)) {
+            rendered, windowIDs in
+            precondition(!rendered)
             precondition(windowIDs.isEmpty)
         }
         precondition(visualPanel.isVisible)

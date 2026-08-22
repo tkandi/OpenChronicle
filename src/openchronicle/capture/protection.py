@@ -23,6 +23,7 @@ from .protection_reason import (
 )
 
 SNAPSHOT_FRESH_SECONDS = 0.25
+_WINDOW_FILTERED_PRIVACY_MODES = frozenset({"mask-window", "exclude-window"})
 _DIRECT_WINDOW_RULE_CODES = frozenset(
     {
         ProtectionReasonCode.APP_RULE,
@@ -46,6 +47,7 @@ def failure_requires_fail_closed(
     return snapshot.state is ProtectionState.FAILED and (
         snapshot.diagnostics_guard_active
         or snapshot.diagnostics_guard_invalid
+        or cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES
         or cfg.screenshot_privacy_fail_closed
         or snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
     )
@@ -315,6 +317,7 @@ def build_protection_snapshot(
     window_filterable = (
         state is ProtectionState.PROTECTED
         and bool(direct_window_matches)
+        and len(direct_window_matches) == len(sensitive_windows)
         and not diagnostics_guard_active
         and len(protected_window_ids) == len(window_ids)
         and all(inventory_window_id_counts[window_id] == 1 for window_id in protected_window_ids)

@@ -84,7 +84,10 @@ indicator must report every indicator and input-panel window ID. Indicator
 style `off` needs no overlay IDs. Diagnostics protection, unknown titles,
 missing or duplicate IDs, an unavailable helper, or any other incomplete
 decision falls back to `skip-monitor` using the latest protected display
-regions. The protected display is never captured by unblocked `mss`.
+regions. Before `mss`, the monitor is forced to publish a fresh, non-terminal
+decision with complete protected display regions. After `mss`, another forced
+decision must have identical authorization semantics or the fallback frames are
+discarded. The protected display is never captured by unblocked `mss`.
 
 After a filtered helper returns, OpenChronicle forces a fresh protection
 decision before keeping the image. A change to protected windows or bounds,
@@ -95,9 +98,11 @@ decision keeps no stale screenshot or capture.
 On a genuine inventory failure, `screenshot_privacy_fail_closed = true` aborts
 the complete tick. Setting it to `false` preserves the legacy fail-open policy
 for `skip-monitor` and `off`, but never for `mask-window` or `exclude-window`:
-those two modes always fail closed. A direct `capture-once` without a background
-monitor runs the visible-window check and can use only the skip-monitor path;
-if enumeration fails, it does not take a screenshot.
+those two modes always render the yellow failed indicator and fail closed. A
+direct non-`off` `capture-once` without a background monitor runs the
+visible-window check and can use only the skip-monitor path; if enumeration
+fails, it does not take a screenshot. Direct `off` capture preserves the legacy
+unblocked screenshot behavior after foreground denylist checks.
 
 `screenshot_privacy_fail_closed = false` applies only to window/display inventory
 failures. If the pause state cannot be read, OpenChronicle shows the yellow failed
@@ -116,6 +121,12 @@ When `privacy_indicator_style` is not `off`, the local `mac-privacy-overlay`
 helper displays the protection state after the protection decision is confirmed.
 The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
 `banner`.
+
+The helper acknowledges a non-`off` generation only when every visible
+indicator and input panel has a distinct positive UInt32 window number. If any
+number is unavailable or duplicated, the panels remain visible but the helper
+returns an unconfirmed acknowledgement with no IDs; capture can then use only
+the fresh skip-monitor fallback.
 
 - Green means that display has been excluded by the same-generation protection
   decision used for capture.

@@ -141,6 +141,7 @@ def _filtered_decision(
     diagnostics_guard_active: bool = False,
     displays: tuple[DisplayInfo, ...] | None = None,
     protected_display_ids: frozenset[int] = frozenset({2}),
+    active_display_id: int | None = 1,
 ) -> ProtectionDecision:
     now = time.monotonic()
     resolved_displays = displays or (
@@ -155,7 +156,7 @@ def _filtered_decision(
             indicator_style=indicator_style,
             displays=resolved_displays,
             protected_display_ids=protected_display_ids,
-            active_display_id=1,
+            active_display_id=active_display_id,
             created_monotonic=now,
             fresh_until=now + 1.0,
             diagnostics_guard_active=diagnostics_guard_active,
@@ -1473,7 +1474,8 @@ def test_post_ax_validation_uses_latest_generation_confirmation_and_regions(
     )
 
     assert out is not None
-    assert monitor.force_calls == [True, False]
+    assert monitor.force_calls[:2] == [True, False]
+    assert monitor.force_calls[2:] == [True, True]
     assert screenshot_calls[0]["blocked_regions"] == [ScreenRegion(0, 0, 100, 100)]
 
 
@@ -1605,11 +1607,17 @@ def test_ineligible_filtered_capture_uses_protected_region_mss_fallback(
     assert mss_calls[0]["blocked_regions"] == decision.snapshot.protected_regions
 
 
-def test_filtered_helper_none_uses_latest_protected_region_fallback(
+def test_filtered_helper_none_refreshes_fallback_to_latest_display_before_mss(
     ac_root: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    decision = _filtered_decision()
-    monitor = _FakeProtectionMonitor(decision)
+    old = _filtered_decision(generation=30, active_display_id=None)
+    before_helper = _filtered_decision(generation=31, active_display_id=None)
+    latest = _filtered_decision(
+        generation=32,
+        protected_display_ids=frozenset({1}),
+        active_display_id=None,
+    )
+    monitor = _FakeProtectionMonitor(old, before_helper, latest, latest)
     mss_calls: list[dict[str, object]] = []
     monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
     monkeypatch.setattr(scheduler_mod.screenshot, "grab_filtered_many", lambda **_kwargs: None)
@@ -1631,8 +1639,179 @@ def test_filtered_helper_none_uses_latest_protected_region_fallback(
 
     assert out is not None
     assert out["screenshot"]["image_base64"] == "FALLBACK"
-    assert mss_calls[0]["blocked_regions"] == decision.snapshot.protected_regions
-    assert monitor.force_calls == [True, False]
+    assert mss_calls[0]["blocked_regions"] == latest.snapshot.protected_regions
+    assert monitor.force_calls[:2] == [True, False]
+    assert monitor.force_calls[2:] == [True, True]
+
+
+def test_initial_ineligible_fallback_refreshes_to_latest_display_before_mss(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _filtered_decision(
+        generation=40,
+        confirmed=False,
+        active_display_id=None,
+    )
+    before_fallback = _filtered_decision(
+        generation=41,
+        confirmed=False,
+        active_display_id=None,
+    )
+    latest = _filtered_decision(
+        generation=42,
+        confirmed=False,
+        protected_display_ids=frozenset({1}),
+        active_display_id=None,
+    )
+    monitor = _FakeProtectionMonitor(old, before_fallback, latest, latest)
+    mss_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("filtered helper must not run")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: mss_calls.append(kwargs) or [_shot("LATEST-FALLBACK")],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="exclude-window",
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert out["screenshot"]["image_base64"] == "LATEST-FALLBACK"
+    assert mss_calls[0]["blocked_regions"] == latest.snapshot.protected_regions
+    assert monitor.force_calls[2:] == [True, True]
+
+
+@pytest.mark.parametrize(
+    "terminal",
+    [_paused_decision(generation=52), _failed_decision(generation=53)],
+    ids=["paused", "failed"],
+)
+def test_filtered_helper_none_stops_before_mss_when_fresh_fallback_is_terminal(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    terminal: ProtectionDecision,
+) -> None:
+    monitor = _FakeProtectionMonitor(
+        _filtered_decision(generation=50),
+        _filtered_decision(generation=51),
+        terminal,
+    )
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(scheduler_mod.screenshot, "grab_filtered_many", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("mss must not run")),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="mask-window",
+            screenshot_privacy_fail_closed=False,
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is None
+    assert monitor.force_calls == [True, False, True]
+
+
+def test_fallback_frames_are_discarded_when_authorization_changes_during_mss(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _filtered_decision(
+        generation=60,
+        confirmed=False,
+        active_display_id=None,
+    )
+    before_mss = _filtered_decision(
+        generation=62,
+        confirmed=False,
+        active_display_id=None,
+    )
+    after_mss = _filtered_decision(
+        generation=63,
+        confirmed=False,
+        protected_display_ids=frozenset({1}),
+        active_display_id=None,
+    )
+    monitor = _FakeProtectionMonitor(old, old, before_mss, after_mss)
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("filtered helper must not run")),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_kwargs: [_shot("STALE-FALLBACK")],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="exclude-window",
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert "screenshot" not in out
+    assert "STALE-FALLBACK" not in json.dumps(out)
+    assert monitor.force_calls == [True, False, True, True]
+
+
+def test_fallback_skips_mss_when_fresh_protected_regions_are_invalid(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    invalid = _filtered_decision(
+        generation=72,
+        confirmed=False,
+        protected_display_ids=frozenset({3}),
+        active_display_id=None,
+    )
+    monitor = _FakeProtectionMonitor(
+        _filtered_decision(generation=70, confirmed=False, active_display_id=None),
+        _filtered_decision(generation=71, confirmed=False, active_display_id=None),
+        invalid,
+    )
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("mss must not run")),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="exclude-window",
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert "screenshot" not in out
 
 
 @pytest.mark.parametrize("privacy_mode", ["mask-window", "exclude-window"])
@@ -1702,6 +1881,38 @@ def test_direct_capture_without_monitor_only_uses_fail_closed_visible_window_che
 
     assert out is not None
     assert "screenshot" not in out
+
+
+def test_direct_off_capture_ignores_background_sensitive_window_protection(
+    ac_root: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.privacy,
+        "sensitive_window_regions",
+        lambda _cfg: (_ for _ in ()).throw(
+            AssertionError("off mode must not enumerate background windows")
+        ),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: calls.append(kwargs) or [_shot("OFF")],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_privacy_mode="off",
+            deny_app_names=["Private"],
+        ),
+        _FakeProvider(raw_json=None),
+        None,
+    )
+
+    assert out is not None
+    assert out["screenshot"]["image_base64"] == "OFF"
+    assert calls[0]["blocked_regions"] == []
 
 
 @pytest.mark.parametrize(
@@ -1774,7 +1985,8 @@ def test_post_helper_authorization_change_discards_stale_filtered_frames(
     assert out["screenshot"]["image_base64"] == "LATEST-FALLBACK"
     assert "STALE-FILTERED" not in json.dumps(out)
     assert mss_calls[0]["blocked_regions"] == latest.snapshot.protected_regions
-    assert monitor.force_calls == [True, False, True]
+    assert monitor.force_calls[:3] == [True, False, True]
+    assert monitor.force_calls[3:] == [True, True]
 
 
 def test_post_helper_terminal_decision_discards_stale_frames_without_screenshot_fallback(
@@ -1847,6 +2059,7 @@ def test_post_helper_unconfirmed_decision_discards_stale_frames_for_region_fallb
     assert out["screenshot"]["image_base64"] == "LATEST-FALLBACK"
     assert "STALE-FILTERED" not in json.dumps(out)
     assert mss_calls[0]["blocked_regions"] == latest.snapshot.protected_regions
+    assert monitor.force_calls[3:] == [True, True]
 
 
 @pytest.mark.asyncio

@@ -36,7 +36,7 @@ enum MacPrivacyOverlay {
                                 OverlayAcknowledgement(
                                     generation: command.generation,
                                     rendered: rendered,
-                                    error: rendered ? nil : "unresolved-display",
+                                    error: rendered ? nil : "unresolved-window-id",
                                     windowIDs: rendered ? windowIDs : []
                                 )
                             )

@@ -563,7 +563,7 @@ final class PrivacyOverlayController {
 
     func apply(_ command: OverlayCommand, completion: @escaping (Bool) -> Void) {
         applyWithWindowIDs(command) { rendered, _windowIDs in
-            completion(rendered)
+            completion(rendered || !self.panels.isEmpty)
         }
     }
 
@@ -640,19 +640,27 @@ final class PrivacyOverlayController {
 
         startPointerTimerIfNeeded()
         pollPointer()
-        completion(true, currentWindowIDs())
+        guard let windowIDs = currentWindowIDs() else {
+            completion(false, [])
+            return
+        }
+        completion(true, windowIDs)
     }
 
-    private func currentWindowIDs() -> [UInt32] {
+    private func currentWindowIDs() -> [UInt32]? {
         let currentPanels = Array(panels.values) + Array(inputPanels.values)
+        guard !currentPanels.isEmpty else { return nil }
         var windowIDs = Set<UInt32>()
         for panel in currentPanels {
             let windowNumber = windowNumberProvider(panel)
             guard windowNumber > 0, windowNumber <= Int(UInt32.max) else {
-                return []
+                return nil
             }
-            windowIDs.insert(UInt32(windowNumber))
+            guard windowIDs.insert(UInt32(windowNumber)).inserted else {
+                return nil
+            }
         }
+        guard windowIDs.count == currentPanels.count else { return nil }
         return windowIDs.sorted()
     }
 

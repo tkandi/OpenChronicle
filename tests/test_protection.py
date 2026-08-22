@@ -47,6 +47,27 @@ def test_failure_policy_distinguishes_pause_state_from_inventory(
     assert failure_requires_fail_closed(cfg, snapshot) is expected
 
 
+@pytest.mark.parametrize("privacy_mode", ["mask-window", "exclude-window"])
+def test_window_filtered_modes_force_inventory_failures_closed(
+    privacy_mode: str,
+) -> None:
+    cfg = CaptureConfig(
+        screenshot_privacy_mode=privacy_mode,
+        screenshot_privacy_fail_closed=False,
+    )
+    snapshot = build_protection_snapshot(
+        cfg,
+        None,
+        paused=False,
+        generation=91,
+        now=21.0,
+        failure_reason=ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert failure_requires_fail_closed(cfg, snapshot) is True
+
+
 def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     cfg = CaptureConfig(
         screenshot_monitor="separate",
@@ -227,6 +248,47 @@ def test_explicit_app_rule_can_authorize_window_with_unknown_title() -> None:
     assert snapshot.protected_window_ids == frozenset({73})
     assert snapshot.protected_window_regions == (region,)
     assert snapshot.window_filterable is True
+
+
+def test_unknown_only_sensitive_window_revokes_mixed_inventory_filterability() -> None:
+    explicit_region = ScreenRegion(0, 0, 80, 90)
+    unknown_region = ScreenRegion(110, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Private Browser",
+                "private",
+                "Private",
+                explicit_region,
+                window_id=73,
+            ),
+            VisibleWindow(
+                "Browser",
+                "browser",
+                "",
+                unknown_region,
+                title_available=False,
+                window_id=74,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(
+            deny_app_names=["Private Browser"],
+            deny_window_title_patterns=["Private"],
+        ),
+        inventory,
+        paused=False,
+        generation=12,
+        now=15.0,
+    )
+
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.protected_window_ids == frozenset({73})
+    assert snapshot.protected_window_regions == (explicit_region,)
+    assert snapshot.window_filterable is False
 
 
 @pytest.mark.parametrize("window_id", [0, -1, True, 0x1_0000_0000])
