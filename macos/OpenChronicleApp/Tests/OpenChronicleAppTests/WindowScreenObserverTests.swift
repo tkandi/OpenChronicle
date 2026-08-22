@@ -128,6 +128,54 @@ final class WindowScreenObserverTests: XCTestCase {
     XCTAssertEqual(changes.last!, 2)
   }
 
+  func testProgrammaticFrameChangesConcealBeforePixelsMove() {
+    let screens = [
+      WindowScreenGeometry(displayID: 1, frame: CGRect(x: 0, y: 0, width: 100, height: 100)),
+      WindowScreenGeometry(displayID: 2, frame: CGRect(x: 100, y: 0, width: 100, height: 100)),
+    ]
+
+    func assertPriorConcealment(
+      initialFrame: CGRect,
+      mutate: (NSWindow) -> Void,
+      file: StaticString = #filePath,
+      line: UInt = #line
+    ) {
+      let window = NSWindow(
+        contentRect: initialFrame,
+        styleMask: [.borderless],
+        backing: .buffered,
+        defer: false
+      )
+      var callbacks: [(displayID: UInt32?, frame: CGRect)] = []
+      let scheduler = TestWindowScreenSettleScheduler()
+      let coordinator = WindowScreenObserver.Coordinator(
+        onDisplayChange: { callbacks.append(($0, window.frame)) },
+        screenGeometryProvider: { screens },
+        settleScheduler: scheduler.schedule
+      )
+      coordinator.attach(to: window)
+      callbacks.removeAll()
+
+      mutate(window)
+
+      XCTAssertFalse(callbacks.isEmpty, file: file, line: line)
+      XCTAssertNil(callbacks.first?.displayID, file: file, line: line)
+      XCTAssertEqual(callbacks.first?.frame, initialFrame, file: file, line: line)
+      coordinator.detach()
+    }
+
+    assertPriorConcealment(
+      initialFrame: CGRect(x: 10, y: 10, width: 80, height: 80)
+    ) { window in
+      window.setFrameOrigin(CGPoint(x: 110, y: 10))
+    }
+    assertPriorConcealment(
+      initialFrame: CGRect(x: 10, y: 10, width: 80, height: 80)
+    ) { window in
+      window.setFrame(CGRect(x: 10, y: 10, width: 130, height: 80), display: false)
+    }
+  }
+
   func testWindowReplacementAndDetachRejectStaleCallbacks() {
     let first = NSWindow(
       contentRect: CGRect(x: 0, y: 0, width: 80, height: 80),

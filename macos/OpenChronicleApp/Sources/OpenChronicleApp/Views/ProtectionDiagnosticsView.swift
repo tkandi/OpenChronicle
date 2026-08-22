@@ -552,6 +552,7 @@ struct WindowScreenObserver: NSViewRepresentable {
     private let windowFrameProvider: WindowFrameProvider
     private let settleScheduler: WindowScreenSettleScheduler
     private weak var window: NSWindow?
+    private var frameObservation: NSKeyValueObservation?
     private var pendingSettleCancellation: (() -> Void)?
     private var settleGeneration = 0
     private var isMoving = false
@@ -594,6 +595,7 @@ struct WindowScreenObserver: NSViewRepresentable {
       detach()
       self.window = window
       if let window {
+        observeFrameChanges(of: window)
         observe(NSWindow.willMoveNotification, #selector(windowWillMove(_:)), window: window)
         observe(NSWindow.didMoveNotification, #selector(windowDidMove(_:)), window: window)
         observe(
@@ -621,6 +623,8 @@ struct WindowScreenObserver: NSViewRepresentable {
     func detach() {
       let hadWindow = window != nil
       cancelPendingSettle()
+      frameObservation?.invalidate()
+      frameObservation = nil
       if let window {
         NotificationCenter.default.removeObserver(self, name: nil, object: window)
       }
@@ -639,6 +643,22 @@ struct WindowScreenObserver: NSViewRepresentable {
         name: name,
         object: window
       )
+    }
+
+    private func observeFrameChanges(of window: NSWindow) {
+      frameObservation = window.observe(\.frame, options: [.prior, .new]) {
+        [weak self, weak window] _, change in
+        MainActor.assumeIsolated {
+          guard let self, let window, self.window === window else { return }
+          if change.isPrior {
+            self.concealAndCancelSettle()
+          } else if self.isMoving || self.isLiveResizing {
+            self.concealAndCancelSettle()
+          } else {
+            self.concealAndScheduleSettle(for: window)
+          }
+        }
+      }
     }
 
     @objc private func windowWillMove(_ notification: Notification) {
