@@ -268,6 +268,101 @@ def test_privacy_overlay_concurrent_builds_publish_one_complete_bundle(tmp_path:
     assert not (app.parent / ".privacy-overlay-build.lock").exists()
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS shell behavior")
+def test_privacy_overlay_mktemp_failure_releases_build_lock(tmp_path: Path) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        shutil.copy2(Path("resources") / name, tmp_path / name)
+    app = tmp_path / "runtime" / "helpers" / "OpenChroniclePrivacyOverlay.app"
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_mktemp = fake_bin / "mktemp"
+    fake_mktemp.write_text("#!/bin/sh\nexit 7\n")
+    fake_mktemp.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(app),
+        },
+    )
+    assert result.returncode != 0
+    assert not (app.parent / ".privacy-overlay-build.lock").exists()
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS codesign and Swift SDK")
+def test_privacy_overlay_failed_restore_retains_previous_backup(tmp_path: Path) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        shutil.copy2(Path("resources") / name, tmp_path / name)
+    app = tmp_path / "runtime" / "helpers" / "OpenChroniclePrivacyOverlay.app"
+    env = {
+        **os.environ,
+        "CLANG_MODULE_CACHE_PATH": str(tmp_path / "module-cache"),
+        "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(app),
+    }
+    initial = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert initial.returncode == 0, initial.stderr
+    executable = app / "Contents" / "MacOS" / "mac-privacy-overlay"
+    previous = executable.read_bytes()
+    with (tmp_path / "mac-privacy-overlay-core.swift").open("a") as handle:
+        handle.write("\n")
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_mv = fake_bin / "mv"
+    fake_mv.write_text(
+        "#!/bin/sh\n"
+        "last=\n"
+        "for arg in \"$@\"; do last=$arg; done\n"
+        "if [ \"$last\" = \"$FAIL_APP\" ]; then exit 8; fi\n"
+        "exec /bin/mv \"$@\"\n"
+    )
+    fake_mv.chmod(0o755)
+    for name in ("codesign", "xattr"):
+        helper = fake_bin / name
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+
+    failed = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **env,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FAIL_APP": str(app),
+        },
+    )
+    assert failed.returncode != 0
+    backups = list(app.parent.glob(".OpenChroniclePrivacyOverlay.backup.*"))
+    assert len(backups) == 1
+    backup_executable = backups[0] / "Contents" / "MacOS" / "mac-privacy-overlay"
+    assert backup_executable.read_bytes() == previous
+
+
 @pytest.mark.parametrize(
     "magic",
     (

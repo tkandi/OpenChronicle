@@ -52,6 +52,40 @@ APP_PARENT="$(dirname "${APP_DIR}")"
 mkdir -p "${APP_PARENT}"
 LOCK_DIR="${APP_PARENT}/.privacy-overlay-build.lock"
 LOCK_ACQUIRED=0
+TEMP_DIR=""
+TEMP_APP=""
+TEMP_BINARY=""
+BACKUP_APP=""
+PUBLISHED_APP=0
+PUBLISH_COMPLETE=0
+TEMP_BARE=""
+cleanup() {
+  if [[ -n "${TEMP_DIR}" ]]; then
+    rm -rf -- "${TEMP_DIR}"
+  fi
+  if [[ -n "${TEMP_BARE}" ]]; then
+    rm -f -- "${TEMP_BARE}"
+  fi
+  if [[ "${PUBLISH_COMPLETE}" -ne 1 ]]; then
+    if [[ "${PUBLISHED_APP}" -eq 1 ]]; then
+      rm -rf -- "${APP_DIR}"
+    fi
+    if [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
+      if mv "${BACKUP_APP}" "${APP_DIR}"; then
+        BACKUP_APP=""
+      else
+        echo "[mac-privacy-overlay] Could not restore the previous app; backup retained at ${BACKUP_APP}." >&2
+      fi
+    fi
+  elif [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
+    rm -rf -- "${BACKUP_APP}"
+  fi
+  if [[ "${LOCK_ACQUIRED}" -eq 1 ]]; then
+    rm -rf -- "${LOCK_DIR}"
+  fi
+}
+trap cleanup EXIT
+
 for _ in {1..120}; do
   if mkdir "${LOCK_DIR}" 2>/dev/null; then
     LOCK_ACQUIRED=1
@@ -67,27 +101,6 @@ fi
 TEMP_DIR="$(mktemp -d "${APP_PARENT}/.privacy-overlay-build.XXXXXX")"
 TEMP_APP="${TEMP_DIR}/OpenChroniclePrivacyOverlay.app"
 TEMP_BINARY="${TEMP_APP}/Contents/MacOS/mac-privacy-overlay"
-BACKUP_APP=""
-PUBLISHED_APP=0
-PUBLISH_COMPLETE=0
-TEMP_BARE=""
-cleanup() {
-  rm -rf -- "${TEMP_DIR}"
-  if [[ -n "${TEMP_BARE}" ]]; then
-    rm -f -- "${TEMP_BARE}"
-  fi
-  if [[ "${PUBLISH_COMPLETE}" -ne 1 && "${PUBLISHED_APP}" -eq 1 ]]; then
-    rm -rf -- "${APP_DIR}"
-    if [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
-      mv "${BACKUP_APP}" "${APP_DIR}" || true
-      BACKUP_APP=""
-    fi
-  elif [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
-    rm -rf -- "${BACKUP_APP}"
-  fi
-  rm -rf -- "${LOCK_DIR}"
-}
-trap cleanup EXIT
 
 if overlay_is_fresh; then
   echo "[mac-privacy-overlay] App bundle became fresh while waiting, skipping compile."
@@ -116,10 +129,6 @@ if [[ -e "${APP_DIR}" ]]; then
   mv "${APP_DIR}" "${BACKUP_APP}"
 fi
 if ! mv "${TEMP_APP}" "${APP_DIR}"; then
-  if [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
-    mv "${BACKUP_APP}" "${APP_DIR}"
-    BACKUP_APP=""
-  fi
   exit 1
 fi
 PUBLISHED_APP=1
