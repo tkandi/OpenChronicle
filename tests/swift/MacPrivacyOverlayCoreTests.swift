@@ -33,11 +33,18 @@ enum MacPrivacyOverlayCoreTests {
             error: nil,
             windowIDs: [7, 41]
         )
-        let acknowledgementJSON = String(
-            data: try JSONEncoder().encode(acknowledgement),
-            encoding: .utf8
-        )!
-        precondition(acknowledgementJSON.contains(#""window_ids":[7,41]"#))
+        let acknowledgementData = try JSONEncoder().encode(acknowledgement)
+        let acknowledgementJSON = try JSONSerialization.jsonObject(
+            with: acknowledgementData
+        ) as! [String: Any]
+        precondition(
+            Set(acknowledgementJSON.keys)
+                == Set(["generation", "rendered", "error", "window_ids"])
+        )
+        precondition(acknowledgementJSON["generation"] as? Int == 9)
+        precondition(acknowledgementJSON["rendered"] as? Bool == true)
+        precondition(acknowledgementJSON["error"] is NSNull)
+        precondition(acknowledgementJSON["window_ids"] as? [Int] == [7, 41])
 
         testRevealState()
         testReasonPresentation()

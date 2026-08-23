@@ -129,6 +129,18 @@ struct OverlayAcknowledgement: Codable {
         case generation, rendered, error
         case windowIDs = "window_ids"
     }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(generation, forKey: .generation)
+        try container.encode(rendered, forKey: .rendered)
+        if let error {
+            try container.encode(error, forKey: .error)
+        } else {
+            try container.encodeNil(forKey: .error)
+        }
+        try container.encode(windowIDs, forKey: .windowIDs)
+    }
 }
 
 struct OverlayScreenGeometry {
