@@ -103,9 +103,18 @@ private let overlayApplication = sourceApplication(
 
 private func fingerprint(
     displays: [CaptureDisplaySource] = [sourceDisplay()],
-    windows: [CaptureWindowSource]
+    windows: [CaptureWindowSource],
+    scope: CapturePrivacyFingerprintScope? = nil
 ) -> CapturePrivacyFingerprint {
-    requireSuccess(capturePrivacyFingerprint(displays: displays, windows: windows))
+    let resolvedScope = scope ?? CapturePrivacyFingerprintScope(
+        requestedDisplayIDs: displays.map(\.id),
+        excludedApplicationProcessIDs: Array(Set(windows.compactMap(\.owner?.processID))).sorted()
+    )
+    return requireSuccess(capturePrivacyFingerprint(
+        displays: displays,
+        windows: windows,
+        scope: resolvedScope
+    ))
 }
 
 private func testExactCommandDecodes() {
@@ -555,7 +564,109 @@ private func testPrivacyFingerprintIsCanonicalAndDetectsWindowChanges() {
     expectFailure(
         capturePrivacyFingerprint(
             displays: [sourceDisplay()],
-            windows: [sourceWindow(id: 456, owner: protectedApplication, left: .nan)]
+            windows: [sourceWindow(id: 456, owner: protectedApplication, left: .nan)],
+            scope: CapturePrivacyFingerprintScope(
+                requestedDisplayIDs: [123],
+                excludedApplicationProcessIDs: [protectedApplication.processID]
+            )
+        ),
+        .contentUnavailable
+    )
+}
+
+private func testPrivacyFingerprintMustIgnoreUnrelatedApplicationChanges() {
+    let otherApplication = sourceApplication(
+        processID: 700,
+        bundleIdentifier: "com.example.allowed",
+        applicationName: "Allowed"
+    )
+    let beforeWindows = [
+        sourceWindow(id: 456, owner: protectedApplication, title: "Private"),
+        sourceWindow(id: 789, owner: overlayApplication, title: "Protected"),
+        sourceWindow(id: 999, owner: otherApplication, title: "allowed"),
+    ]
+    let scope = CapturePrivacyFingerprintScope(
+        requestedDisplayIDs: [123],
+        excludedApplicationProcessIDs: [
+            protectedApplication.processID,
+            overlayApplication.processID,
+        ]
+    )
+    let displays = [sourceDisplay(), sourceDisplay(id: 124, left: 0)]
+    let before = fingerprint(displays: displays, windows: beforeWindows, scope: scope)
+
+    let unrelatedWindowSetChange = fingerprint(windows: beforeWindows + [
+        sourceWindow(id: 1_000, owner: otherApplication, title: "transient"),
+    ], scope: scope)
+    let unrelatedTitleChange = fingerprint(windows: [
+        beforeWindows[0],
+        beforeWindows[1],
+        sourceWindow(id: 999, owner: otherApplication, title: "renamed"),
+    ], scope: scope)
+    let unrelatedFrameChange = fingerprint(windows: [
+        beforeWindows[0],
+        beforeWindows[1],
+        sourceWindow(id: 999, owner: otherApplication, left: 999, title: "allowed"),
+    ], scope: scope)
+    let changedUnrequestedDisplay = fingerprint(
+        displays: [sourceDisplay(), sourceDisplay(id: 124, left: 1)],
+        windows: beforeWindows,
+        scope: scope
+    )
+
+    precondition(before == unrelatedWindowSetChange)
+    precondition(before == unrelatedTitleChange)
+    precondition(before == unrelatedFrameChange)
+    precondition(before == changedUnrequestedDisplay)
+
+    let relevantWindowSetChange = fingerprint(windows: beforeWindows + [
+        sourceWindow(id: 457, owner: protectedApplication, title: "sheet"),
+    ], scope: scope)
+    let relevantIDChange = fingerprint(windows: [
+        sourceWindow(id: 458, owner: protectedApplication, title: "Private"),
+        beforeWindows[1],
+        beforeWindows[2],
+    ], scope: scope)
+    let relevantFrameChange = fingerprint(windows: [
+        sourceWindow(id: 456, owner: protectedApplication, left: 11, title: "Private"),
+        beforeWindows[1],
+        beforeWindows[2],
+    ], scope: scope)
+    let relevantTitleChange = fingerprint(windows: [
+        sourceWindow(id: 456, owner: protectedApplication, title: "Renamed"),
+        beforeWindows[1],
+        beforeWindows[2],
+    ], scope: scope)
+    let changedRequestedDisplay = fingerprint(
+        displays: [sourceDisplay(pointWidth: 1_441), sourceDisplay(id: 124, left: 0)],
+        windows: beforeWindows,
+        scope: scope
+    )
+
+    precondition(before != relevantWindowSetChange)
+    precondition(before != relevantIDChange)
+    precondition(before != relevantFrameChange)
+    precondition(before != relevantTitleChange)
+    precondition(before != changedRequestedDisplay)
+
+    expectFailure(
+        capturePrivacyFingerprint(
+            displays: [sourceDisplay()],
+            windows: [sourceWindow(id: 456, owner: protectedApplication, left: .nan)],
+            scope: scope
+        ),
+        .contentUnavailable
+    )
+    let invalidProtectedOwner = sourceApplication(
+        processID: protectedApplication.processID,
+        bundleIdentifier: "",
+        applicationName: protectedApplication.applicationName
+    )
+    expectFailure(
+        capturePrivacyFingerprint(
+            displays: displays,
+            windows: [sourceWindow(id: 456, owner: invalidProtectedOwner)],
+            scope: scope
         ),
         .contentUnavailable
     )
@@ -652,10 +763,23 @@ private func testCaptureSequencePreparesAllTargetsBeforeProducingPNGs() async {
         CapturePixelSize(width: 2880, height: 1800),
         CapturePixelSize(width: 800, height: 600),
     ])
+    precondition(prepared.allSatisfy {
+        $0.fingerprintScope == CapturePrivacyFingerprintScope(
+            requestedDisplayIDs: [123, 124],
+            excludedApplicationProcessIDs: [
+                protectedApplication.processID,
+                overlayApplication.processID,
+            ]
+        )
+    })
 
     var events: [String] = []
     var captureCalls: [(FakeCaptureResource, CapturePixelSize)] = []
-    let initialFingerprint = fingerprint(windows: windows)
+    let initialFingerprint = fingerprint(
+        displays: displays,
+        windows: windows,
+        scope: prepared[0].fingerprintScope
+    )
     let captured = requireSuccess(await executePreparedCaptures(
         prepared,
         initialFingerprint: initialFingerprint,
@@ -703,10 +827,11 @@ private func testFingerprintChangePreventsEveryPNGEncode() async {
             .success((FakeCaptureResource(displayIndex: displayIndex), 1))
         }
     ))
-    let before = fingerprint(windows: windows)
+    let scope = prepared[0].fingerprintScope
+    let before = fingerprint(windows: windows, scope: scope)
     let after = fingerprint(windows: windows + [
         sourceWindow(id: 457, owner: protectedApplication, title: "new panel")
-    ])
+    ], scope: scope)
     var encodeCalls = 0
 
     let result = await executePreparedCaptures(
@@ -1081,6 +1206,7 @@ enum MacScreenCaptureCoreTests {
         testOutputDimensionsUseExplicitOrNativePixels()
         testOutputDimensionBoundariesFailClosed()
         testPrivacyFingerprintIsCanonicalAndDetectsWindowChanges()
+        testPrivacyFingerprintMustIgnoreUnrelatedApplicationChanges()
         await testCaptureSequencePreparesAllTargetsBeforeProducingPNGs()
         await testFingerprintChangePreventsEveryPNGEncode()
         await testCaptureSequencePreparationFailuresPreventCapture()

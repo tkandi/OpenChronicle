@@ -80,11 +80,13 @@ private func windowSources(_ content: SCShareableContent) -> [CaptureWindowSourc
 
 @available(macOS 14.0, *)
 private func privacyFingerprint(
-    _ content: SCShareableContent
+    _ content: SCShareableContent,
+    scope: CapturePrivacyFingerprintScope
 ) -> Result<CapturePrivacyFingerprint, CaptureErrorCode> {
     capturePrivacyFingerprint(
         displays: displaySources(content),
-        windows: windowSources(content)
+        windows: windowSources(content),
+        scope: scope
     )
 }
 
@@ -94,13 +96,6 @@ private func captureDisplays(
 ) async -> Result<[CapturedDisplay], CaptureErrorCode> {
     guard let content = await loadShareableContent() else {
         return .failure(.contentUnavailable)
-    }
-    let initialFingerprint: CapturePrivacyFingerprint
-    switch privacyFingerprint(content) {
-    case let .success(value):
-        initialFingerprint = value
-    case let .failure(error):
-        return .failure(error)
     }
     let displays = displaySources(content)
     let windows = windowSources(content)
@@ -126,6 +121,19 @@ private func captureDisplays(
     ) {
     case let .success(sequence):
         prepared = sequence
+    case let .failure(error):
+        return .failure(error)
+    }
+
+    guard let fingerprintScope = prepared.first?.fingerprintScope,
+          prepared.dropFirst().allSatisfy({ $0.fingerprintScope == fingerprintScope })
+    else {
+        return .failure(.captureFailed)
+    }
+    let initialFingerprint: CapturePrivacyFingerprint
+    switch privacyFingerprint(content, scope: fingerprintScope) {
+    case let .success(value):
+        initialFingerprint = value
     case let .failure(error):
         return .failure(error)
     }
@@ -162,7 +170,7 @@ private func captureDisplays(
             guard let current = await loadShareableContent() else {
                 return .failure(.contentUnavailable)
             }
-            return privacyFingerprint(current)
+            return privacyFingerprint(current, scope: fingerprintScope)
         },
         encodePNG: encodePNG
     )

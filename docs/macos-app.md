@@ -244,12 +244,15 @@ A non-`off` indicator that is not confirmed stops before `mss`, including an
 inactive state whose clear acknowledgement failed. Any fallback frame is
 discarded if indicator confirmation or authorization changes during `mss`.
 
-The helper fingerprints all shareable displays and on-screen windows before
-capture and reloads them after all display captures but before PNG encoding or
-stdout. Any ID, owner, finite-frame, or title change rejects every frame. This
-also excludes newly created windows from an app already classified as
-protected, but cannot prove absence of a different app's privacy window that
-appears and disappears entirely between the two OS snapshots.
+The helper fingerprints the requested shareable displays and on-screen windows
+owned by the protected or overlay applications before capture, then reloads
+that scoped inventory after all display captures but before PNG encoding or
+stdout. Any included ID, owner, finite-frame, or title change rejects every
+frame. This also excludes newly created windows from an app already classified
+as protected. Python forces a fresh post-helper protection decision, which
+drops persistent privacy changes from other applications; a different app's
+privacy window that appears and disappears entirely between the OS and Python
+snapshots remains a residual race.
 
 The decision inventory is limited to alpha-positive, positive-size, normal
 layer-0 windows returned by CoreGraphics as on-screen. It locally inspects owner

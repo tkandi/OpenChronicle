@@ -65,6 +65,7 @@ struct CaptureWindowSource: Equatable {
 struct ResolvedCaptureTargets: Equatable {
     let displayIndices: [Int]
     let excludedApplicationIndices: [Int]
+    let fingerprintScope: CapturePrivacyFingerprintScope
 }
 
 struct CapturePixelSize: Equatable {
@@ -88,6 +89,7 @@ struct PreparedCapture<Resource> {
     let source: CaptureDisplaySource
     let pixelSize: CapturePixelSize
     let excludedApplicationIndices: [Int]
+    let fingerprintScope: CapturePrivacyFingerprintScope
 }
 
 struct CapturedFrame<Payload> {
@@ -99,6 +101,11 @@ struct CapturedFrame<Payload> {
 struct CapturePrivacyFingerprint: Equatable {
     fileprivate let displays: [CaptureDisplayFingerprint]
     fileprivate let windows: [CaptureWindowFingerprint]
+}
+
+struct CapturePrivacyFingerprintScope: Equatable {
+    let requestedDisplayIDs: [UInt32]
+    let excludedApplicationProcessIDs: [Int32]
 }
 
 private struct CaptureDisplayFingerprint: Equatable {
@@ -249,7 +256,13 @@ func resolveCaptureTargets(
 
     return .success(ResolvedCaptureTargets(
         displayIndices: displayIndices,
-        excludedApplicationIndices: excludedApplicationIndices
+        excludedApplicationIndices: excludedApplicationIndices,
+        fingerprintScope: CapturePrivacyFingerprintScope(
+            requestedDisplayIDs: command.displays.map(\.id),
+            excludedApplicationProcessIDs: excludedApplicationIndices.map {
+                applications[$0].processID
+            }
+        )
     ))
 }
 
@@ -336,7 +349,8 @@ func prepareCaptureSequence<Resource>(
             resource: resource,
             source: source,
             pixelSize: pixelSize,
-            excludedApplicationIndices: targets.excludedApplicationIndices
+            excludedApplicationIndices: targets.excludedApplicationIndices,
+            fingerprintScope: targets.fingerprintScope
         ))
     }
     guard capturePixelSizesAreWithinLimits(prepared.map(\.pixelSize)) else {
@@ -425,40 +439,64 @@ func executePreparedCaptures<Resource, Payload>(
 
 func capturePrivacyFingerprint(
     displays: [CaptureDisplaySource],
-    windows: [CaptureWindowSource]
+    windows: [CaptureWindowSource],
+    scope: CapturePrivacyFingerprintScope
 ) -> Result<CapturePrivacyFingerprint, CaptureErrorCode> {
-    guard displays.allSatisfy(isRepresentableGeometry) else {
+    guard
+        !scope.requestedDisplayIDs.isEmpty,
+        scope.requestedDisplayIDs.allSatisfy({ $0 > 0 }),
+        Set(scope.requestedDisplayIDs).count == scope.requestedDisplayIDs.count,
+        !scope.excludedApplicationProcessIDs.isEmpty,
+        scope.excludedApplicationProcessIDs.allSatisfy({ $0 > 0 }),
+        Set(scope.excludedApplicationProcessIDs).count == scope.excludedApplicationProcessIDs.count
+    else {
         return .failure(.contentUnavailable)
     }
 
-    let displayFingerprint = displays.map { display in
-        CaptureDisplayFingerprint(
+    var displayFingerprint: [CaptureDisplayFingerprint] = []
+    displayFingerprint.reserveCapacity(scope.requestedDisplayIDs.count)
+    for id in scope.requestedDisplayIDs {
+        let matchingDisplays = displays.filter { $0.id == id }
+        guard matchingDisplays.count == 1, let display = matchingDisplays.first,
+              isRepresentableGeometry(display)
+        else {
+            return .failure(.contentUnavailable)
+        }
+        displayFingerprint.append(CaptureDisplayFingerprint(
             id: display.id,
             left: display.left,
             top: display.top,
             width: display.pointWidth,
             height: display.pointHeight
-        )
-    }.sorted(by: displayFingerprintLessThan)
+        ))
+    }
+    displayFingerprint.sort(by: displayFingerprintLessThan)
 
     var windowFingerprint: [CaptureWindowFingerprint] = []
     windowFingerprint.reserveCapacity(windows.count)
+    let excludedApplicationProcessIDs = Set(scope.excludedApplicationProcessIDs)
     for window in windows {
         guard
+            let owner = window.owner,
+            excludedApplicationProcessIDs.contains(owner.processID)
+        else {
+            continue
+        }
+        guard
             window.id > 0,
+            isValidApplicationSource(owner),
             isRepresentableCoordinate(window.left),
             isRepresentableCoordinate(window.top),
             window.width.isFinite,
             window.height.isFinite,
             window.width >= 0,
-            window.height >= 0,
-            window.owner.map({ $0.processID > 0 }) ?? true
+            window.height >= 0
         else {
             return .failure(.contentUnavailable)
         }
         windowFingerprint.append(CaptureWindowFingerprint(
             id: window.id,
-            ownerPID: window.owner?.processID,
+            ownerPID: owner.processID,
             left: window.left,
             top: window.top,
             width: window.width,

@@ -104,16 +104,20 @@ authorization semantics or the fallback frames are discarded. Native
 current-decision behavior and do not compare window-filtering-only fields. The
 protected display is never captured by unblocked `mss`.
 
-The Swift helper fingerprints all shareable displays and every on-screen window
-(window ID, owner PID, finite frame, and title) before capture, reloads the
-complete shareable inventory after all display captures, and compares the two
-before PNG encoding or stdout. Any change returns a fixed `content_changed`
-error, so no PNG bytes cross the helper boundary. After a successful helper
-response, OpenChronicle also forces a fresh protection decision before keeping
-the image. A change to protected windows or bounds,
-display IDs or bounds, filtering eligibility, or overlay IDs discards the
-filtered frames and applies the latest skip-monitor decision. A terminal
-decision keeps no stale screenshot or capture.
+The Swift helper fingerprints only the requested shareable displays and
+on-screen windows owned by the protected or overlay applications resolved for
+the capture (window ID, owner PID, finite frame, and title). It reloads the
+shareable inventory after all display captures and compares that scoped
+fingerprint before PNG encoding or stdout. Any scoped change returns a fixed
+`content_changed` error, so no PNG bytes cross the helper boundary. After a
+successful helper response, OpenChronicle also forces a fresh protection
+decision before keeping the image. That Python post-decision drops frames for
+persistent privacy changes in other applications; a different application's
+transient that starts and ends entirely between the OS and Python snapshots is
+the remaining race. Changes to protected windows or bounds, requested display
+IDs or bounds, filtering eligibility, or overlay IDs discard the filtered
+frames and apply the latest skip-monitor decision. A terminal decision keeps no
+stale screenshot or capture.
 
 On a genuine inventory failure, `screenshot_privacy_fail_closed = true` aborts
 the complete tick. Setting it to `false` preserves the legacy fail-open policy

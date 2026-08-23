@@ -27,15 +27,16 @@ windows. New window-filtered modes use a bundled Swift helper based on ScreenCap
 
 1. Python sends requested display IDs, protected CG window IDs, confirmed privacy-overlay window
    IDs, and capture dimensions to the helper.
-2. The helper retrieves `SCShareableContent` with onscreen windows only and fingerprints every
-   display plus every on-screen window's ID, owner PID, finite frame, and title.
+2. The helper retrieves `SCShareableContent` with onscreen windows only and fingerprints the
+   requested displays plus windows owned by the resolved protected/overlay application PIDs,
+   including each window's ID, owner PID, finite frame, and title.
 3. Every requested display and excluded window ID must resolve exactly once. Every protected and
    overlay window must also resolve to one valid, unique owning application.
 4. For each display, the helper creates
    `SCContentFilter(display:excludingApplications:exceptingWindows:)`, excluding the unique complete
    application set and excepting no windows. This intentionally removes every normal and auxiliary
    window from a protected application.
-5. After all display captures, the helper reloads complete `SCShareableContent` and compares the
+5. After all display captures, the helper reloads `SCShareableContent` and compares the scoped
    fingerprint before any PNG encoding or stdout. A change returns `content_changed` and no PNG.
 6. The helper returns one lossless PNG per physical display plus display bounds and pixel dimensions.
 7. Python applies an opaque rectangle in `mask-window`, leaves the image unmasked in
@@ -157,10 +158,12 @@ between the protected CG frame and each display. It does not reveal the window b
 window. No title, app name, or rule text is drawn into the screenshot.
 
 Application-level filtering excludes new windows from an app already identified as protected, and
-the double inventory snapshot detects persistent additions, removals, frame changes, owner changes,
-and title-classification changes. ScreenCaptureKit and `SCShareableContent` still cannot prove
-absence of a different application's privacy window that appears and disappears entirely between
-the two snapshots. Documentation and acceptance claims must retain this residual race.
+the scoped double inventory snapshot detects persistent additions, removals, frame changes, owner
+changes, and title-classification changes for protected/overlay applications. Python's forced
+post-helper protection decision drops persistent privacy changes in other applications.
+ScreenCaptureKit, `SCShareableContent`, and the Python decision snapshots still cannot prove absence
+of a different application's privacy window that appears and disappears entirely between those
+snapshots. Documentation and acceptance claims must retain this residual race.
 
 ## Compatibility And Packaging
 
