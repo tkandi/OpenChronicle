@@ -149,6 +149,125 @@ def test_privacy_overlay_build_emits_signed_app_bundle(tmp_path: Path, arch: str
     assert verification.returncode == 0, verification.stderr
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS codesign and Swift SDK")
+def test_privacy_overlay_publish_failure_restores_previous_app(tmp_path: Path) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        shutil.copy2(Path("resources") / name, tmp_path / name)
+
+    app = tmp_path / "runtime" / "helpers" / "OpenChroniclePrivacyOverlay.app"
+    env = {
+        **os.environ,
+        "CLANG_MODULE_CACHE_PATH": str(tmp_path / "module-cache"),
+        "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(app),
+    }
+    initial = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env=env,
+    )
+    assert initial.returncode == 0, initial.stderr
+    executable = app / "Contents" / "MacOS" / "mac-privacy-overlay"
+    previous = executable.read_bytes()
+
+    with (tmp_path / "mac-privacy-overlay-core.swift").open("a") as handle:
+        handle.write("\n")
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_codesign = fake_bin / "codesign"
+    fake_codesign.write_text(
+        "#!/bin/sh\n"
+        "last=\n"
+        "for arg in \"$@\"; do last=$arg; done\n"
+        "if [ \"$1\" = \"--force\" ] && [ \"$last\" = \"$FAIL_APP\" ]; then exit 9; fi\n"
+        "exit 0\n"
+    )
+    fake_codesign.chmod(0o755)
+
+    failed = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **env,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "FAIL_APP": str(app),
+        },
+    )
+    assert failed.returncode != 0
+    assert executable.read_bytes() == previous
+    verification = subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(app)],
+        capture_output=True,
+        text=True,
+    )
+    assert verification.returncode == 0, verification.stderr
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS shell behavior")
+def test_privacy_overlay_concurrent_builds_publish_one_complete_bundle(tmp_path: Path) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        shutil.copy2(Path("resources") / name, tmp_path / name)
+
+    app = tmp_path / "runtime" / "helpers" / "OpenChroniclePrivacyOverlay.app"
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_swiftc = fake_bin / "swiftc"
+    fake_swiftc.write_text(
+        "#!/bin/sh\n"
+        "out=\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"-o\" ]; then out=$2; shift 2; continue; fi\n"
+        "  shift\n"
+        "done\n"
+        "sleep 0.2\n"
+        "printf '#!/bin/sh\\nexit 0\\n' > \"$out\"\n"
+        "chmod +x \"$out\"\n"
+    )
+    fake_swiftc.chmod(0o755)
+    for name in ("codesign", "xattr"):
+        helper = fake_bin / name
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "CLANG_MODULE_CACHE_PATH": str(tmp_path / "module-cache"),
+        "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(app),
+    }
+
+    processes = [
+        subprocess.Popen(
+            ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+            cwd=tmp_path,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=env,
+        )
+        for _ in range(2)
+    ]
+    results = [process.communicate(timeout=10) for process in processes]
+    assert [process.returncode for process in processes] == [0, 0], results
+    executable = app / "Contents" / "MacOS" / "mac-privacy-overlay"
+    assert executable.read_text() == "#!/bin/sh\nexit 0\n"
+    assert not (app.parent / ".privacy-overlay-build.lock").exists()
+
+
 @pytest.mark.parametrize(
     "magic",
     (

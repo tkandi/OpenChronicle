@@ -15,17 +15,21 @@ OUT="${SCRIPT_DIR}/mac-privacy-overlay"
 APP_DIR="${OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR:-${SCRIPT_DIR}/OpenChroniclePrivacyOverlay.app}"
 APP_OUT="${APP_DIR}/Contents/MacOS/mac-privacy-overlay"
 
+overlay_is_fresh() {
+  [[ -x "${OUT}" && -x "${APP_OUT}" \
+        && "${OUT}" -nt "${REASON}" && "${OUT}" -nt "${CORE}" && "${OUT}" -nt "${MAIN}" \
+        && "${OUT}" -nt "${INFO}" && "${OUT}" -nt "$0" \
+        && "${APP_OUT}" -nt "${REASON}" && "${APP_OUT}" -nt "${CORE}" \
+        && "${APP_OUT}" -nt "${MAIN}" && "${APP_OUT}" -nt "${INFO}" \
+        && "${APP_OUT}" -nt "$0" ]]
+}
+
 if [[ ! -f "${REASON}" || ! -f "${CORE}" || ! -f "${MAIN}" || ! -f "${INFO}" ]]; then
   echo "[mac-privacy-overlay] Source not found." >&2
   exit 1
 fi
 
-if [[ -x "${OUT}" && -x "${APP_OUT}" \
-      && "${OUT}" -nt "${REASON}" && "${OUT}" -nt "${CORE}" && "${OUT}" -nt "${MAIN}" \
-      && "${OUT}" -nt "${INFO}" && "${OUT}" -nt "$0" \
-      && "${APP_OUT}" -nt "${REASON}" && "${APP_OUT}" -nt "${CORE}" \
-      && "${APP_OUT}" -nt "${MAIN}" && "${APP_OUT}" -nt "${INFO}" \
-      && "${APP_OUT}" -nt "$0" ]]; then
+if overlay_is_fresh; then
   echo "[mac-privacy-overlay] App bundle is up to date, skipping compile."
   exit 0
 fi
@@ -46,17 +50,49 @@ mkdir -p "${CACHE_DIR}"
 
 APP_PARENT="$(dirname "${APP_DIR}")"
 mkdir -p "${APP_PARENT}"
+LOCK_DIR="${APP_PARENT}/.privacy-overlay-build.lock"
+LOCK_ACQUIRED=0
+for _ in {1..120}; do
+  if mkdir "${LOCK_DIR}" 2>/dev/null; then
+    LOCK_ACQUIRED=1
+    break
+  fi
+  sleep 0.1
+done
+if [[ "${LOCK_ACQUIRED}" -ne 1 ]]; then
+  echo "[mac-privacy-overlay] Timed out waiting for the build lock." >&2
+  exit 1
+fi
+
 TEMP_DIR="$(mktemp -d "${APP_PARENT}/.privacy-overlay-build.XXXXXX")"
 TEMP_APP="${TEMP_DIR}/OpenChroniclePrivacyOverlay.app"
 TEMP_BINARY="${TEMP_APP}/Contents/MacOS/mac-privacy-overlay"
 BACKUP_APP=""
+PUBLISHED_APP=0
+PUBLISH_COMPLETE=0
+TEMP_BARE=""
 cleanup() {
   rm -rf -- "${TEMP_DIR}"
-  if [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
+  if [[ -n "${TEMP_BARE}" ]]; then
+    rm -f -- "${TEMP_BARE}"
+  fi
+  if [[ "${PUBLISH_COMPLETE}" -ne 1 && "${PUBLISHED_APP}" -eq 1 ]]; then
+    rm -rf -- "${APP_DIR}"
+    if [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
+      mv "${BACKUP_APP}" "${APP_DIR}" || true
+      BACKUP_APP=""
+    fi
+  elif [[ -n "${BACKUP_APP}" && -e "${BACKUP_APP}" ]]; then
     rm -rf -- "${BACKUP_APP}"
   fi
+  rm -rf -- "${LOCK_DIR}"
 }
 trap cleanup EXIT
+
+if overlay_is_fresh; then
+  echo "[mac-privacy-overlay] App bundle became fresh while waiting, skipping compile."
+  exit 0
+fi
 
 mkdir -p "${TEMP_APP}/Contents/MacOS"
 install -m 0644 "${INFO}" "${TEMP_APP}/Contents/Info.plist"
@@ -86,10 +122,7 @@ if ! mv "${TEMP_APP}" "${APP_DIR}"; then
   fi
   exit 1
 fi
-if [[ -n "${BACKUP_APP}" ]]; then
-  rm -rf -- "${BACKUP_APP}"
-  BACKUP_APP=""
-fi
+PUBLISHED_APP=1
 
 xattr -cr "${APP_DIR}"
 codesign --force --deep --sign - --timestamp=none "${APP_DIR}"
@@ -98,5 +131,7 @@ codesign --verify --deep --strict "${APP_DIR}"
 TEMP_BARE="${SCRIPT_DIR}/.mac-privacy-overlay.$$"
 install -m 0755 "${APP_OUT}" "${TEMP_BARE}"
 mv -f "${TEMP_BARE}" "${OUT}"
+TEMP_BARE=""
+PUBLISH_COMPLETE=1
 
 echo "[mac-privacy-overlay] Done."
