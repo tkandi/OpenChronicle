@@ -20,16 +20,17 @@
 - 浮层不会对截图中的局部区域进行打码；目标显示器只存在“采集”或“整屏跳过”两种状态。
 - 浮层不会检查网页正文、表单字段或后台 AX Tree。
 - 浮层不承诺完全不读取元数据。为了判断保护范围，系统仍会在本机读取窗口标题和几何信息。
-- 本次改动不会让所有采集设置都支持热加载；只有标识样式必须能够在不重启 daemon 的情况下更新。
+- 本次改动不会让所有采集设置都支持热加载；只有标识样式和位置必须能够在不重启 daemon 的情况下更新。
 
 ## 用户可见行为
 
 ### 可配置样式
 
-在 `[capture]` 中新增一个设置：
+在 `[capture]` 中新增样式和位置设置：
 
 ```toml
 privacy_indicator_style = "pill"
+privacy_indicator_placement = "bottom-left-flush"
 ```
 
 允许的值如下：
@@ -38,14 +39,16 @@ privacy_indicator_style = "pill"
 |---|---|---|
 | 关闭 | `off` | 不显示浮层；现有隐私防护仍继续工作。 |
 | A：边缘框 | `border` | 显示器边缘细框，加一个紧凑的状态标识。 |
-| B1：盾牌 | `shield` | 右下角小型实心盾牌图标。 |
-| B2：已保护 | `pill` | 右下角显示小盾牌和“已保护”胶囊。 |
-| B3：轻量盾牌 | `quiet-shield` | 右下角小型半透明描边盾牌。 |
+| B1：盾牌 | `shield` | 在所选位置显示小型实心盾牌图标。 |
+| B2：已保护 | `pill` | 在所选位置显示小盾牌和“已保护”胶囊。 |
+| B3：轻量盾牌 | `quiet-shield` | 在所选位置显示小型半透明描边盾牌。 |
 | C：状态条 | `banner` | 显示器顶部的窄状态条。 |
 
-默认值为 `pill`。已有安装中没有该配置项时，配置加载器同样采用这个默认值。
+默认样式为 `pill`。已有安装中没有样式配置项时，配置加载器同样采用这个默认值。
 
-右下角标识以 `NSScreen.visibleFrame` 为定位范围并留出边距，从而避开 Dock。边缘框和状态条使用完整屏幕范围。所有浮层都不会获取键盘焦点。`always` 和 `hover` 保持鼠标穿透；`hover` 只观察指针移动，不拦截底层应用输入。`click` 仅为有界的徽标/原因区域启用点击目标，并且只消费命中该目标的点击。
+位置可选 `bottom-left-flush`、`bottom-left-inset` 和 `bottom-right-work-area`。默认值为 `privacy_indicator_placement = "bottom-left-flush"`，标识紧贴物理屏幕左边缘和下边缘。`bottom-left-inset` 位于物理屏幕左下角并保留 12pt 边距；`bottom-right-work-area` 位于 `NSScreen.visibleFrame` 右下角并保留 12pt 边距，从而避开 Dock。紧凑的 `shield`、`pill` 和 `quiet-shield` 标识跟随所选位置。`border` 内的紧凑状态徽标和原因框也跟随位置，但全屏边框本身保持不动。`banner` 和 `off` 不受位置设置影响。
+
+所有浮层都不会获取键盘焦点。`always` 和 `hover` 保持鼠标穿透；`hover` 只观察指针移动，不拦截底层应用输入。`click` 仅为有界的徽标/原因区域启用点击目标，并且只消费命中该目标的点击。
 
 ### 状态
 
@@ -159,7 +162,7 @@ monitor 独立于采集调度器检查结构化暂停状态。因此即使正常
 
 原生设置界面的 Capture 区域新增一个带预览的单选选择器，包含关闭、A、B1、B2、B3 和 C。该选项进入现有配置 snapshot、draft、校验和 patch 流程。
 
-daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_style` 热加载到 monitor。有效的样式改动会在一个 watchdog 周期内更新当前浮层，无需重启采集。无效值由配置编辑器拒绝；常规配置加载器还会将无效值归一化为 `pill`，作为最后一道兜底。
+daemon 监控配置文件的修改时间，把 `capture.privacy_indicator_style` 和 `capture.privacy_indicator_placement` 热加载到 monitor。有效的样式或位置改动会在一个 watchdog 周期内更新当前浮层，无需重启采集。无效值由配置编辑器拒绝；常规配置加载器还会将无效样式归一化为 `pill`，将无效位置归一化为 `bottom-left-flush`，作为最后一道兜底。
 
 ## 打包与生命周期
 
@@ -182,7 +185,7 @@ daemon 监控配置文件的修改时间，只把 `capture.privacy_indicator_sty
 - 截图使用与浮层确认一致的 generation。
 - 浮层确认缺失、进程崩溃、响应格式错误或超时后，系统 fail closed。
 - `off` 不要求浮层存在，同时保留现有隐私行为。
-- 配置热加载只更新标识样式。
+- 配置热加载同时更新标识样式和位置。
 - 刷新期间和 AX 期间到达的事件不能复用事件前决策。
 - `off` 模式与显式 inventory fail-open 保留原有控制语义。
 - 暂停状态不可读时，即使 `screenshot_privacy_fail_closed = false` 也保持 fail closed，并显示黄色失败标识。

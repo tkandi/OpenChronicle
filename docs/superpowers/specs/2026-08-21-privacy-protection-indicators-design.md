@@ -28,16 +28,17 @@ the menu bar application remaining open.
 - The overlay does not claim that no metadata is read. Window title and geometry metadata
   are still read locally to determine protection boundaries.
 - This change does not generalize all capture settings to hot reload. Only the indicator
-  style is required to update without a daemon restart.
+  style and placement are required to update without a daemon restart.
 
 ## User-visible behavior
 
 ### Configurable styles
 
-The `[capture]` section gains one setting:
+The `[capture]` section gains style and placement settings:
 
 ```toml
 privacy_indicator_style = "pill"
+privacy_indicator_placement = "bottom-left-flush"
 ```
 
 Allowed values are:
@@ -46,16 +47,23 @@ Allowed values are:
 |---|---|---|
 | Off | `off` | No overlay; the existing privacy guard still operates. |
 | A: Border | `border` | Thin display-edge border with a compact state badge. |
-| B1: Shield | `shield` | Small solid shield icon in the lower-right corner. |
-| B2: Protected | `pill` | Small shield plus `已保护` pill in the lower-right corner. |
-| B3: Quiet shield | `quiet-shield` | Small translucent outlined shield in the lower-right corner. |
+| B1: Shield | `shield` | Small solid shield icon at the selected placement. |
+| B2: Protected | `pill` | Small shield plus `已保护` pill at the selected placement. |
+| B3: Quiet shield | `quiet-shield` | Small translucent outlined shield at the selected placement. |
 | C: Banner | `banner` | Narrow state banner at the top of the display. |
 
-The default is `pill`. Existing installations that do not contain the new key receive the
-same default when configuration is loaded.
+The default style is `pill`. Existing installations that do not contain the style key receive
+the same default when configuration is loaded.
 
-Lower-right indicators are inset from `NSScreen.visibleFrame` so they avoid the Dock.
-Border and banner styles use the full screen frame. Overlays never accept keyboard focus.
+Placement accepts `bottom-left-flush`, `bottom-left-inset`, and `bottom-right-work-area`.
+The default is `privacy_indicator_placement = "bottom-left-flush"`: the indicator touches the
+physical lower-left edges. `bottom-left-inset` uses the physical lower-left corner with a 12pt
+inset, while `bottom-right-work-area` uses the lower-right of `NSScreen.visibleFrame` with a
+12pt inset so it avoids the Dock. Compact `shield`, `pill`, and `quiet-shield` indicators follow
+the selected placement. The compact badge and reason panel inside `border` also follow it while
+the full-screen border remains fixed. `banner` and `off` do not use placement.
+
+Overlays never accept keyboard focus.
 `always` and `hover` remain mouse-through; `hover` observes pointer movement without intercepting
 the underlying app. `click` enables only the bounded badge/reason hit target, and only a click
 inside that target is consumed.
@@ -243,10 +251,12 @@ The native Settings capture section adds a visual single-choice picker with prev
 A, B1, B2, B3, and C. The selection is included in the existing configuration snapshot,
 draft, validation, and patch flow.
 
-The daemon watches the config file modification time and reloads only
-`capture.privacy_indicator_style` into the monitor. A valid style change updates active panels
-within one watchdog interval without restarting capture. Invalid values are rejected by the
-config editor and normalized to `pill` by the regular config loader as a final fallback.
+The daemon watches the config file modification time and reloads
+`capture.privacy_indicator_style` and `capture.privacy_indicator_placement` into the monitor.
+A valid style or placement change updates active panels within one watchdog interval without
+restarting capture. Invalid values are rejected by the config editor; the regular config loader
+normalizes invalid style values to `pill` and invalid placement values to `bottom-left-flush` as
+a final fallback.
 
 ## Packaging and lifecycle
 
@@ -272,7 +282,7 @@ config editor and normalized to `pill` by the regular config loader as a final f
 - Screenshot uses the same acknowledged generation as the overlay.
 - Missing, crashed, malformed, and timed-out overlay acknowledgements fail closed.
 - `off` preserves existing privacy behavior without requiring the overlay.
-- Config hot reload updates only the indicator style.
+- Config hot reload updates the indicator style and placement together.
 - Event-during-AX and event-during-refresh epochs cannot reuse a pre-event decision.
 - Privacy mode `off` and explicit inventory fail-open preserve their legacy control semantics.
 - An unreadable pause state remains fail-closed when
@@ -297,7 +307,7 @@ config editor and normalized to `pill` by the regular config loader as a final f
 - Verify pause and fail-closed indicators on every display.
 - Quit the menu bar application and verify indicators continue while the daemon runs.
 - Kill the overlay helper and verify screenshots stop until it is acknowledged again.
-- Switch all styles in Settings without restarting the daemon.
+- Switch all styles and all three placement presets in Settings without restarting the daemon.
 
 ## Privacy and logging
 
