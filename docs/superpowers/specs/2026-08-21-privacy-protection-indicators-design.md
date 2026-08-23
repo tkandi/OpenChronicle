@@ -132,6 +132,7 @@ snapshot contains:
 - state: `inactive`, `protected`, `paused`, or `failed`;
 - capture mode;
 - selected indicator style;
+- selected indicator placement;
 - display frames and blocked display identifiers;
 - the display containing the active window, when it can be determined;
 - candidate active displays when exact focused-window identity is unavailable;
@@ -186,20 +187,21 @@ It runs as an accessory AppKit process without a Dock icon. One borderless, non-
 
 Python sends newline-delimited JSON commands over stdin. The helper acknowledges a generation
 on stdout only after the corresponding panels have been updated on the main thread. Commands
-normally contain only state, style, generation, display geometry, and fixed reason codes. With
-user-approved `exact` detail they may additionally contain bounded exact reason fields, but only
-inside the payload for a display already excluded by that same generation.
+normally contain only state, style, placement, generation, display geometry, reason-display
+settings, and fixed reason codes. With user-approved `exact` detail they may additionally contain
+bounded exact reason fields, but only inside the payload for a display already excluded by that
+same generation.
 
 Example command:
 
 ```json
-{"generation":42,"state":"protected","style":"pill","displays":[{"id":2,"left":1920,"top":0,"width":1920,"height":1080}]}
+{"generation":42,"state":"protected","style":"pill","placement":"bottom-left-flush","displays":[{"id":2,"left":1920,"top":0,"width":1920,"height":1080,"reasons":[]}],"all_displays":false,"reason_display":"hybrid","reason_detail":"exact","reason_trigger":"hover","reasons":[]}
 ```
 
 Example acknowledgement:
 
 ```json
-{"generation":42,"rendered":true}
+{"generation":42,"rendered":true,"error":null,"window_ids":[73]}
 ```
 
 ### Capture gates

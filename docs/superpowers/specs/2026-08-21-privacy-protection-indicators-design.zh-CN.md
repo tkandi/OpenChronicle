@@ -92,6 +92,7 @@ denylist 窗口关闭、最小化或移动到另一块显示器后，下一份�
 - 状态：`inactive`、`protected`、`paused` 或 `failed`；
 - 截图模式；
 - 当前选择的标识样式；
+- 当前选择的标识位置；
 - 显示器边界和被阻止的显示器 identifier；
 - 能够确定时，活动窗口所在的显示器；
 - 无法精确确定 focused window 时的活动候选显示器；
@@ -120,18 +121,18 @@ inventory 从 CoreGraphics `optionOnScreenOnly` 结果开始，只保留 alpha �
 - 根据 CoreGraphics 显示器边界和 `NSScreen` 几何信息定位；
 - 显示在普通应用窗口之上。
 
-Python 通过 stdin 发送逐行 JSON 命令。只有在主线程完成对应 panel 更新后，helper 才会通过 stdout 确认该 generation。命令通常只包含状态、样式、generation、显示器几何信息和固定原因码。用户批准 `exact` 详情后，命令可以额外包含有长度上限的具体原因字段，但只能放入同一 generation 已经排除的显示器 payload。
+Python 通过 stdin 发送逐行 JSON 命令。只有在主线程完成对应 panel 更新后，helper 才会通过 stdout 确认该 generation。命令通常只包含状态、样式、位置、generation、显示器几何信息、原因显示设置和固定原因码。用户批准 `exact` 详情后，命令可以额外包含有长度上限的具体原因字段，但只能放入同一 generation 已经排除的显示器 payload。
 
 命令示例：
 
 ```json
-{"generation":42,"state":"protected","style":"pill","displays":[{"id":2,"left":1920,"top":0,"width":1920,"height":1080}]}
+{"generation":42,"state":"protected","style":"pill","placement":"bottom-left-flush","displays":[{"id":2,"left":1920,"top":0,"width":1920,"height":1080,"reasons":[]}],"all_displays":false,"reason_display":"hybrid","reason_detail":"exact","reason_trigger":"hover","reasons":[]}
 ```
 
 确认示例：
 
 ```json
-{"generation":42,"rendered":true}
+{"generation":42,"rendered":true,"error":null,"window_ids":[73]}
 ```
 
 ### 采集 gate
@@ -207,7 +208,7 @@ daemon 监控配置文件的修改时间，把 `capture.privacy_indicator_style`
 - 确认所有显示器上的暂停和 fail-closed 标识。
 - 退出菜单栏应用，确认 daemon 运行期间标识仍继续工作。
 - 终止浮层 helper，确认在重新获得确认之前截图始终停止。
-- 在设置中切换所有样式，确认无需重启 daemon。
+- 在设置中切换所有样式和三个位置预设，确认无需重启 daemon。
 
 ## 隐私与日志
 
