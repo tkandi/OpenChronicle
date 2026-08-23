@@ -27,6 +27,9 @@ _CLOSE_TIMEOUT = 1.0
 _REASON_DISPLAY_MODES = frozenset({"overlay", "diagnostics", "hybrid"})
 _REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
 _REASON_TRIGGERS = frozenset({"always", "hover", "click"})
+_INDICATOR_PLACEMENTS = frozenset(
+    {"bottom-left-flush", "bottom-left-inset", "bottom-right-work-area"}
+)
 _OVERLAY_APP_NAME = "OpenChroniclePrivacyOverlay.app"
 _OVERLAY_EXECUTABLE = Path("Contents/MacOS/mac-privacy-overlay")
 
@@ -432,6 +435,15 @@ def _reason_setting(snapshot: ProtectionSnapshot, name: str, default: str) -> st
     return value if isinstance(value, str) and value in allowed else default
 
 
+def _placement_setting(snapshot: ProtectionSnapshot) -> str:
+    value = getattr(snapshot, "indicator_placement", "bottom-left-flush")
+    return (
+        value
+        if isinstance(value, str) and value in _INDICATOR_PLACEMENTS
+        else "bottom-left-flush"
+    )
+
+
 def _reason_payloads_for_display(
     snapshot: ProtectionSnapshot,
     display_id: int | None,
@@ -641,6 +653,7 @@ class PrivacyOverlayClient:
             "generation": snapshot.generation,
             "state": snapshot.state.value,
             "style": snapshot.indicator_style,
+            "placement": _placement_setting(snapshot),
             "displays": [
                 {
                     "id": display.id,

@@ -23,9 +23,26 @@ enum MacPrivacyOverlayCoreTests {
         let command = try JSONDecoder().decode(OverlayCommand.self, from: raw)
         precondition(command.generation == 9)
         precondition(command.style == .pill)
+        precondition(command.placement == .bottomRightWorkArea)
         precondition(command.reasonTrigger == .hover)
         precondition(command.reasons.isEmpty)
         precondition(command.displays.allSatisfy { ($0.reasons ?? []).isEmpty })
+
+        let explicitPlacement = try JSONDecoder().decode(
+            OverlayCommand.self,
+            from: Data(#"{"generation":10,"state":"protected","style":"pill","placement":"bottom-left-flush","displays":[],"all_displays":false}"#.utf8)
+        )
+        precondition(explicitPlacement.placement == .bottomLeftFlush)
+
+        do {
+            _ = try JSONDecoder().decode(
+                OverlayCommand.self,
+                from: Data(#"{"generation":11,"state":"protected","style":"pill","placement":"future-placement","displays":[],"all_displays":false}"#.utf8)
+            )
+            preconditionFailure("unknown explicit placement must fail decoding")
+        } catch {
+            precondition(error is DecodingError)
+        }
 
         let acknowledgement = OverlayAcknowledgement(
             generation: 9,
@@ -64,12 +81,16 @@ enum MacPrivacyOverlayCoreTests {
         precondition(!panel.canBecomeMain)
 
         testControllerRendering()
+        testControllerRejectsUnknownDisplayAndClosesPanels()
         testControllerAcknowledgesEveryPanelWindowID()
         testControllerKeepsRenderingWhenAnyWindowIDIsUnavailable()
         testControllerRejectsDuplicateWindowIDsWithoutHidingPanels()
+        testPlacementGeometry()
         testHoverStaysMouseThrough()
+        testCompactExpansionKeepsPlacementAnchor()
         testCompactClickKeepsTargetSizedVisualPanel()
         testClickUsesOnlyIndicatorHitTarget()
+        testBorderHitTargetFollowsPlacement()
         testFullScreenVisualPanelNeverConsumesStaleOutsideClick()
         testBannerUsesOnlyCornerHitTarget()
         testAlwaysStaysExpandedAndMouseThrough()
@@ -227,7 +248,8 @@ enum MacPrivacyOverlayCoreTests {
                 state: .paused,
                 style: .banner,
                 displays: [OverlayDisplay(id: 1, left: 900, top: 900, width: 10, height: 10)],
-                allDisplays: false
+                allDisplays: false,
+                placement: .bottomLeftFlush
             )
         ) { rendered in
             precondition(panels[0].displayIfNeededCount == 2)
@@ -239,10 +261,49 @@ enum MacPrivacyOverlayCoreTests {
         precondition(panels[1].orderOutCount >= 1)
         precondition(!panels[1].isVisible)
 
-        var rejected: Bool?
+        var cleared: Bool?
         controller.apply(
             OverlayCommand(
                 generation: 12,
+                state: .inactive,
+                style: .off,
+                displays: [],
+                allDisplays: false,
+                placement: .bottomLeftFlush
+            )
+        ) { rendered in
+            cleared = rendered
+        }
+        precondition(cleared == true)
+        precondition(panels[0].orderOutCount >= 1)
+        precondition(!panels[0].isVisible)
+    }
+
+    private static func testControllerRejectsUnknownDisplayAndClosesPanels() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 0, width: 800, height: 600)
+        )
+        let panel = RecordingPanel(contentRect: .zero)
+        let controller = PrivacyOverlayController(
+            screenProvider: { [screen] },
+            panelFactory: { panel }
+        )
+        controller.apply(
+            OverlayCommand(
+                generation: 10,
+                state: .protected,
+                style: .pill,
+                displays: [OverlayDisplay(id: 1, left: 0, top: 0, width: 1, height: 1)],
+                allDisplays: false
+            )
+        ) { precondition($0) }
+
+        var rejected: Bool?
+        controller.apply(
+            OverlayCommand(
+                generation: 11,
                 state: .protected,
                 style: .pill,
                 displays: [OverlayDisplay(id: 99, left: 0, top: 999, width: 10, height: 10)],
@@ -251,9 +312,10 @@ enum MacPrivacyOverlayCoreTests {
         ) { rendered in
             rejected = rendered
         }
+
         precondition(rejected == false)
-        precondition(panels[0].orderOutCount >= 1)
-        precondition(!panels[0].isVisible)
+        precondition(panel.orderOutCount >= 1)
+        precondition(!panel.isVisible)
     }
 
     private static func testControllerAcknowledgesEveryPanelWindowID() {
@@ -351,6 +413,62 @@ enum MacPrivacyOverlayCoreTests {
         precondition(inputPanel.isVisible)
     }
 
+    private static func testPlacementGeometry() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: -1200, y: -200, width: 1200, height: 800),
+            visibleFrame: NSRect(x: -1200, y: -140, width: 1200, height: 740)
+        )
+
+        func renderedFrame(
+            _ placement: IndicatorPlacement,
+            screen: OverlayScreenGeometry
+        ) -> NSRect {
+            let panel = RecordingPanel(contentRect: .zero)
+            let controller = PrivacyOverlayController(
+                screenProvider: { [screen] },
+                panelFactory: { panel }
+            )
+            controller.apply(
+                OverlayCommand(
+                    generation: 30,
+                    state: .protected,
+                    style: .pill,
+                    displays: [OverlayDisplay(id: 1, left: 0, top: 0, width: 1, height: 1)],
+                    allDisplays: false,
+                    placement: placement
+                )
+            ) { precondition($0) }
+            return panel.frame
+        }
+
+        let flush = renderedFrame(.bottomLeftFlush, screen: screen)
+        precondition(flush.minX == screen.frame.minX)
+        precondition(flush.minY == screen.frame.minY)
+
+        let inset = renderedFrame(.bottomLeftInset, screen: screen)
+        precondition(inset.minX == screen.frame.minX + 12)
+        precondition(inset.minY == screen.frame.minY + 12)
+
+        let workArea = renderedFrame(.bottomRightWorkArea, screen: screen)
+        precondition(workArea.maxX == screen.visibleFrame.maxX - 12)
+        precondition(workArea.minY == screen.visibleFrame.minY + 12)
+
+        for visibleFrame in [
+            NSRect(x: -1140, y: -200, width: 1140, height: 800),
+            NSRect(x: -1200, y: -200, width: 1140, height: 800),
+        ] {
+            let dockScreen = OverlayScreenGeometry(
+                id: 1,
+                frame: screen.frame,
+                visibleFrame: visibleFrame
+            )
+            let frame = renderedFrame(.bottomRightWorkArea, screen: dockScreen)
+            precondition(frame.maxX == visibleFrame.maxX - 12)
+            precondition(frame.minY == visibleFrame.minY + 12)
+        }
+    }
+
     private static func testHoverStaysMouseThrough() {
         let screen = OverlayScreenGeometry(
             id: 1,
@@ -388,6 +506,45 @@ enum MacPrivacyOverlayCoreTests {
         precondition(panel.ignoresMouseEvents)
         precondition(!panel.canBecomeKey)
         precondition(!panel.canBecomeMain)
+    }
+
+    private static func testCompactExpansionKeepsPlacementAnchor() {
+        for placement in [
+            IndicatorPlacement.bottomLeftFlush,
+            .bottomLeftInset,
+            .bottomRightWorkArea,
+        ] {
+            let screen = OverlayScreenGeometry(
+                id: 1,
+                frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+                visibleFrame: NSRect(x: 0, y: 60, width: 800, height: 540)
+            )
+            let panel = RecordingPanel(contentRect: .zero)
+            var pointer = NSPoint(x: -100, y: -100)
+            var tick: (() -> Void)?
+            let controller = PrivacyOverlayController(
+                screenProvider: { [screen] },
+                panelFactory: { panel },
+                pointerProvider: { pointer },
+                timerFactory: { _, handler in tick = handler; return {} }
+            )
+            controller.apply(
+                reasonCommand(trigger: .hover, style: .pill, placement: placement)
+            ) { precondition($0) }
+            let compact = panel.frame
+            pointer = NSPoint(x: compact.midX, y: compact.midY)
+            tick?()
+            let expanded = panel.frame
+
+            precondition(expanded.minY == compact.minY)
+            if placement.isLeading {
+                precondition(expanded.minX == compact.minX)
+                precondition(expanded.maxX > compact.maxX)
+            } else {
+                precondition(expanded.maxX == compact.maxX)
+                precondition(expanded.minX < compact.minX)
+            }
+        }
     }
 
     private static func testClickUsesOnlyIndicatorHitTarget() {
@@ -450,6 +607,61 @@ enum MacPrivacyOverlayCoreTests {
         precondition(!visualPanel.canBecomeMain)
         precondition(!inputPanel.canBecomeKey)
         precondition(!inputPanel.canBecomeMain)
+    }
+
+    private static func testBorderHitTargetFollowsPlacement() {
+        let screen = OverlayScreenGeometry(
+            id: 1,
+            frame: NSRect(x: 0, y: 0, width: 800, height: 600),
+            visibleFrame: NSRect(x: 0, y: 60, width: 800, height: 540)
+        )
+        for placement in [
+            IndicatorPlacement.bottomLeftFlush,
+            .bottomRightWorkArea,
+        ] {
+            let visualPanel = RecordingPanel(contentRect: .zero)
+            let inputPanel = RecordingPanel(contentRect: .zero)
+            let controller = PrivacyOverlayController(
+                screenProvider: { [screen] },
+                panelFactory: { visualPanel },
+                inputPanelFactory: { inputPanel },
+                pointerProvider: { NSPoint(x: 400, y: 300) },
+                timerFactory: { _, _ in {} }
+            )
+            controller.apply(
+                reasonCommand(trigger: .click, style: .border, placement: placement)
+            ) { precondition($0) }
+
+            precondition(visualPanel.frame == screen.frame)
+            let compact = inputPanel.frame
+            if placement.isLeading {
+                precondition(compact.minX == screen.frame.minX)
+                precondition(compact.minY == screen.frame.minY)
+            } else {
+                precondition(compact.maxX == screen.visibleFrame.maxX - 12)
+                precondition(compact.minY == screen.visibleFrame.minY + 12)
+            }
+
+            let event = NSEvent.mouseEvent(
+                with: .leftMouseDown,
+                location: NSPoint(x: compact.width / 2, y: compact.height / 2),
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: inputPanel.windowNumber,
+                context: nil,
+                eventNumber: 1,
+                clickCount: 1,
+                pressure: 1
+            )!
+            inputPanel.contentView?.mouseDown(with: event)
+            let expanded = inputPanel.frame
+            precondition(expanded.minY == compact.minY)
+            if placement.isLeading {
+                precondition(expanded.minX == compact.minX)
+            } else {
+                precondition(expanded.maxX == compact.maxX)
+            }
+        }
     }
 
     private static func testCompactClickKeepsTargetSizedVisualPanel() {
@@ -681,7 +893,8 @@ enum MacPrivacyOverlayCoreTests {
     private static func reasonCommand(
         trigger: OverlayReasonTrigger,
         style: IndicatorStyle,
-        reasonDisplay: String = "hybrid"
+        reasonDisplay: String = "hybrid",
+        placement: IndicatorPlacement = .bottomRightWorkArea
     ) -> OverlayCommand {
         OverlayCommand(
             generation: 20,
@@ -708,6 +921,7 @@ enum MacPrivacyOverlayCoreTests {
                 )
             ],
             allDisplays: false,
+            placement: placement,
             reasonDisplay: reasonDisplay,
             reasonDetail: "exact",
             reasonTrigger: trigger,

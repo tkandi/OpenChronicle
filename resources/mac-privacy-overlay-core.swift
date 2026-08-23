@@ -17,6 +17,15 @@ enum IndicatorStyle: String, Codable {
     case banner
 }
 
+enum IndicatorPlacement: String, Codable {
+    case bottomLeftFlush = "bottom-left-flush"
+    case bottomLeftInset = "bottom-left-inset"
+    case bottomRightWorkArea = "bottom-right-work-area"
+
+    var isLeading: Bool { self != .bottomRightWorkArea }
+    var inset: CGFloat { self == .bottomLeftFlush ? 0 : 12 }
+}
+
 struct OverlayDisplay: Codable {
     let id: UInt32
     let left: Double
@@ -66,6 +75,7 @@ struct OverlayCommand: Codable {
     let style: IndicatorStyle
     let displays: [OverlayDisplay]
     let allDisplays: Bool
+    let placement: IndicatorPlacement
     let reasonDisplay: String
     let reasonDetail: String
     let reasonTrigger: OverlayReasonTrigger
@@ -77,6 +87,7 @@ struct OverlayCommand: Codable {
         style: IndicatorStyle,
         displays: [OverlayDisplay],
         allDisplays: Bool,
+        placement: IndicatorPlacement = .bottomRightWorkArea,
         reasonDisplay: String = "hybrid",
         reasonDetail: String = "exact",
         reasonTrigger: OverlayReasonTrigger = .hover,
@@ -87,6 +98,7 @@ struct OverlayCommand: Codable {
         self.style = style
         self.displays = displays
         self.allDisplays = allDisplays
+        self.placement = placement
         self.reasonDisplay = reasonDisplay
         self.reasonDetail = reasonDetail
         self.reasonTrigger = reasonTrigger
@@ -96,6 +108,7 @@ struct OverlayCommand: Codable {
     enum CodingKeys: String, CodingKey {
         case generation, state, style, displays
         case allDisplays = "all_displays"
+        case placement
         case reasonDisplay = "reason_display"
         case reasonDetail = "reason_detail"
         case reasonTrigger = "reason_trigger"
@@ -109,6 +122,10 @@ struct OverlayCommand: Codable {
         style = try container.decode(IndicatorStyle.self, forKey: .style)
         displays = try container.decode([OverlayDisplay].self, forKey: .displays)
         allDisplays = try container.decode(Bool.self, forKey: .allDisplays)
+        placement = try container.decodeIfPresent(
+            IndicatorPlacement.self,
+            forKey: .placement
+        ) ?? .bottomRightWorkArea
         reasonDisplay = try container.decodeIfPresent(String.self, forKey: .reasonDisplay) ?? "hybrid"
         reasonDetail = try container.decodeIfPresent(String.self, forKey: .reasonDetail) ?? "exact"
         reasonTrigger = try container.decodeIfPresent(
@@ -217,20 +234,24 @@ private final class IndicatorView: NSView {
 
     private var presentation: IndicatorPresentation
     private var style: IndicatorStyle
+    private var placement: IndicatorPlacement
     private var reasons: [OverlayReason]
     private var includeExactValues: Bool
     private var revealState: ReasonRevealState
+    private var layoutAnchorRect: NSRect = .zero
     var onClick: (() -> Void)?
 
     init(
         presentation: IndicatorPresentation,
         style: IndicatorStyle,
+        placement: IndicatorPlacement,
         reasons: [OverlayReason],
         includeExactValues: Bool,
         trigger: OverlayReasonTrigger
     ) {
         self.presentation = presentation
         self.style = style
+        self.placement = placement
         self.reasons = reasons
         self.includeExactValues = includeExactValues
         revealState = ReasonRevealState(trigger: trigger)
@@ -245,23 +266,30 @@ private final class IndicatorView: NSView {
     var hasReasons: Bool { !reasons.isEmpty }
     var isReasonExpanded: Bool { revealState.isExpanded && hasReasons }
     var styleForLayout: IndicatorStyle { style }
+    var placementForLayout: IndicatorPlacement { placement }
     var usesSeparateInputPanel: Bool { style == .border || style == .banner }
 
     func update(
         presentation: IndicatorPresentation,
         style: IndicatorStyle,
+        placement: IndicatorPlacement,
         reasons: [OverlayReason],
         includeExactValues: Bool,
         trigger: OverlayReasonTrigger
     ) {
         self.presentation = presentation
         self.style = style
+        self.placement = placement
         self.reasons = reasons
         self.includeExactValues = includeExactValues
         if revealState.trigger != trigger {
             revealState = ReasonRevealState(trigger: trigger)
         }
         needsDisplay = true
+    }
+
+    func update(layoutAnchorRect: NSRect) {
+        self.layoutAnchorRect = layoutAnchorRect
     }
 
     func update(pointerInside: Bool) -> Bool {
@@ -379,15 +407,17 @@ private final class IndicatorView: NSView {
         switch style {
         case .shield, .pill, .quietShield:
             return NSRect(
-                x: container.maxX - size.width,
+                x: placement.isLeading ? container.minX : container.maxX - size.width,
                 y: container.minY,
                 width: size.width,
                 height: size.height
             )
         case .border:
             return NSRect(
-                x: container.maxX - size.width - Self.margin,
-                y: container.minY + Self.margin,
+                x: placement.isLeading
+                    ? layoutAnchorRect.minX
+                    : layoutAnchorRect.maxX - size.width,
+                y: layoutAnchorRect.minY,
                 width: size.width,
                 height: size.height
             )
@@ -415,9 +445,11 @@ private final class IndicatorView: NSView {
                 height: reasonBoxHeight
             )
         case .border:
-            let width = min(Self.expandedWidth, max(0, container.width - Self.margin * 2))
+            let width = min(Self.expandedWidth, max(0, layoutAnchorRect.width))
             return NSRect(
-                x: container.maxX - width - Self.margin,
+                x: placement.isLeading
+                    ? layoutAnchorRect.minX
+                    : layoutAnchorRect.maxX - width,
                 y: status.maxY + Self.reasonGap,
                 width: width,
                 height: reasonBoxHeight
@@ -623,6 +655,7 @@ final class PrivacyOverlayController {
                 view.update(
                     presentation: presentation,
                     style: command.style,
+                    placement: command.placement,
                     reasons: displayReasons,
                     includeExactValues: command.reasonDetail == "exact",
                     trigger: command.reasonTrigger
@@ -631,6 +664,7 @@ final class PrivacyOverlayController {
                 view = IndicatorView(
                     presentation: presentation,
                     style: command.style,
+                    placement: command.placement,
                     reasons: displayReasons,
                     includeExactValues: command.reasonDetail == "exact",
                     trigger: command.reasonTrigger
@@ -705,8 +739,16 @@ final class PrivacyOverlayController {
         guard let panel = panels[displayID],
               let display = panelScreens[displayID],
               let view = panel.contentView as? IndicatorView else { return }
-        panel.setFrame(panelFrame(for: display, view: view), display: true)
+        let frame = panelFrame(for: display, view: view)
+        panel.setFrame(frame, display: true)
         view.frame = panel.contentView?.bounds ?? .zero
+        view.update(
+            layoutAnchorRect: localAnchorRect(
+                display: display,
+                panelFrame: frame,
+                placement: view.placementForLayout
+            )
+        )
         view.needsDisplay = true
     }
 
@@ -717,15 +759,49 @@ final class PrivacyOverlayController {
         switch view.styleForLayout {
         case .shield, .pill, .quietShield:
             let size = view.desiredPanelSize()
-            return NSRect(
-                x: display.visibleFrame.maxX - size.width - 12,
-                y: display.visibleFrame.minY + 12,
-                width: size.width,
-                height: size.height
-            )
+            switch view.placementForLayout {
+            case .bottomLeftFlush:
+                return NSRect(
+                    x: display.frame.minX,
+                    y: display.frame.minY,
+                    width: size.width,
+                    height: size.height
+                )
+            case .bottomLeftInset:
+                return NSRect(
+                    x: display.frame.minX + 12,
+                    y: display.frame.minY + 12,
+                    width: size.width,
+                    height: size.height
+                )
+            case .bottomRightWorkArea:
+                return NSRect(
+                    x: display.visibleFrame.maxX - size.width - 12,
+                    y: display.visibleFrame.minY + 12,
+                    width: size.width,
+                    height: size.height
+                )
+            }
         case .border, .banner, .off:
             return display.frame
         }
+    }
+
+    private func localAnchorRect(
+        display: OverlayScreenGeometry,
+        panelFrame: NSRect,
+        placement: IndicatorPlacement
+    ) -> NSRect {
+        let global: NSRect
+        switch placement {
+        case .bottomLeftFlush:
+            global = display.frame
+        case .bottomLeftInset:
+            global = display.frame.insetBy(dx: 12, dy: 12)
+        case .bottomRightWorkArea:
+            global = display.visibleFrame.insetBy(dx: 12, dy: 12)
+        }
+        return global.offsetBy(dx: -panelFrame.minX, dy: -panelFrame.minY)
     }
 
     private func toggleReason(for displayID: UInt32) {

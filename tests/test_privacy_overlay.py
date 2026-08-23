@@ -192,6 +192,7 @@ def test_overlay_command_contains_only_geometry_and_state(
         "generation": snapshot.generation,
         "state": "protected",
         "style": "pill",
+        "placement": "bottom-left-flush",
         "displays": [
             {
                 "id": 2,
@@ -211,6 +212,15 @@ def test_overlay_command_contains_only_geometry_and_state(
     serialized = fake_transport.writes[-1]
     assert "InPrivate" not in serialized
     assert "Microsoft Edge" not in serialized
+
+
+def test_render_command_includes_indicator_placement(
+    snapshot: ProtectionSnapshot,
+) -> None:
+    command = PrivacyOverlayClient._render_command(
+        replace(snapshot, indicator_placement="bottom-left-inset")
+    )
+    assert command["placement"] == "bottom-left-inset"
 
 
 def test_overlay_exact_reason_is_sent_only_for_protected_display() -> None:
@@ -303,6 +313,7 @@ def test_overlay_old_snapshot_shape_renders_with_reason_defaults(
                 "reason_detail",
                 "reason_trigger",
                 "display_reasons",
+                "indicator_placement",
             }
         }
     )
@@ -310,6 +321,7 @@ def test_overlay_old_snapshot_shape_renders_with_reason_defaults(
     command = PrivacyOverlayClient._render_command(legacy)
 
     assert command["reason_trigger"] == "hover"
+    assert command["placement"] == "bottom-left-flush"
     assert command["reasons"] == []
     assert command["displays"][0]["reasons"] == []
 
