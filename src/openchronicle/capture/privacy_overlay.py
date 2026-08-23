@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from .. import paths
 from ..logger import get
 from .protection import ProtectionSnapshot, ProtectionState
 
@@ -26,6 +27,8 @@ _CLOSE_TIMEOUT = 1.0
 _REASON_DISPLAY_MODES = frozenset({"overlay", "diagnostics", "hybrid"})
 _REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
 _REASON_TRIGGERS = frozenset({"always", "hover", "click"})
+_OVERLAY_APP_NAME = "OpenChroniclePrivacyOverlay.app"
+_OVERLAY_EXECUTABLE = Path("Contents/MacOS/mac-privacy-overlay")
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,79 @@ def _usable_overlay_binary(binary_path: Path) -> Path | None:
     return _maybe_compile_overlay(reason_path, core_path, main_path, binary_path)
 
 
+def _overlay_bundle_executable(source_dir: Path) -> Path:
+    del source_dir
+    return paths.runtime_dir() / "helpers" / _OVERLAY_APP_NAME / _OVERLAY_EXECUTABLE
+
+
+def _overlay_bundle_is_fresh(source_dir: Path) -> bool:
+    executable = _overlay_bundle_executable(source_dir)
+    inputs = (
+        source_dir / "mac-privacy-overlay-reason.swift",
+        source_dir / "mac-privacy-overlay-core.swift",
+        source_dir / "mac-privacy-overlay.swift",
+        source_dir / "mac-privacy-overlay-Info.plist",
+        source_dir / "build-mac-privacy-overlay.sh",
+    )
+    try:
+        return _is_executable(executable) and all(
+            executable.stat().st_mtime >= source.stat().st_mtime
+            for source in inputs
+        )
+    except OSError:
+        return False
+
+
+def _ensure_overlay_bundle(source_dir: Path) -> Path | None:
+    executable = _overlay_bundle_executable(source_dir)
+    helper_parent = executable.parents[3]
+    build_script = source_dir / "build-mac-privacy-overlay.sh"
+    required = (
+        source_dir / "mac-privacy-overlay-reason.swift",
+        source_dir / "mac-privacy-overlay-core.swift",
+        source_dir / "mac-privacy-overlay.swift",
+        source_dir / "mac-privacy-overlay-Info.plist",
+        build_script,
+    )
+    try:
+        helper_parent.mkdir(parents=True, exist_ok=True)
+        os.chmod(paths.runtime_dir(), 0o700)
+        os.chmod(helper_parent, 0o700)
+        if not all(path.is_file() for path in required):
+            return None
+        if _overlay_bundle_is_fresh(source_dir):
+            return executable
+        result = subprocess.run(
+            ["/bin/bash", str(build_script)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            cwd=str(source_dir),
+            env={
+                **os.environ,
+                "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(
+                    executable.parents[2]
+                ),
+            },
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return executable if result.returncode == 0 and _overlay_bundle_is_fresh(source_dir) else None
+
+
+def _overlay_source_directories() -> tuple[Path, ...]:
+    candidates: list[Path] = []
+    try:
+        from importlib.resources import files as package_files
+
+        candidates.append(Path(str(package_files("openchronicle").joinpath("_bundled"))))
+    except (ModuleNotFoundError, OSError, ValueError):
+        pass
+    with contextlib.suppress(OSError):
+        candidates.append(Path(__file__).resolve().parents[3] / "resources")
+    return tuple(candidates)
+
+
 def _resolve_overlay_path() -> Path | None:
     """Find or build the privacy-overlay helper without inspecting user content."""
     if platform.system() != "Darwin":
@@ -155,22 +231,8 @@ def _resolve_overlay_path() -> Path | None:
             return path
         logger.warning("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER is not executable")
 
-    candidates: list[Path] = []
-    try:
-        from importlib.resources import files as package_files
-
-        bundled_dir = Path(str(package_files("openchronicle").joinpath("_bundled")))
-        candidates.append(bundled_dir / "mac-privacy-overlay")
-    except (ModuleNotFoundError, OSError, ValueError):
-        pass
-
-    try:
-        dev_root = Path(__file__).resolve().parents[3]
-    except OSError:
-        return None
-    candidates.append(dev_root / "resources" / "mac-privacy-overlay")
-    for binary_path in candidates:
-        usable = _usable_overlay_binary(binary_path)
+    for source_dir in _overlay_source_directories():
+        usable = _ensure_overlay_bundle(source_dir)
         if usable is not None:
             return usable
     return None

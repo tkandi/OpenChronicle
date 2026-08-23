@@ -57,6 +57,7 @@ packages = ["src/openchronicle"]
 "resources/mac-privacy-overlay-core.swift" = "openchronicle/_bundled/mac-privacy-overlay-core.swift"
 "resources/mac-privacy-overlay-reason.swift" = "openchronicle/_bundled/mac-privacy-overlay-reason.swift"
 "resources/mac-privacy-overlay.swift" = "openchronicle/_bundled/mac-privacy-overlay.swift"
+"resources/mac-privacy-overlay-Info.plist" = "openchronicle/_bundled/mac-privacy-overlay-Info.plist"
 "resources/build-mac-privacy-overlay.sh" = "openchronicle/_bundled/build-mac-privacy-overlay.sh"
 "resources/mac-screen-capture-core.swift" = "openchronicle/_bundled/mac-screen-capture-core.swift"
 "resources/mac-screen-capture.swift" = "openchronicle/_bundled/mac-screen-capture.swift"
@@ -68,6 +69,7 @@ exclude = [
     "/macos/OpenChronicleApp/.build",
     "/resources/mac-window-list",
     "/resources/mac-privacy-overlay",
+    "/resources/OpenChroniclePrivacyOverlay.app",
     "/resources/mac-screen-capture",
 ]
 

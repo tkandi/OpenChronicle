@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import platform
+import plistlib
 import shutil
 import stat
 import subprocess
@@ -68,6 +69,9 @@ def test_privacy_overlay_sources_are_declared_for_wheel() -> None:
     assert mappings["resources/build-mac-privacy-overlay.sh"] == (
         "openchronicle/_bundled/build-mac-privacy-overlay.sh"
     )
+    assert mappings["resources/mac-privacy-overlay-Info.plist"] == (
+        "openchronicle/_bundled/mac-privacy-overlay-Info.plist"
+    )
 
 
 def test_window_list_core_source_is_declared_for_wheel() -> None:
@@ -92,6 +96,57 @@ def test_screen_capture_sources_are_declared_for_wheel() -> None:
     assert mappings["resources/build-mac-screen-capture.sh"] == (
         "openchronicle/_bundled/build-mac-screen-capture.sh"
     )
+
+
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS codesign and Swift SDK")
+@pytest.mark.parametrize("arch", ["arm64", "x86_64"])
+def test_privacy_overlay_build_emits_signed_app_bundle(tmp_path: Path, arch: str) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        shutil.copy2(Path("resources") / name, tmp_path / name)
+
+    app = tmp_path / "runtime" / "helpers" / "OpenChroniclePrivacyOverlay.app"
+    result = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "CLANG_MODULE_CACHE_PATH": str(tmp_path / "module-cache"),
+            "OPENCHRONICLE_PRIVACY_OVERLAY_ARCH": arch,
+            "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(app),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+
+    bare = tmp_path / "mac-privacy-overlay"
+    executable = app / "Contents" / "MacOS" / "mac-privacy-overlay"
+    assert bare.is_file() and bare.stat().st_mode & stat.S_IXUSR
+    assert executable.is_file() and executable.stat().st_mode & stat.S_IXUSR
+    with (app / "Contents" / "Info.plist").open("rb") as handle:
+        info = plistlib.load(handle)
+    assert info["CFBundleIdentifier"] == "com.openchronicle.privacy-overlay"
+    assert info["CFBundleExecutable"] == "mac-privacy-overlay"
+    architecture = subprocess.run(
+        ["file", str(executable)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert arch in architecture.stdout
+
+    verification = subprocess.run(
+        ["codesign", "--verify", "--deep", "--strict", str(app)],
+        capture_output=True,
+        text=True,
+    )
+    assert verification.returncode == 0, verification.stderr
 
 
 @pytest.mark.parametrize(
@@ -139,6 +194,7 @@ def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> 
         "mac-privacy-overlay-core.swift",
         "mac-privacy-overlay-reason.swift",
         "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
         "build-mac-privacy-overlay.sh",
         "mac-screen-capture-core.swift",
         "mac-screen-capture.swift",
@@ -150,6 +206,8 @@ def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> 
     sentinels = {
         resources / "mac-window-list": b"\xfe\xed\xfa\xcewindow-list",
         resources / "mac-privacy-overlay": b"\xfe\xed\xfa\xcfprivacy-overlay",
+        resources / "OpenChroniclePrivacyOverlay.app" / "Contents" / "MacOS"
+        / "mac-privacy-overlay": b"\xcf\xfa\xed\feprivacy-overlay-app",
         resources / "mac-screen-capture": b"\xce\xfa\xed\xfescreen-capture",
         project / "macos" / "OpenChronicleApp" / ".build" / "fat-sentinel": b"\xca\xfe\xba\xbe",
         project / ".build" / "macos-app" / "fat-sentinel": b"\xca\xfe\xba\xbe",
@@ -179,6 +237,7 @@ def test_sdist_excludes_generated_macos_artifacts_and_mach_o(tmp_path: Path) -> 
             "resources/mac-privacy-overlay",
             "resources/mac-screen-capture",
         ))
+        assert not any(name.startswith("resources/OpenChroniclePrivacyOverlay.app/") for name in names)
         assert not any(name.startswith("macos/OpenChronicleApp/.build/") for name in names)
         assert not any(name.startswith(".build/") for name in names)
         assert not _archive_mach_o_entries(archive)

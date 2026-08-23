@@ -4,6 +4,7 @@ import os
 import stat
 import sys
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -891,6 +892,49 @@ def test_resolver_accepts_executable_environment_override(monkeypatch, tmp_path:
     monkeypatch.setenv("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER", str(helper))
 
     assert _resolve_overlay_path() == helper.resolve()
+
+
+def test_default_resolver_returns_fresh_app_bundle_executable(
+    monkeypatch, tmp_path: Path
+) -> None:
+    source_dir = tmp_path / "_bundled"
+    source_dir.mkdir()
+    runtime_dir = tmp_path / "root" / "runtime"
+    executable = (
+        runtime_dir
+        / "helpers"
+        / "OpenChroniclePrivacyOverlay.app"
+        / "Contents"
+        / "MacOS"
+        / "mac-privacy-overlay"
+    )
+    executable.parent.mkdir(parents=True)
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        (source_dir / name).write_text(name)
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    now = time.time()
+    for source in source_dir.iterdir():
+        if source.is_file():
+            os.utime(source, (now - 10, now - 10))
+    os.utime(executable, (now, now))
+
+    monkeypatch.setattr(privacy_overlay.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(privacy_overlay.paths, "runtime_dir", lambda: runtime_dir)
+    monkeypatch.delenv("OPENCHRONICLE_PRIVACY_OVERLAY_HELPER", raising=False)
+    monkeypatch.setattr(
+        privacy_overlay,
+        "_overlay_source_directories",
+        lambda: (source_dir,),
+    )
+
+    assert _resolve_overlay_path() == executable
 
 
 def test_resolver_rejects_source_free_executable_environment_override(

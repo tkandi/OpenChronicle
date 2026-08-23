@@ -230,6 +230,12 @@ This intentionally removes all normal and auxiliary windows from those apps.
 bounds gray; `exclude-window` leaves the pixels behind those excluded windows
 visible.
 
+The indicator executable runs from a generated
+`~/.openchronicle/runtime/helpers/OpenChroniclePrivacyOverlay.app` helper
+bundle. Its stable bundle identity
+allows ScreenCaptureKit to resolve and exclude the complete indicator
+application; an unresolved owner forces `skip-monitor` fallback.
+
 Filtered capture is authorized only when the window inventory, protected window
 IDs and regions, and indicator acknowledgement are complete and current. An
 unavailable helper, unsupported macOS version, missing or duplicate IDs, or a

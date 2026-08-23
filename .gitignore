@@ -27,6 +27,7 @@ resources/mac-ax-helper
 resources/mac-ax-watcher
 resources/mac-window-list
 resources/mac-privacy-overlay
+resources/OpenChroniclePrivacyOverlay.app
 resources/mac-screen-capture
 
 # Local OpenChronicle data (only if symlinked into the repo for dev)

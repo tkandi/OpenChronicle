@@ -113,6 +113,11 @@ windows by promoting both sets to unique owning applications. With a non-`off` i
 or unresolved overlay IDs make window filtering ineligible and stop screenshot capture until a
 later generation is confirmed.
 
+The overlay executable is built and launched inside
+`runtime/helpers/OpenChroniclePrivacyOverlay.app` under the active OpenChronicle root. The helper
+bundle gives its panels a stable ScreenCaptureKit owning application; the default runtime resolver
+never launches the source-tree bare executable.
+
 Window-filtered capture is authorized only when every protected region comes from one or more valid,
 uniquely mapped protected window IDs. Diagnostics display leases, pause states, inventory failures,
 unknown mappings, and indicator failures are never authorized for window filtering.

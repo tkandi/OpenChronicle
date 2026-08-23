@@ -154,6 +154,13 @@ helper displays the protection state after the protection decision is confirmed.
 The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
 `banner`.
 
+The runtime executable is launched from a generated
+`runtime/helpers/OpenChroniclePrivacyOverlay.app` helper bundle under the active
+OpenChronicle root. That bundle identity gives its
+panels a ScreenCaptureKit owning application, allowing filtered screenshots to
+exclude every visual and input panel together. If the owner cannot be resolved,
+filtered capture uses the display-level fallback.
+
 The helper acknowledges a non-`off` generation only when every visible
 indicator and input panel has a distinct positive UInt32 window number. If any
 number is unavailable or duplicated, the panels remain visible but the helper
