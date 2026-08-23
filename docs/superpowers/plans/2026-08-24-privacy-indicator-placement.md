@@ -1072,12 +1072,16 @@ Record only the config hash:
 shasum -a 256 /Users/tkandi/.openchronicle/config.toml
 ```
 
-Then stop the App and daemon cleanly, verify `OpenChronicle`, `openchronicle start --foreground`, `mac-ax-watcher`, and `mac-privacy-overlay` have exited, and run:
+Then stop the App and daemon cleanly, verify `OpenChronicle`, `openchronicle start --foreground`, `mac-ax-watcher`, and `mac-privacy-overlay` have exited, and run both installation layers:
 
 ```bash
 bash install.sh --no-client-config
-open -a OpenChronicle
+bash scripts/install-macos-app.sh
 ```
+
+The first command updates the backend and helper binaries without replacing the client config.
+The second command builds, signs, installs, and launches the SwiftUI App bundle in
+`/Applications/OpenChronicle.app`.
 
 After startup, recompute the config hash. Expected: it exactly matches the pre-install hash.
 
