@@ -363,6 +363,60 @@ def test_privacy_overlay_failed_restore_retains_previous_backup(tmp_path: Path) 
     assert backup_executable.read_bytes() == previous
 
 
+@pytest.mark.skipif(platform.system() != "Darwin", reason="requires macOS shell behavior")
+def test_privacy_overlay_cleanup_failure_preserves_success_status(tmp_path: Path) -> None:
+    for name in (
+        "mac-privacy-overlay-reason.swift",
+        "mac-privacy-overlay-core.swift",
+        "mac-privacy-overlay.swift",
+        "mac-privacy-overlay-Info.plist",
+        "build-mac-privacy-overlay.sh",
+    ):
+        shutil.copy2(Path("resources") / name, tmp_path / name)
+    app = tmp_path / "runtime" / "helpers" / "OpenChroniclePrivacyOverlay.app"
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_swiftc = fake_bin / "swiftc"
+    fake_swiftc.write_text(
+        "#!/bin/sh\n"
+        "out=\n"
+        "while [ \"$#\" -gt 0 ]; do\n"
+        "  if [ \"$1\" = \"-o\" ]; then out=$2; shift 2; continue; fi\n"
+        "  shift\n"
+        "done\n"
+        "printf '#!/bin/sh\\nexit 0\\n' > \"$out\"\n"
+        "chmod +x \"$out\"\n"
+    )
+    fake_swiftc.chmod(0o755)
+    for name in ("codesign", "xattr"):
+        helper = fake_bin / name
+        helper.write_text("#!/bin/sh\nexit 0\n")
+        helper.chmod(0o755)
+    fake_rm = fake_bin / "rm"
+    fake_rm.write_text(
+        "#!/bin/sh\n"
+        "case \"$*\" in\n"
+        "  *privacy-overlay-build.lock*) exec /bin/rm \"$@\" ;;\n"
+        "  *) exit 9 ;;\n"
+        "esac\n"
+    )
+    fake_rm.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(tmp_path / "build-mac-privacy-overlay.sh")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "OPENCHRONICLE_PRIVACY_OVERLAY_APP_DIR": str(app),
+        },
+    )
+    assert result.returncode == 0, result.stderr
+    assert (app / "Contents" / "MacOS" / "mac-privacy-overlay").is_file()
+
+
 @pytest.mark.parametrize(
     "magic",
     (

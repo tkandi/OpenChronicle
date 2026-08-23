@@ -60,6 +60,8 @@ PUBLISHED_APP=0
 PUBLISH_COMPLETE=0
 TEMP_BARE=""
 cleanup() {
+  local original_status=$?
+  set +e
   if [[ -n "${TEMP_DIR}" ]]; then
     rm -rf -- "${TEMP_DIR}"
   fi
@@ -83,6 +85,7 @@ cleanup() {
   if [[ "${LOCK_ACQUIRED}" -eq 1 ]]; then
     rm -rf -- "${LOCK_DIR}"
   fi
+  return "${original_status}"
 }
 trap cleanup EXIT
 
