@@ -195,6 +195,26 @@ struct SettingsView: View {
               selection: binding(\.privacyIndicatorStyle, fallback: "pill")
             )
             Picker(
+              "Indicator position",
+              selection: binding(
+                \.privacyIndicatorPlacement,
+                fallback: PrivacyIndicatorPlacementOption.defaultValue.rawValue
+              )
+            ) {
+              ForEach(PrivacyIndicatorPlacementOption.allCases) { option in
+                Label(option.title, systemImage: option.systemImage)
+                  .tag(option.rawValue)
+              }
+            }
+            .pickerStyle(.menu)
+            .disabled(
+              !PrivacyIndicatorPlacementOption.isEnabled(
+                for: PrivacyIndicatorStyleOption(
+                  rawValue: configuration.draft?.privacyIndicatorStyle ?? ""
+                ) ?? .defaultStyle
+              )
+            )
+            Picker(
               "Reason location",
               selection: binding(\.privacyReasonDisplay, fallback: "hybrid")
             ) {

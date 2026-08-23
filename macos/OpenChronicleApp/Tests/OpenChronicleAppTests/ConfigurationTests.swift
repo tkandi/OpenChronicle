@@ -43,6 +43,7 @@ final class ConfigurationTests: XCTestCase {
           "screenshot_monitor": "separate", "screenshot_privacy_mode": "skip-monitor",
           "screenshot_privacy_fail_closed": true, "screenshot_jpeg_quality": 80,
           "privacy_indicator_style": "pill",
+          "privacy_indicator_placement": "bottom-left-flush",
           "privacy_reason_display": "hybrid", "privacy_reason_detail": "exact",
           "privacy_reason_trigger": "hover",
           "privacy_counts": {
@@ -93,17 +94,23 @@ final class ConfigurationTests: XCTestCase {
     )
     let original = try XCTUnwrap(ConfigurationDraft(snapshot: snapshot))
     XCTAssertEqual(original.privacyIndicatorStyle, "pill")
+    XCTAssertEqual(original.privacyIndicatorPlacement, "bottom-left-flush")
     var edited = original
     edited.heartbeatMinutes = 15
     edited.timelineModelOverride = nil
     edited.privacyIndicatorStyle = "border"
+    edited.privacyIndicatorPlacement = "bottom-left-inset"
 
     let updates = edited.updates(comparedTo: original)
 
-    XCTAssertEqual(updates.count, 3)
+    XCTAssertEqual(updates.count, 4)
     XCTAssertEqual(updates["capture.heartbeat_minutes"] as? Int, 15)
     XCTAssertTrue(updates["models.timeline.model"] is NSNull)
     XCTAssertEqual(updates["capture.privacy_indicator_style"] as? String, "border")
+    XCTAssertEqual(
+      updates["capture.privacy_indicator_placement"] as? String,
+      "bottom-left-inset"
+    )
   }
 
   func testPrivacyReasonSettingsEmitOnlyChangedPaths() throws {
@@ -171,6 +178,29 @@ final class ConfigurationTests: XCTestCase {
       XCTAssertEqual(
         try XCTUnwrap(ConfigurationDraft(snapshot: snapshot)).privacyIndicatorStyle,
         "pill"
+      )
+    }
+  }
+
+  func testPrivacyIndicatorPlacementDefaultsForMissingAndUnknownSnapshotValues() throws {
+    let payload = snapshotPayload(path: "/tmp/config.toml")
+    let missing = payload.replacingOccurrences(
+      of: "          \"privacy_indicator_placement\": \"bottom-left-flush\",\n",
+      with: ""
+    )
+    let unknown = payload.replacingOccurrences(
+      of: "\"privacy_indicator_placement\": \"bottom-left-flush\"",
+      with: "\"privacy_indicator_placement\": \"future-placement\""
+    )
+
+    for variant in [missing, unknown] {
+      let snapshot = try JSONDecoder().decode(
+        ConfigurationSnapshot.self,
+        from: Data(variant.utf8)
+      )
+      XCTAssertEqual(
+        try XCTUnwrap(ConfigurationDraft(snapshot: snapshot)).privacyIndicatorPlacement,
+        PrivacyIndicatorPlacementOption.defaultValue.rawValue
       )
     }
   }

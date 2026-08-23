@@ -62,6 +62,7 @@ struct CaptureConfigurationValue: Decodable, Equatable {
   let screenshotPrivacyFailClosed: Bool
   let screenshotJPEGQuality: Int
   let privacyIndicatorStyle: String?
+  let privacyIndicatorPlacement: String?
   let privacyReasonDisplay: String?
   let privacyReasonDetail: String?
   let privacyReasonTrigger: String?
@@ -79,6 +80,7 @@ struct CaptureConfigurationValue: Decodable, Equatable {
     case screenshotPrivacyFailClosed = "screenshot_privacy_fail_closed"
     case screenshotJPEGQuality = "screenshot_jpeg_quality"
     case privacyIndicatorStyle = "privacy_indicator_style"
+    case privacyIndicatorPlacement = "privacy_indicator_placement"
     case privacyReasonDisplay = "privacy_reason_display"
     case privacyReasonDetail = "privacy_reason_detail"
     case privacyReasonTrigger = "privacy_reason_trigger"
@@ -166,6 +168,7 @@ struct ConfigurationDraft: Equatable {
   var screenshotPrivacyMode: String
   var screenshotPrivacyFailClosed: Bool
   var privacyIndicatorStyle: String
+  var privacyIndicatorPlacement: String
   var privacyReasonDisplay: String
   var privacyReasonDetail: String
   var privacyReasonTrigger: String
@@ -211,6 +214,9 @@ struct ConfigurationDraft: Equatable {
     privacyIndicatorStyle = PrivacyIndicatorStyleOption(
       rawValue: values.capture.privacyIndicatorStyle ?? ""
     )?.rawValue ?? PrivacyIndicatorStyleOption.defaultStyle.rawValue
+    privacyIndicatorPlacement = PrivacyIndicatorPlacementOption(
+      rawValue: values.capture.privacyIndicatorPlacement ?? ""
+    )?.rawValue ?? PrivacyIndicatorPlacementOption.defaultValue.rawValue
     privacyReasonDisplay = PrivacyReasonDisplayOption(
       rawValue: values.capture.privacyReasonDisplay ?? ""
     )?.rawValue ?? PrivacyReasonDisplayOption.defaultValue.rawValue
@@ -320,6 +326,12 @@ struct ConfigurationDraft: Equatable {
       "capture.privacy_indicator_style",
       privacyIndicatorStyle,
       original.privacyIndicatorStyle
+    )
+    add(
+      &updates,
+      "capture.privacy_indicator_placement",
+      privacyIndicatorPlacement,
+      original.privacyIndicatorPlacement
     )
     add(
       &updates,
