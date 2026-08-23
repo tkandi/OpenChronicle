@@ -106,6 +106,7 @@ def _filtered_authorization_key(decision: ProtectionDecision) -> tuple[object, .
         snapshot.state,
         snapshot.capture_mode,
         snapshot.indicator_style,
+        snapshot.indicator_placement,
         displays,
         tuple(sorted(snapshot.protected_display_ids)),
         tuple(sorted(snapshot.protected_window_ids)),

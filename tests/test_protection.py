@@ -95,6 +95,20 @@ def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     assert snapshot.ax_blocked is True
 
 
+def test_snapshot_carries_indicator_placement() -> None:
+    cfg = CaptureConfig(privacy_indicator_placement="bottom-left-inset")
+    inventory = WindowInventory(windows=(), displays=(LEFT, RIGHT))
+    snapshot = build_protection_snapshot(
+        cfg,
+        inventory,
+        paused=False,
+        generation=7,
+        now=1.0,
+    )
+
+    assert snapshot.indicator_placement == "bottom-left-inset"
+
+
 def test_window_filtering_collects_rule_matched_ids_and_original_regions() -> None:
     first_region = ScreenRegion(-220, 10, 300, 200)
     second_region = ScreenRegion(110, 0, 80, 90)

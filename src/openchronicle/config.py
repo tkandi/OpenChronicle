@@ -13,6 +13,9 @@ from . import paths
 PRIVACY_INDICATOR_STYLES = frozenset(
     {"off", "border", "shield", "pill", "quiet-shield", "banner"}
 )
+PRIVACY_INDICATOR_PLACEMENTS = frozenset(
+    {"bottom-left-flush", "bottom-left-inset", "bottom-right-work-area"}
+)
 PRIVACY_REASON_DISPLAY_MODES = frozenset({"overlay", "diagnostics", "hybrid"})
 PRIVACY_REASON_DETAIL_MODES = frozenset({"category", "exact", "tiered"})
 PRIVACY_REASON_TRIGGERS = frozenset({"always", "hover", "click"})
@@ -43,6 +46,7 @@ class ModelConfig:
 @dataclass
 class CaptureConfig:
     privacy_indicator_style: str = "pill"
+    privacy_indicator_placement: str = "bottom-left-flush"
     privacy_reason_display: str = "hybrid"
     privacy_reason_detail: str = "exact"
     privacy_reason_trigger: str = "hover"
@@ -88,6 +92,14 @@ class CaptureConfig:
             indicator_style
             if indicator_style in PRIVACY_INDICATOR_STYLES
             else "pill"
+        )
+        indicator_placement = str(
+            self.privacy_indicator_placement or "bottom-left-flush"
+        ).strip().lower()
+        self.privacy_indicator_placement = (
+            indicator_placement
+            if indicator_placement in PRIVACY_INDICATOR_PLACEMENTS
+            else "bottom-left-flush"
         )
         reason_display = str(self.privacy_reason_display or "hybrid").strip().lower()
         self.privacy_reason_display = (
@@ -313,6 +325,7 @@ screenshot_monitor = "primary"          # "primary" (legacy single monitor), "al
 screenshot_privacy_mode = "skip-monitor" # off, skip-monitor, mask-window, or exclude-window
 screenshot_privacy_fail_closed = true    # if window/display inventory fails, abort the capture tick
 privacy_indicator_style = "pill"       # off, border, shield, pill, quiet-shield, or banner
+privacy_indicator_placement = "bottom-left-flush" # bottom-left-flush, bottom-left-inset, or bottom-right-work-area
 privacy_reason_display = "hybrid"      # overlay, diagnostics, or hybrid
 privacy_reason_detail = "exact"        # category, exact, or tiered
 privacy_reason_trigger = "hover"       # always, hover, or click

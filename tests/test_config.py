@@ -118,6 +118,21 @@ def test_capture_privacy_indicator_style_config(tmp_path: Path) -> None:
     assert config.load(tmp_path / "missing.toml").capture.privacy_indicator_style == "pill"
 
 
+def test_capture_privacy_indicator_placement_config(tmp_path: Path) -> None:
+    missing = config.load(tmp_path / "missing.toml").capture
+    assert missing.privacy_indicator_placement == "bottom-left-flush"
+
+    path = tmp_path / "config.toml"
+    for raw, expected in (
+        ("BOTTOM-LEFT-FLUSH", "bottom-left-flush"),
+        ("bottom-left-inset", "bottom-left-inset"),
+        ("bottom-right-work-area", "bottom-right-work-area"),
+        ("unknown", "bottom-left-flush"),
+    ):
+        path.write_text(f'[capture]\nprivacy_indicator_placement = "{raw}"\n')
+        assert config.load(path).capture.privacy_indicator_placement == expected
+
+
 def test_privacy_reason_settings_default_and_normalize(tmp_path: Path) -> None:
     missing = config.load(tmp_path / "missing.toml").capture
     assert (

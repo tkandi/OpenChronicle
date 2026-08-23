@@ -64,6 +64,7 @@ class ProtectionSnapshot:
     active_display_id: int | None
     created_monotonic: float
     fresh_until: float
+    indicator_placement: str = "bottom-left-flush"
     failure_reason: ProtectionFailureReason | None = None
     active_candidate_display_ids: frozenset[int] = frozenset()
     reason_display: str = "hybrid"
@@ -333,6 +334,7 @@ def build_protection_snapshot(
         active_display_id=active_display_id,
         created_monotonic=now,
         fresh_until=now + SNAPSHOT_FRESH_SECONDS,
+        indicator_placement=cfg.privacy_indicator_placement,
         failure_reason=None if paused else derived_failure_reason,
         active_candidate_display_ids=active_candidate_display_ids,
         reason_display=cfg.privacy_reason_display,

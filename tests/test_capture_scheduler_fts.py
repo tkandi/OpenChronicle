@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -168,6 +169,30 @@ def _filtered_decision(
         indicator_window_ids=indicator_window_ids,
     )
     return decision
+
+
+def test_filtered_authorization_key_includes_indicator_placement() -> None:
+    snapshot = ProtectionSnapshot(
+        generation=1,
+        state=ProtectionState.PROTECTED,
+        capture_mode="separate",
+        indicator_style="pill",
+        displays=(),
+        protected_display_ids=frozenset(),
+        active_display_id=None,
+        created_monotonic=1.0,
+        fresh_until=1.25,
+        indicator_placement="bottom-left-flush",
+    )
+    first = ProtectionDecision(snapshot=snapshot, indicator_confirmed=True)
+    second = ProtectionDecision(
+        snapshot=replace(snapshot, indicator_placement="bottom-left-inset"),
+        indicator_confirmed=True,
+    )
+
+    assert scheduler_mod._filtered_authorization_key(first) != (
+        scheduler_mod._filtered_authorization_key(second)
+    )
 
 
 def _safe_active_window() -> window_meta.WindowMeta:

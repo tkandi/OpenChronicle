@@ -77,6 +77,7 @@ class PrivacyProtectionMonitor:
         self._diagnostics_guard_reader = diagnostics_guard_reader
         self._diagnostics_guard_only = diagnostics_guard_only
         self._indicator_style = cfg.privacy_indicator_style
+        self._indicator_placement = cfg.privacy_indicator_placement
         self._config_mtime_ns: int | None = None
         self._generation = 0
         self._requested_epoch = 0
@@ -205,7 +206,7 @@ class PrivacyProtectionMonitor:
         with self._refresh_lock:
             self._raise_if_stopped()
 
-            self._reload_indicator_style()
+            self._reload_indicator_settings()
             with self._state_lock:
                 covered_request_epoch = self._requested_epoch
             diagnostics_guard = self._read_diagnostics_guard()
@@ -225,6 +226,7 @@ class PrivacyProtectionMonitor:
                     active_display_id=None,
                     created_monotonic=now,
                     fresh_until=now + SNAPSHOT_FRESH_SECONDS,
+                    indicator_placement=self._indicator_placement,
                     reason_display=self._cfg.privacy_reason_display,
                     reason_detail=self._cfg.privacy_reason_detail,
                     reason_trigger=self._cfg.privacy_reason_trigger,
@@ -234,6 +236,7 @@ class PrivacyProtectionMonitor:
                 snapshot_cfg = replace(
                     self._cfg,
                     privacy_indicator_style=self._indicator_style,
+                    privacy_indicator_placement=self._indicator_placement,
                 )
                 if self._diagnostics_guard_only:
                     snapshot_cfg = replace(
@@ -292,10 +295,11 @@ class PrivacyProtectionMonitor:
                     self._decision = decision
                     self._decision_condition.notify_all()
             logger.debug(
-                "privacy protection generation=%s state=%s style=%s displays=%s confirmed=%s",
+                "privacy protection generation=%s state=%s style=%s placement=%s displays=%s confirmed=%s",
                 generation,
                 snapshot.state.value,
                 snapshot.indicator_style,
+                snapshot.indicator_placement,
                 sorted(snapshot.protected_display_ids),
                 indicator_confirmed,
             )
@@ -324,7 +328,7 @@ class PrivacyProtectionMonitor:
             except Exception as exc:
                 logger.warning("privacy protection listener failed: %s", type(exc).__name__)
 
-    def _reload_indicator_style(self) -> None:
+    def _reload_indicator_settings(self) -> None:
         try:
             mtime_ns = self._config_path.stat().st_mtime_ns
         except OSError:
@@ -332,12 +336,13 @@ class PrivacyProtectionMonitor:
         if self._config_mtime_ns == mtime_ns:
             return
         try:
-            indicator_style = config.load(self._config_path).capture.privacy_indicator_style
+            capture = config.load(self._config_path).capture
         except (OSError, TypeError, ValueError) as exc:
-            logger.warning("privacy protection style reload failed: %s", type(exc).__name__)
-        else:
-            self._indicator_style = indicator_style
-            self._config_mtime_ns = mtime_ns
+            logger.warning("privacy protection settings reload failed: %s", type(exc).__name__)
+            return
+        self._indicator_style = capture.privacy_indicator_style
+        self._indicator_placement = capture.privacy_indicator_placement
+        self._config_mtime_ns = mtime_ns
 
     def _read_protection_inputs(
         self,

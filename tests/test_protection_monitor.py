@@ -410,20 +410,31 @@ def test_listener_exception_is_sanitized_and_does_not_stop_monitor(
     assert marker not in "\n".join(messages)
 
 
-def test_style_hot_reload_changes_only_indicator_style(tmp_path, inventory, fake_overlay) -> None:
+def test_indicator_settings_hot_reload_atomically(tmp_path, inventory, fake_overlay) -> None:
     config_path = tmp_path / "config.toml"
-    config_path.write_text('[capture]\nprivacy_indicator_style = "shield"\n')
+    config_path.write_text(
+        '[capture]\nprivacy_indicator_style = "shield"\n'
+        'privacy_indicator_placement = "bottom-left-flush"\n'
+    )
     monitor = make_monitor(config_path=config_path, inventory=inventory, overlay=fake_overlay)
-
     first = monitor.decision_for_capture(force=True)
+
     previous_mtime = config_path.stat().st_mtime_ns
-    config_path.write_text('[capture]\nprivacy_indicator_style = "banner"\n')
+    config_path.write_text(
+        '[capture]\nprivacy_indicator_style = "banner"\n'
+        'privacy_indicator_placement = "bottom-right-work-area"\n'
+    )
     os.utime(config_path, ns=(previous_mtime + 1, previous_mtime + 1))
     second = monitor.decision_for_capture(force=True)
 
-    assert first.snapshot.indicator_style == "shield"
-    assert second.snapshot.indicator_style == "banner"
-    assert second.snapshot.capture_mode == first.snapshot.capture_mode
+    assert (first.snapshot.indicator_style, first.snapshot.indicator_placement) == (
+        "shield",
+        "bottom-left-flush",
+    )
+    assert (second.snapshot.indicator_style, second.snapshot.indicator_placement) == (
+        "banner",
+        "bottom-right-work-area",
+    )
     assert second.snapshot.generation > first.snapshot.generation
 
 

@@ -57,6 +57,7 @@ EDITABLE_PATHS = {
     "capture.screenshot_privacy_mode",
     "capture.screenshot_privacy_fail_closed",
     "capture.privacy_indicator_style",
+    "capture.privacy_indicator_placement",
     "capture.privacy_reason_display",
     "capture.privacy_reason_detail",
     "capture.privacy_reason_trigger",
@@ -228,6 +229,20 @@ def validate_mapping(raw: dict[str, Any]) -> None:
         raise ConfigEditorError(
             "capture.privacy_indicator_style must be off, border, shield, pill, "
             "quiet-shield, or banner"
+        )
+    indicator_placement = _require_type(
+        capture,
+        "privacy_indicator_placement",
+        str,
+        "capture.privacy_indicator_placement",
+    )
+    if (
+        indicator_placement is not None
+        and indicator_placement.lower() not in config_mod.PRIVACY_INDICATOR_PLACEMENTS
+    ):
+        raise ConfigEditorError(
+            "capture.privacy_indicator_placement must be bottom-left-flush, "
+            "bottom-left-inset, or bottom-right-work-area"
         )
     reason_display = _require_type(
         capture,
@@ -426,6 +441,9 @@ def snapshot_payload(path: Path) -> dict[str, Any]:
                         cfg.capture.screenshot_privacy_fail_closed
                     ),
                     "privacy_indicator_style": cfg.capture.privacy_indicator_style,
+                    "privacy_indicator_placement": (
+                        cfg.capture.privacy_indicator_placement
+                    ),
                     "privacy_reason_display": cfg.capture.privacy_reason_display,
                     "privacy_reason_detail": cfg.capture.privacy_reason_detail,
                     "privacy_reason_trigger": cfg.capture.privacy_reason_trigger,

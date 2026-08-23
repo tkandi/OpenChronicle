@@ -69,6 +69,40 @@ def test_config_indicator_style_is_editable_and_validated(ac_root: Path) -> None
     assert "privacy_indicator_style" in payload["error"]
 
 
+def test_indicator_placement_patch_validate_and_snapshot(ac_root: Path) -> None:
+    path = ac_root / "config.toml"
+    path.write_text('[capture]\nprivacy_indicator_placement = "bottom-left-flush"\n')
+    runner = CliRunner()
+    _, snapshot = _invoke_json(runner, ["config", "--json"])
+    assert snapshot["values"]["capture"]["privacy_indicator_placement"] == (
+        "bottom-left-flush"
+    )
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--patch-json"],
+        {
+            "expected_sha256": snapshot["sha256"],
+            "updates": {
+                "capture.privacy_indicator_placement": "bottom-left-inset"
+            },
+        },
+    )
+    assert result.exit_code == 0, result.output
+    assert payload["changed"] is True
+    assert tomllib.loads(path.read_text())["capture"]["privacy_indicator_placement"] == (
+        "bottom-left-inset"
+    )
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--validate-json"],
+        {"content": '[capture]\nprivacy_indicator_placement = "invalid"\n'},
+    )
+    assert result.exit_code == 2
+    assert "privacy_indicator_placement" in payload["error"]
+
+
 def test_screenshot_privacy_window_modes_patch_validate_and_snapshot(ac_root: Path) -> None:
     path = ac_root / "config.toml"
     path.write_text('[capture]\nscreenshot_privacy_mode = "mask-window"\n')
