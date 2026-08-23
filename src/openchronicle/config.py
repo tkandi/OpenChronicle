@@ -46,7 +46,7 @@ class ModelConfig:
 @dataclass
 class CaptureConfig:
     privacy_indicator_style: str = "pill"
-    privacy_indicator_placement: str = "bottom-left-flush"
+    privacy_indicator_placement: str = field(default="bottom-left-flush", kw_only=True)
     privacy_reason_display: str = "hybrid"
     privacy_reason_detail: str = "exact"
     privacy_reason_trigger: str = "hover"

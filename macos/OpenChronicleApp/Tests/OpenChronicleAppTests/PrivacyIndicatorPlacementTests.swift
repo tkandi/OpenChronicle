@@ -12,6 +12,15 @@ final class PrivacyIndicatorPlacementTests: XCTestCase {
     XCTAssertEqual(PrivacyIndicatorPlacementOption.bottomLeftFlush.title, "左下角贴边")
     XCTAssertEqual(PrivacyIndicatorPlacementOption.bottomLeftInset.title, "左下角留白")
     XCTAssertEqual(PrivacyIndicatorPlacementOption.bottomRightWorkArea.title, "右下角避开 Dock")
+    XCTAssertEqual(PrivacyIndicatorPlacementOption.bottomLeftFlush.systemImage, "arrow.down.left")
+    XCTAssertEqual(
+      PrivacyIndicatorPlacementOption.bottomLeftInset.systemImage,
+      "arrow.down.left.circle"
+    )
+    XCTAssertEqual(
+      PrivacyIndicatorPlacementOption.bottomRightWorkArea.systemImage,
+      "arrow.down.right"
+    )
   }
 
   func testStyleAvailability() {

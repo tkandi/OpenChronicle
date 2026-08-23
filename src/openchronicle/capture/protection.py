@@ -64,7 +64,7 @@ class ProtectionSnapshot:
     active_display_id: int | None
     created_monotonic: float
     fresh_until: float
-    indicator_placement: str = "bottom-left-flush"
+    indicator_placement: str = field(default="bottom-left-flush", kw_only=True)
     failure_reason: ProtectionFailureReason | None = None
     active_candidate_display_ids: frozenset[int] = frozenset()
     reason_display: str = "hybrid"

@@ -44,6 +44,16 @@ enum MacPrivacyOverlayCoreTests {
             precondition(error is DecodingError)
         }
 
+        do {
+            _ = try JSONDecoder().decode(
+                OverlayCommand.self,
+                from: Data(#"{"generation":12,"state":"protected","style":"pill","placement":null,"displays":[],"all_displays":false}"#.utf8)
+            )
+            preconditionFailure("explicit null placement must fail decoding")
+        } catch {
+            precondition(error is DecodingError)
+        }
+
         let acknowledgement = OverlayAcknowledgement(
             generation: 9,
             rendered: true,
@@ -617,6 +627,7 @@ enum MacPrivacyOverlayCoreTests {
         )
         for placement in [
             IndicatorPlacement.bottomLeftFlush,
+            .bottomLeftInset,
             .bottomRightWorkArea,
         ] {
             let visualPanel = RecordingPanel(contentRect: .zero)
@@ -634,10 +645,14 @@ enum MacPrivacyOverlayCoreTests {
 
             precondition(visualPanel.frame == screen.frame)
             let compact = inputPanel.frame
-            if placement.isLeading {
+            switch placement {
+            case .bottomLeftFlush:
                 precondition(compact.minX == screen.frame.minX)
                 precondition(compact.minY == screen.frame.minY)
-            } else {
+            case .bottomLeftInset:
+                precondition(compact.minX == screen.frame.minX + 12)
+                precondition(compact.minY == screen.frame.minY + 12)
+            case .bottomRightWorkArea:
                 precondition(compact.maxX == screen.visibleFrame.maxX - 12)
                 precondition(compact.minY == screen.visibleFrame.minY + 12)
             }
@@ -819,7 +834,13 @@ enum MacPrivacyOverlayCoreTests {
             timerFactory: { _, _ in {} }
         )
 
-        controller.apply(reasonCommand(trigger: .click, style: .banner)) { rendered in
+        controller.apply(
+            reasonCommand(
+                trigger: .click,
+                style: .banner,
+                placement: .bottomLeftInset
+            )
+        ) { rendered in
             precondition(rendered)
         }
         precondition(visualPanel.frame == screen.frame)
@@ -827,6 +848,8 @@ enum MacPrivacyOverlayCoreTests {
         precondition(!inputPanel.ignoresMouseEvents)
         precondition(inputPanel.frame.width < screen.frame.width)
         precondition(inputPanel.frame.height == 30)
+        precondition(inputPanel.frame.maxX == screen.frame.maxX - 12)
+        precondition(inputPanel.frame.maxY == screen.frame.maxY)
         precondition(!inputPanel.frame.contains(NSPoint(x: 100, y: 585)))
     }
 
@@ -858,7 +881,8 @@ enum MacPrivacyOverlayCoreTests {
                 state: .inactive,
                 style: .off,
                 displays: [],
-                allDisplays: false
+                allDisplays: false,
+                placement: .bottomLeftInset
             )
         ) { rendered in
             precondition(rendered)

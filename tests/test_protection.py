@@ -8,11 +8,15 @@ from openchronicle.capture.privacy import (
 )
 from openchronicle.capture.protection import (
     ProtectionFailureReason,
+    ProtectionSnapshot,
     ProtectionState,
     build_protection_snapshot,
     failure_requires_fail_closed,
 )
-from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.capture.protection_reason import (
+    DisplayProtectionReasons,
+    ProtectionReasonCode,
+)
 from openchronicle.config import CaptureConfig
 
 LEFT = DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True)
@@ -107,6 +111,78 @@ def test_snapshot_carries_indicator_placement() -> None:
     )
 
     assert snapshot.indicator_placement == "bottom-left-inset"
+
+
+def test_protection_snapshot_preserves_pre_indicator_placement_positional_signature() -> None:
+    display_reasons = DisplayProtectionReasons()
+    protected_region = ScreenRegion(1, 2, 3, 4)
+    snapshot = ProtectionSnapshot(
+        7,
+        ProtectionState.FAILED,
+        "separate",
+        "border",
+        (LEFT,),
+        frozenset({1}),
+        1,
+        10.0,
+        10.25,
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        frozenset({2}),
+        "overlay",
+        "tiered",
+        "click",
+        display_reasons,
+        True,
+        True,
+        frozenset({73}),
+        (protected_region,),
+        True,
+    )
+
+    assert (
+        snapshot.generation,
+        snapshot.state,
+        snapshot.capture_mode,
+        snapshot.indicator_style,
+        snapshot.displays,
+        snapshot.protected_display_ids,
+        snapshot.active_display_id,
+        snapshot.created_monotonic,
+        snapshot.fresh_until,
+        snapshot.failure_reason,
+        snapshot.active_candidate_display_ids,
+        snapshot.reason_display,
+        snapshot.reason_detail,
+        snapshot.reason_trigger,
+        snapshot.display_reasons,
+        snapshot.diagnostics_guard_invalid,
+        snapshot.diagnostics_guard_active,
+        snapshot.protected_window_ids,
+        snapshot.protected_window_regions,
+        snapshot.window_filterable,
+    ) == (
+        7,
+        ProtectionState.FAILED,
+        "separate",
+        "border",
+        (LEFT,),
+        frozenset({1}),
+        1,
+        10.0,
+        10.25,
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        frozenset({2}),
+        "overlay",
+        "tiered",
+        "click",
+        display_reasons,
+        True,
+        True,
+        frozenset({73}),
+        (protected_region,),
+        True,
+    )
+    assert snapshot.indicator_placement == "bottom-left-flush"
 
 
 def test_window_filtering_collects_rule_matched_ids_and_original_regions() -> None:

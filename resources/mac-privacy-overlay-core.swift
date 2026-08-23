@@ -122,10 +122,11 @@ struct OverlayCommand: Codable {
         style = try container.decode(IndicatorStyle.self, forKey: .style)
         displays = try container.decode([OverlayDisplay].self, forKey: .displays)
         allDisplays = try container.decode(Bool.self, forKey: .allDisplays)
-        placement = try container.decodeIfPresent(
-            IndicatorPlacement.self,
-            forKey: .placement
-        ) ?? .bottomRightWorkArea
+        placement = if container.contains(.placement) {
+            try container.decode(IndicatorPlacement.self, forKey: .placement)
+        } else {
+            .bottomRightWorkArea
+        }
         reasonDisplay = try container.decodeIfPresent(String.self, forKey: .reasonDisplay) ?? "hybrid"
         reasonDetail = try container.decodeIfPresent(String.self, forKey: .reasonDetail) ?? "exact"
         reasonTrigger = try container.decodeIfPresent(
