@@ -1,6 +1,6 @@
 """MCP server exposing OpenChronicle memory as read-only tools.
 
-Uses the official `mcp` Python SDK via FastMCP. Runs either standalone
+Uses the official `mcp` Python SDK via MCPServer. Runs either standalone
 over stdio (`openchronicle mcp`) or in-daemon over streamable-http / sse,
 depending on `[mcp] transport`. Exposes eight tools:
 
@@ -314,15 +314,13 @@ Raw captures have bounded retention: older on-screen content is dropped from the
 
 
 def build_server(cfg: Config | None = None):
-    """Construct and return a FastMCP server instance (not yet running)."""
-    from mcp.server.fastmcp import FastMCP  # lazy import
+    """Construct and return an MCPServer instance (not yet running)."""
+    from mcp.server import MCPServer  # lazy import
 
     cfg = cfg or load_config()
-    server = FastMCP(
+    server = MCPServer(
         "openchronicle",
         instructions=_SERVER_INSTRUCTIONS,
-        host=cfg.mcp.host,
-        port=cfg.mcp.port,
     )
 
     @server.tool()
@@ -602,7 +600,7 @@ def build_server(cfg: Config | None = None):
 def run_stdio() -> None:
     """Run the server on stdio. Blocks until the client disconnects."""
     server = build_server()
-    server.run()  # FastMCP.run() uses stdio by default
+    server.run()  # MCPServer.run() uses stdio by default
 
 
 async def run_async(cfg: Config | None = None, *, transport: str | None = None) -> None:
@@ -614,10 +612,10 @@ async def run_async(cfg: Config | None = None, *, transport: str | None = None) 
         await server.run_stdio_async()
     elif transport == "sse":
         logger.info("MCP SSE server: http://%s:%d/sse", cfg.mcp.host, cfg.mcp.port)
-        await server.run_sse_async()
+        await server.run_sse_async(host=cfg.mcp.host, port=cfg.mcp.port)
     elif transport == "streamable-http":
         logger.info("MCP HTTP server: http://%s:%d/mcp", cfg.mcp.host, cfg.mcp.port)
-        await server.run_streamable_http_async()
+        await server.run_streamable_http_async(host=cfg.mcp.host, port=cfg.mcp.port)
     else:
         raise ValueError(f"unknown MCP transport: {transport!r}")
 

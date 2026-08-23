@@ -463,8 +463,8 @@ async def test_marker_bearing_runtime_has_no_status_model_failure_or_mcp_surface
     mcp_server = build_server(cfg)
     tools = await mcp_server.list_tools()
     resources = await mcp_server.list_resources()
-    tool_payloads = [tool.model_dump(mode="json") for tool in tools]
-    resource_payloads = [resource.model_dump(mode="json") for resource in resources]
+    tool_payloads = [tool.model_dump(mode="json", by_alias=True) for tool in tools]
+    resource_payloads = [resource.model_dump(mode="json", by_alias=True) for resource in resources]
     search_tool = next(tool for tool in tool_payloads if tool["name"] == "search")
     assert search_tool["inputSchema"]["properties"]["top_k"]["default"] == 17
     surface_json = json.dumps(
