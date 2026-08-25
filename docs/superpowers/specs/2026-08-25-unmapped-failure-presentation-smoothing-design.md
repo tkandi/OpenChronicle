@@ -1,7 +1,7 @@
 # 映射失败保护标识平滑设计
 
 日期：2026-08-25
-状态：已实现，等待 host 测试窗口清理
+状态：已实现并验证
 
 ## 背景
 
@@ -225,9 +225,10 @@ PROTECTED 或 allowlisted FAILED，但不能保存 paused、硬故障或 inactiv
 - 快速 Space 的五个独立 episode（gen152、171、176、182、196）均在 transient mapping failure 时保持 quiet/reasons false，未使用配置 pill；当前安装的跨屏移动中，gen1404 同时保护 display1/display4，gen1405 仅 display4 保护且 AX blocked，gen1414 在 display4 clear-pending，gen1416 两屏 inactive。
 - raw inactive clear-pending 后，重复实机尝试未能在 200ms 内诱发任何 raw risk state；自动化 monitor 测试覆盖返回 PROTECTED 与返回 allowlisted mapping FAILED 两种有效取消路径。
 - 当前安装的两个 capture JSON 仅以字段存在性检查：`2026-08-25T20-43-42p08-00.json`、`2026-08-25T20-46-17p08-00.json` 均为 `ax_skipped=protected_display`，且仅 monitor index 2 有 image presence；未解码或显示 base64/text/content。
-- 本轮为 deadline 的直接 source-time 可观测性增加 schema-v1 category 字段；自动化已覆盖 transient、FAILED -> PROTECTED 保持 deadline、promotion null、旧/新 Swift payload 兼容和非有限值 null。host-live 与 installed deterministic 两层 timing 证据已完成，剩余事项仅为 probe TextEdit PID 73200 的 host 测试窗口清理。
+- 本轮为 deadline 的直接 source-time 可观测性增加 schema-v1 category 字段；自动化已覆盖 transient、FAILED -> PROTECTED 保持 deadline、promotion null、旧/新 Swift payload 兼容和非有限值 null。host-live 与 installed deterministic 两层 timing 证据已完成。
 - 直接 source-time 已确认三次 +0.8s transient deadline 与 deadline 后 promotion：gen534 为 530175.144708625 -> 530175.9447086251（+0.8000000001s），gen535 在 530175.945136791 后 deadline null；gen630 为 530279.504487416 -> 530280.304487416（+0.8s），gen631 在 530280.306086166 后 promotion；gen677 为 530330.034808083 -> 530330.834808083（+0.8s），gen680 在 530330.840057 后 promotion。gen539 clear-pending 为 530180.380178958 -> 530180.5801789579（+0.2s），gen540 在 530180.585507833 后 inactive。仅记录 monotonic/deadline/category 字段；synthetic TextEdit 仍为 `sensitive_window_unmapped`，因此 host-live 单层不主张跨状态 source continuity，后续 installed deterministic 证据单独补足该项。
-- 已安装包的 deterministic category-only monitor（`/Users/tkandi/.openchronicle/venv/bin/python`，注入 monotonic，无 config/daemon/UI 变更）直接补足跨状态 source continuity：gen1 在 10.0 为 FAILED/transient/quiet/reasons false，deadline 10.8 且 confirmed；gen2 在 10.4 为 PROTECTED/transient/quiet/reasons false，deadline 仍为 10.8；gen3 在 10.8 为 PROTECTED/sustained/pill/reasons true，deadline null 且 confirmed。host live 记录证明真实 CG/AX/overlay 行为，installed deterministic 记录证明 FAILED -> PROTECTED 的 source-deadline continuity。只剩 probe TextEdit PID 73200 的 host 测试窗口清理，runtime 在此之前保持 fail-closed。
+- 已安装包的 deterministic category-only monitor（`/Users/tkandi/.openchronicle/venv/bin/python`，注入 monotonic，无 config/daemon/UI 变更）直接补足跨状态 source continuity：gen1 在 10.0 为 FAILED/transient/quiet/reasons false，deadline 10.8 且 confirmed；gen2 在 10.4 为 PROTECTED/transient/quiet/reasons false，deadline 仍为 10.8；gen3 在 10.8 为 PROTECTED/sustained/pill/reasons true，deadline null 且 confirmed。host live 记录证明真实 CG/AX/overlay 行为，installed deterministic 记录证明 FAILED -> PROTECTED 的 source-deadline continuity。
+- PID 73200 清理前的 read-only `lsof`/AX 检查为 `ax_window_count=0`、`other_document_fd_count=0`、`test_file_open=false`；获批准后 PID 已退出。wake 后 gen4011、4012、4013 均为 raw/effective inactive、phase inactive、deadline null，且两屏 `screenshot_blocked=false` / `ax_blocked=false`。无 temporary Edge/probe/TextEdit 进程残留；外部 blocker 已清除。
 
 ## 验收标准
 
