@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from openchronicle.capture import protection_monitor as protection_monitor_mod
 from openchronicle.capture.privacy import (
     DisplayInfo,
     InventoryReadResult,
@@ -1485,7 +1486,7 @@ def test_stop_after_before_overlay_call_prevents_helper_entry(
     assert fake_overlay.clear_calls == 0
 
 
-def test_stop_waits_for_started_helper_before_terminal_and_close(inventory) -> None:
+def test_stop_signals_terminal_but_waits_for_started_helper_before_close(inventory) -> None:
     render_started = threading.Event()
     release_render = threading.Event()
     render_finished = threading.Event()
@@ -1524,7 +1525,7 @@ def test_stop_waits_for_started_helper_before_terminal_and_close(inventory) -> N
     stop_thread.start()
     try:
         assert stop_finished.wait(timeout=0.1) is False
-        assert overlay.terminal_marked.is_set() is False
+        assert overlay.terminal_marked.is_set() is True
         assert overlay.closed.is_set() is False
     finally:
         release_render.set()
@@ -1536,6 +1537,144 @@ def test_stop_waits_for_started_helper_before_terminal_and_close(inventory) -> N
     assert overlay.terminal_marked.is_set()
     assert overlay.closed.is_set()
     assert refresh_errors and "stopped" in str(refresh_errors[0])
+
+
+def test_stop_signals_terminal_before_draining_terminal_dependent_helper(
+    inventory,
+) -> None:
+    render_started = threading.Event()
+    stop_finished = threading.Event()
+    order: list[str] = []
+
+    class TerminalDependentOverlay(FakeOverlay):
+        def render(
+            self,
+            snapshot: ProtectionSnapshot,
+            timeout: float = 0.5,
+            *,
+            overlay_reasons_enabled: bool = True,
+        ) -> bool:
+            self.render_calls += 1
+            render_started.set()
+            assert self.terminal_marked.wait(timeout=2.0)
+            order.append("helper-exit")
+            return True
+
+        def mark_terminal(self) -> None:
+            order.append("terminal")
+            super().mark_terminal()
+
+        def close(self) -> None:
+            order.append("close")
+            super().close()
+
+    overlay = TerminalDependentOverlay()
+    monitor = make_monitor(inventory=inventory, overlay=overlay)
+    refresh_errors: list[Exception] = []
+
+    def force_refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except RuntimeError as exc:
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=force_refresh)
+    refresh_thread.start()
+    assert render_started.wait(timeout=0.5)
+    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+    stop_thread.start()
+    try:
+        assert stop_finished.wait(timeout=0.5)
+    finally:
+        overlay.terminal_marked.set()
+        refresh_thread.join(timeout=1.0)
+        stop_thread.join(timeout=1.0)
+
+    assert order == ["terminal", "helper-exit", "close"]
+    assert overlay.close_calls == 1
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
+
+
+def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
+    inventory,
+    caplog,
+) -> None:
+    render_started = threading.Event()
+    release_render = threading.Event()
+    stop_finished = threading.Event()
+    stop_elapsed: list[float] = []
+    helper_thread_ids: list[int] = []
+    close_thread_ids: list[int] = []
+
+    class NoncompliantOverlay(FakeOverlay):
+        def render(
+            self,
+            snapshot: ProtectionSnapshot,
+            timeout: float = 0.5,
+            *,
+            overlay_reasons_enabled: bool = True,
+        ) -> bool:
+            self.render_calls += 1
+            helper_thread_ids.append(threading.get_ident())
+            render_started.set()
+            assert release_render.wait(timeout=2.0)
+            return True
+
+        def close(self) -> None:
+            close_thread_ids.append(threading.get_ident())
+            super().close()
+
+    overlay = NoncompliantOverlay()
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=overlay,
+        monotonic=FakeMonotonic(),
+    )
+    refresh_errors: list[Exception] = []
+
+    def force_refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except RuntimeError as exc:
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=force_refresh)
+    refresh_thread.start()
+    assert render_started.wait(timeout=0.5)
+    drain_bound = getattr(
+        protection_monitor_mod,
+        "_OVERLAY_DRAIN_TIMEOUT_SECONDS",
+        0.75,
+    )
+
+    def stop_monitor() -> None:
+        started = time.monotonic()
+        monitor.stop()
+        stop_elapsed.append(time.monotonic() - started)
+        stop_finished.set()
+
+    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+        stop_thread = threading.Thread(target=stop_monitor)
+        stop_thread.start()
+        try:
+            assert overlay.terminal_marked.wait(timeout=0.2)
+            assert stop_finished.wait(timeout=drain_bound + 0.25)
+            assert drain_bound * 0.8 <= stop_elapsed[0] <= drain_bound + 0.2
+            assert overlay.close_calls == 0
+        finally:
+            release_render.set()
+            refresh_thread.join(timeout=1.0)
+            stop_thread.join(timeout=1.0)
+
+    assert overlay.closed.wait(timeout=0.5)
+    assert close_thread_ids == helper_thread_ids
+    assert overlay.close_calls == 1
+    monitor.stop()
+    assert overlay.close_calls == 1
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
+    assert [record.getMessage() for record in caplog.records] == [
+        "privacy protection indicator drain timed out: category=overlay_call_in_flight"
+    ]
 
 
 def test_request_refresh_wakes_daemon_and_stop_closes_overlay_once(inventory, fake_overlay) -> None:

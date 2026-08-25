@@ -494,10 +494,15 @@ class PrivacyOverlayClient:
     ) -> bool:
         if snapshot.indicator_style == "off":
             with self._send_lock:
-                if self._closed:
-                    return False
+                with self._lifecycle_lock:
+                    if self._closed:
+                        return False
                 self._discard_transport(schedule_restart=False)
-                self._set_confirmation(snapshot.generation, ())
+                with self._lifecycle_lock:
+                    if self._closed:
+                        return False
+                    self._confirmed_generation = snapshot.generation
+                    self._confirmed_window_ids = ()
             return True
         return self._send(
             self._render_command(
@@ -544,7 +549,7 @@ class PrivacyOverlayClient:
 
     def mark_terminal(self) -> None:
         """Prevent later render or clear calls without waiting for transport cleanup."""
-        with self._send_lock, self._lifecycle_lock:
+        with self._lifecycle_lock:
             self._closed = True
             self._confirmed_generation = None
             self._confirmed_window_ids = ()
@@ -558,8 +563,9 @@ class PrivacyOverlayClient:
         require_empty_window_ids: bool = False,
     ) -> bool:
         with self._send_lock:
-            if self._closed:
-                return False
+            with self._lifecycle_lock:
+                if self._closed:
+                    return False
             self._set_confirmation(None, ())
             transport = self._ensure_transport()
             if transport is None:
@@ -576,12 +582,18 @@ class PrivacyOverlayClient:
                 and (not require_empty_window_ids or not acknowledgement.window_ids)
             ):
                 with self._lifecycle_lock:
-                    if self._transport is transport:
+                    if not self._closed and self._transport is transport:
                         self._restart_delay = _INITIAL_RESTART_DELAY
                         self._next_restart_at = 0.0
-                self._set_confirmation(generation, acknowledgement.window_ids)
-                return True
-            self._discard_transport(schedule_restart=True, expected=transport)
+                        self._confirmed_generation = generation
+                        self._confirmed_window_ids = acknowledgement.window_ids
+                        return True
+            with self._lifecycle_lock:
+                schedule_restart = not self._closed
+            self._discard_transport(
+                schedule_restart=schedule_restart,
+                expected=transport,
+            )
             return False
 
     def _set_confirmation(

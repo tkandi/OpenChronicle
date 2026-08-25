@@ -45,6 +45,7 @@ from .protection_smoothing import (
 
 logger = get("openchronicle.capture")
 _MONITOR_JOIN_TIMEOUT = 0.25
+_OVERLAY_DRAIN_TIMEOUT_SECONDS = 0.75
 
 
 @dataclass(frozen=True)
@@ -111,6 +112,8 @@ class PrivacyProtectionMonitor:
         self._overlay_call_condition = threading.Condition(threading.Lock())
         self._overlay_calls_blocked = False
         self._overlay_calls_in_flight = 0
+        self._overlay_close_deferred = False
+        self._overlay_close_started = False
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -145,13 +148,21 @@ class PrivacyProtectionMonitor:
         with self._decision_condition:
             self._next_smoothing_deadline = None
             self._decision_condition.notify_all()
-        with self._overlay_call_condition:
-            while self._overlay_calls_in_flight:
-                self._overlay_call_condition.wait()
         self._overlay.mark_terminal()
-        if monitor_thread is not None and monitor_thread is not threading.current_thread():
+        drained = self._drain_overlay_calls()
+        if drained:
+            self._close_overlay_once()
+        else:
+            logger.warning(
+                "privacy protection indicator drain timed out: "
+                "category=overlay_call_in_flight"
+            )
+        if (
+            drained
+            and monitor_thread is not None
+            and monitor_thread is not threading.current_thread()
+        ):
             monitor_thread.join(timeout=_MONITOR_JOIN_TIMEOUT)
-        self._overlay.close()
 
     def request_refresh(self) -> None:
         with self._lifecycle_lock:
@@ -516,6 +527,38 @@ class PrivacyProtectionMonitor:
             self._overlay_calls_in_flight -= 1
             if self._overlay_calls_in_flight == 0:
                 self._overlay_call_condition.notify_all()
+                close_deferred = self._overlay_close_deferred
+            else:
+                close_deferred = False
+        if close_deferred:
+            self._close_overlay_once()
+
+    def _drain_overlay_calls(self) -> bool:
+        deadline = time.monotonic() + _OVERLAY_DRAIN_TIMEOUT_SECONDS
+        with self._overlay_call_condition:
+            while self._overlay_calls_in_flight:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._overlay_close_deferred = True
+                    return False
+                self._overlay_call_condition.wait(remaining)
+            return True
+
+    def _close_overlay_once(self) -> None:
+        with self._overlay_call_condition:
+            if self._overlay_close_started:
+                return
+            if self._overlay_calls_in_flight:
+                self._overlay_close_deferred = True
+                return
+            self._overlay_close_started = True
+            self._overlay_close_deferred = False
+        try:
+            self._overlay.close()
+        except Exception:  # noqa: BLE001 - close failures must remain fixed-category only.
+            logger.warning(
+                "privacy protection indicator close failed: category=overlay_close_failed"
+            )
 
     def _confirmed_indicator_window_ids(
         self,

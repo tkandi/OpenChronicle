@@ -58,8 +58,13 @@ class FailingTransport(FakeTransport):
 
 
 class BlockingTransport(FakeTransport):
-    def __init__(self, *responses: bool) -> None:
+    def __init__(
+        self,
+        *responses: bool,
+        window_ids: tuple[int, ...] = (),
+    ) -> None:
         super().__init__(*responses)
+        self.window_ids = window_ids
         self.started = threading.Event()
         self.release = threading.Event()
         self.closed_before_release = False
@@ -75,7 +80,7 @@ class BlockingTransport(FakeTransport):
             generation=generation,
             rendered=rendered,
             error=None if rendered else "test-error",
-            window_ids=(),
+            window_ids=self.window_ids,
         )
 
     def close(self) -> None:
@@ -632,8 +637,8 @@ def test_terminal_mark_prevents_a_later_transport_start(snapshot: ProtectionSnap
     assert starts == 0
 
 
-def test_terminal_mark_waits_for_an_admitted_send_and_blocks_later_commands(snapshot) -> None:
-    transport = BlockingTransport(True)
+def test_terminal_mark_is_nonblocking_and_rejects_late_acknowledgement(snapshot) -> None:
+    transport = BlockingTransport(True, window_ids=(7, 41))
     client = PrivacyOverlayClient(transport_factory=lambda: transport)
     render_result: list[bool] = []
     mark_finished = threading.Event()
@@ -646,14 +651,16 @@ def test_terminal_mark_waits_for_an_admitted_send_and_blocks_later_commands(snap
     mark_thread = threading.Thread(target=lambda: (client.mark_terminal(), mark_finished.set()))
     mark_thread.start()
     try:
-        assert mark_finished.wait(timeout=0.1) is False
+        assert mark_finished.wait(timeout=0.1)
+        assert client.confirmed_window_ids(snapshot.generation) == ()
     finally:
         transport.release.set()
         render_thread.join(timeout=1.0)
         mark_thread.join(timeout=1.0)
 
-    assert render_result == [True]
+    assert render_result == [False]
     assert mark_finished.is_set()
+    assert client.confirmed_window_ids(snapshot.generation) == ()
     assert client.render(snapshot) is False
     assert client.clear(snapshot.generation + 1) is False
 
@@ -933,7 +940,7 @@ def test_close_waits_for_active_render_before_closing_transport(snapshot) -> Non
         render_thread.join(timeout=1.0)
         close_thread.join(timeout=1.0)
 
-    assert render_result == [True]
+    assert render_result == [False]
     assert transport.closed is True
     assert transport.closed_before_release is False
 
