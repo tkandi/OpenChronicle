@@ -248,6 +248,37 @@ def test_overlay_exact_reason_is_sent_only_for_protected_display() -> None:
     assert command["reason_trigger"] == "hover"
 
 
+def test_transient_command_suppresses_only_overlay_reason_payloads() -> None:
+    reason = _private_title_reason(2)
+    snapshot = _protected_snapshot(reasons=(reason,))
+
+    command = PrivacyOverlayClient._render_command(
+        replace(snapshot, indicator_style="quiet-shield"),
+        overlay_reasons_enabled=False,
+    )
+
+    assert command["style"] == "quiet-shield"
+    assert command["reason_display"] == snapshot.reason_display
+    assert command["reason_detail"] == snapshot.reason_detail
+    assert command["reason_trigger"] == snapshot.reason_trigger
+    assert command["displays"][0]["reasons"] == []
+    assert command["reasons"] == []
+    assert snapshot.display_reasons.reasons == (reason,)
+
+
+def test_sustained_quiet_shield_restores_configured_reason_payloads() -> None:
+    reason = _private_title_reason(2)
+    snapshot = replace(
+        _protected_snapshot(reasons=(reason,)),
+        indicator_style="quiet-shield",
+    )
+    command = PrivacyOverlayClient._render_command(
+        snapshot,
+        overlay_reasons_enabled=True,
+    )
+    assert command["displays"][0]["reasons"][0]["code"] == "window_title_rule"
+
+
 def test_diagnostics_only_overlay_payload_contains_no_reason_values() -> None:
     snapshot = _protected_snapshot(
         reason_display="diagnostics",
@@ -430,9 +461,24 @@ def test_exact_acknowledgement_confirms_sorted_window_ids_for_only_that_generati
     )
     client = PrivacyOverlayClient(transport_factory=lambda: _python_helper_transport(helper))
 
-    assert client.render(snapshot, timeout=0.2) is True
+    assert client.render(snapshot, timeout=0.2, overlay_reasons_enabled=False) is True
     assert client.confirmed_window_ids(snapshot.generation) == (7, 4294967295)
     assert client.confirmed_window_ids(snapshot.generation + 1) == ()
+
+
+def test_transient_render_keeps_acknowledgement_and_window_ids(
+    fake_transport: FakeTransport,
+) -> None:
+    fake_transport.responses = [True]
+    client = PrivacyOverlayClient(transport_factory=lambda: fake_transport)
+    snapshot = _protected_snapshot(reasons=(_private_title_reason(2),))
+
+    assert client.render(snapshot, overlay_reasons_enabled=False) is True
+
+    command = json.loads(fake_transport.writes[-1])
+    assert command["displays"][0]["reasons"] == []
+    assert command["reasons"] == []
+    assert client.confirmed_window_ids(snapshot.generation) == ()
 
 
 @pytest.mark.parametrize(

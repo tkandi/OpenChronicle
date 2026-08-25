@@ -485,7 +485,13 @@ class PrivacyOverlayClient:
         self._confirmed_generation: int | None = None
         self._confirmed_window_ids: tuple[int, ...] = ()
 
-    def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+    def render(
+        self,
+        snapshot: ProtectionSnapshot,
+        timeout: float = 0.5,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> bool:
         if snapshot.indicator_style == "off":
             with self._send_lock:
                 if self._closed:
@@ -493,7 +499,14 @@ class PrivacyOverlayClient:
                 self._discard_transport(schedule_restart=False)
                 self._set_confirmation(snapshot.generation, ())
             return True
-        return self._send(self._render_command(snapshot), snapshot.generation, timeout)
+        return self._send(
+            self._render_command(
+                snapshot,
+                overlay_reasons_enabled=overlay_reasons_enabled,
+            ),
+            snapshot.generation,
+            timeout,
+        )
 
     def clear(self, generation: int, timeout: float = 0.5) -> bool:
         return self._send(
@@ -629,7 +642,11 @@ class PrivacyOverlayClient:
         self._restart_delay = min(self._restart_delay * 2, _MAX_RESTART_DELAY)
 
     @staticmethod
-    def _render_command(snapshot: ProtectionSnapshot) -> dict[str, Any]:
+    def _render_command(
+        snapshot: ProtectionSnapshot,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> dict[str, Any]:
         if snapshot.state in (ProtectionState.PAUSED, ProtectionState.FAILED):
             displays = snapshot.displays
         elif snapshot.state is ProtectionState.PROTECTED:
@@ -661,7 +678,11 @@ class PrivacyOverlayClient:
                     "top": display.region.top,
                     "width": display.region.width,
                     "height": display.region.height,
-                    "reasons": _reason_payloads_for_display(snapshot, display.id),
+                    "reasons": (
+                        _reason_payloads_for_display(snapshot, display.id)
+                        if overlay_reasons_enabled
+                        else []
+                    ),
                 }
                 for display in displays
             ],
@@ -669,5 +690,9 @@ class PrivacyOverlayClient:
             "reason_display": reason_display,
             "reason_detail": reason_detail,
             "reason_trigger": reason_trigger,
-            "reasons": _reason_payloads_for_display(snapshot, None) if all_displays else [],
+            "reasons": (
+                _reason_payloads_for_display(snapshot, None)
+                if all_displays and overlay_reasons_enabled
+                else []
+            ),
         }
