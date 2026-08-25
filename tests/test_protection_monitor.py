@@ -633,9 +633,18 @@ def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
 ) -> None:
     resolve_entered = threading.Event()
     release_resolve = threading.Event()
+    stop_started = threading.Event()
+    stop_at_reset_boundary = threading.Event()
     stop_finished = threading.Event()
 
     class BlockingHistory(RecordingWindowDisplayHistory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.next_generation = 0
+            self.live_generation: int | None = None
+            self.reset_generation: int | None = None
+            self.resolved_generations: list[int] = []
+
         def resolve(
             self,
             inventory: WindowInventory,
@@ -644,7 +653,17 @@ def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
         ) -> WindowInventory:
             resolve_entered.set()
             assert release_resolve.wait(timeout=1.0)
-            return super().resolve(inventory, now=now)
+            resolved = super().resolve(inventory, now=now)
+            self.next_generation += 1
+            self.live_generation = self.next_generation
+            self.resolved_generations.append(self.next_generation)
+            return resolved
+
+        def reset(self) -> None:
+            if self.live_generation is not None:
+                self.reset_generation = self.live_generation
+            self.live_generation = None
+            super().reset()
 
     history = BlockingHistory()
     decisions: list[ProtectionDecision] = []
@@ -655,6 +674,13 @@ def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
         decision_listener=decisions.append,
         window_display_history=history,
     )
+    original_reset_history = monitor._reset_window_display_history
+
+    def reset_from_lifecycle_boundary() -> None:
+        stop_at_reset_boundary.set()
+        original_reset_history()
+
+    monitor._reset_window_display_history = reset_from_lifecycle_boundary  # type: ignore[method-assign]
 
     def refresh() -> None:
         try:
@@ -662,13 +688,20 @@ def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
         except BaseException as exc:  # pragma: no cover - diagnostic capture
             refresh_errors.append(exc)
 
+    def stop() -> None:
+        stop_started.set()
+        monitor.stop()
+        stop_finished.set()
+
     refresh_thread = threading.Thread(target=refresh)
     refresh_thread.start()
     assert resolve_entered.wait(timeout=0.5)
-    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+    stop_thread = threading.Thread(target=stop)
     stop_thread.start()
     try:
-        assert stop_finished.wait(timeout=0.05) is False
+        assert stop_started.wait(timeout=0.5)
+        assert stop_at_reset_boundary.wait(timeout=0.5)
+        assert stop_finished.is_set() is False
         assert decisions == []
     finally:
         release_resolve.set()
@@ -682,9 +715,12 @@ def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
     assert "stopped" in str(refresh_errors[0])
     assert decisions == []
     assert fake_overlay.snapshots == []
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_calls == 0
     assert history.reset_calls >= 1
-    assert history._entries == {}
-    assert history._previous_now is None
+    assert history.resolved_generations == [1]
+    assert history.reset_generation == 1
+    assert history.live_generation is None
 
 
 def test_monitor_publishes_quiet_then_configured_style_with_new_generations(

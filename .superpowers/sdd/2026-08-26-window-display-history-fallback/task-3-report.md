@@ -212,3 +212,59 @@ restored before the final regression:
 
 No Task 4 smoother, diagnostics, documentation, installation, scheduler, or
 native-helper production file was changed.
+
+## Fix Round 2
+
+Closed Minor M1 from `task-3-rereview-1.md` without changing production code.
+
+### Deterministic Stop-Race Synchronization
+
+`test_stop_waits_for_inflight_history_resolve_then_resets_late_state` no longer
+uses a 50 ms non-completion observation as evidence that the stop thread was
+scheduled. The test now waits for two explicit events before releasing the
+blocked resolver:
+
+- `stop_started`, emitted by the stop thread immediately before `monitor.stop()`;
+- `stop_at_reset_boundary`, emitted by a test wrapper around
+  `_reset_window_display_history()` after `stop()` has entered the lifecycle
+  section and immediately before it waits for the held history lock.
+
+Only after both events are observed does the test assert that `stop()` cannot
+have completed while `resolve()` still owns the history lock.
+
+The blocking history test subclass now owns its verification state. A
+successful late resolve records generation 1 as live; `reset()` records that
+generation in `reset_generation` and clears `live_generation`. Final assertions
+therefore prove the late write occurred and was subsequently reset without
+inspecting `WindowDisplayHistory._entries` or `_previous_now`.
+
+The test retains assertions for terminal refresh `RuntimeError`, no listener
+callback, no overlay snapshot publication, stop completion after release, and
+both worker threads terminating.
+
+### Verification
+
+- Single deterministic race test:
+  `PYTHONPATH=src uv run pytest -q tests/test_protection_monitor.py::test_stop_waits_for_inflight_history_resolve_then_resets_late_state`
+  - `1 passed in 0.12s`
+- Consecutive stability loop using the project pytest executable:
+  `PYTHONPATH=src .venv/bin/pytest -q tests/test_protection_monitor.py::test_stop_waits_for_inflight_history_resolve_then_resets_late_state`
+  - executed serially 50 times;
+  - `50/50 deterministic stop-race runs passed`.
+- Task 3 scoped regression:
+  `PYTHONPATH=src uv run pytest -q tests/test_window_display_history.py tests/test_protection.py tests/test_protection_monitor.py tests/test_capture_scheduler_fts.py`
+  - `239 passed in 2.01s`
+- Ruff:
+  `uv run ruff check src/openchronicle/capture/protection_monitor.py tests/test_protection_monitor.py tests/test_capture_scheduler_fts.py`
+  - passed
+- `git diff --check`
+  - passed
+
+### Commit and Files
+
+- Commit: `test(capture): make history stop race deterministic`
+  (this fix-round commit; SHA is reported in the final handoff).
+- Modified: `tests/test_protection_monitor.py`.
+- Modified: `.superpowers/sdd/2026-08-26-window-display-history-fallback/task-3-report.md`.
+
+No production file was changed.
