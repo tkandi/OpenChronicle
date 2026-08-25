@@ -215,6 +215,14 @@ PROTECTED 或 allowlisted FAILED，但不能保存 paused、硬故障或 inactiv
 5. 主屏、副屏和跨屏移动均验证；
 6. 只记录 category diagnostics、固定日志、capture field presence 和 PIDs。
 
+## 验证证据
+
+- 状态标记后的完整门禁：Python `603 passed in 56.99s`；Swift App `89 tests, 0 failures`（3.794s）；证据文档编辑前 tracked worktree clean。
+- 同一确认流中，gen114 在 observer-relative 67343ms 为 transient mapping failure（quiet/reasons false、两屏 blocked）；gen115 在 68104ms 恢复 transient protected（仍 quiet/reasons false）；gen116 在 68186ms 升级 sustained protected（pill/reasons true）。gen114 -> gen116 为 843ms，gen115 -> gen116 仅 82ms，直接证明 FAILED -> PROTECTED 未重启 episode timer。gen126（72659ms transient）与 gen130（73423ms sustained）仅作第二序列佐证，不以 subscriber delta 断言精确阈值。
+- 快速 Space 的五个独立 episode（gen152、171、176、182、196）均在 transient mapping failure 时保持 quiet/reasons false，未使用配置 pill；当前安装的跨屏移动中，gen1404 同时保护 display1/display4，gen1405 仅 display4 保护且 AX blocked，gen1414 在 display4 clear-pending，gen1416 两屏 inactive。
+- raw inactive clear-pending 后，重复实机尝试未能在 200ms 内诱发任何 raw risk state；自动化 monitor 测试覆盖返回 PROTECTED 与返回 allowlisted mapping FAILED 两种有效取消路径。
+- 当前安装的两个 capture JSON 仅以字段存在性检查：`2026-08-25T20-43-42p08-00.json`、`2026-08-25T20-46-17p08-00.json` 均为 `ax_skipped=protected_display`，且仅 monitor index 2 有 image presence；未解码或显示 base64/text/content。
+
 ## 验收标准
 
 - 正常 PROTECTED 与两类 mapping FAILED 的短暂切屏 episode 都不再闪完整“截图已停用”。
