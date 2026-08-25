@@ -227,11 +227,15 @@ on-screen.
 
 The transient/sustained sequence applies only to a normal raw `protected`
 decision. `active_window_unmapped` and `sensitive_window_unmapped` are global
-raw `failed` decisions: they immediately keep screenshots and AX fail-closed,
-use the existing failure presentation, skip the transient `quiet-shield`, and
-do not execute normal 800ms promotion while failed. A Mission Control sequence
-that remains unmapped therefore confirms fail-closed handling, not normal
-protected smoothing.
+raw `failed` decisions: they immediately bypass smoothing, use the existing
+failure presentation, skip the transient `quiet-shield`, and do not execute
+normal 800ms promotion while failed. Screenshot and AX blocking follow the
+existing failure policy: default/current fail-closed configuration and
+`mask-window`/`exclude-window` block globally, while legacy
+`screenshot_privacy_fail_closed = false` with `skip-monitor` or `off` can keep
+its existing fail-open behavior. A Mission Control sequence that remains
+unmapped therefore confirms configured failure handling, not normal protected
+smoothing.
 
 After the first safe inventory, the app remains in clear-pending: it retains
 the effective protected decision and continues blocking screenshots and AX. It

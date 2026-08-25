@@ -74,11 +74,14 @@ protected 之后第一次得到安全窗口清单：
 ### 其他状态
 
 - `paused`：取消普通 protected 平滑，立即显示用户配置的暂停样式和原因。
-- `failed`：取消普通 protected 平滑，立即显示现有 fail-closed 失败状态。
+- `failed`：取消普通 protected 平滑，立即显示现有失败 presentation；截图与 AX 遵循既有
+  failure policy。
 - `active_window_unmapped` 与 `sensitive_window_unmapped`：两者都是全局 raw
-  `failed`，立即保持截图与 AX fail-closed，使用现有失败 presentation，不显示 transient
-  `quiet-shield`，且在 FAILED hold 中不执行正常 800ms promotion。Mission Control
-  可能出现这两种路径；它们只证明失败闭合，不证明 normal smoothed `protected`。
+  `failed`，立即绕过平滑，使用现有失败 presentation，不显示 transient `quiet-shield`，且在
+  FAILED hold 中不执行正常 800ms promotion。截图与 AX 是否阻断遵循既有 failure policy：默认/当前
+  fail-closed 配置和 `mask-window`/`exclude-window` 全局阻断；legacy
+  `screenshot_privacy_fail_closed = false` 的 `skip-monitor`/`off` 保留既有 fail-open。Mission
+  Control 可能出现这两种路径；它们只证明配置的失败处理，不证明 normal smoothed `protected`。
 - `off`：不显示轻量或完整标识，但 protected 与 clear-pending 仍立即阻止截图和 AX。
 - 最终样式为 `quiet-shield`：transient 与 sustained 外观一致。
 - protected 显示器集合、原因或窗口 ID 在同一 episode 中变化时，不重置 800ms 计时；新增显示器跟随
@@ -208,8 +211,8 @@ reason 展开和 input hit panel 行为除此之外不变。
 
 - inventory unavailable、`active_window_unmapped`、`sensitive_window_unmapped`、pause state
   unavailable 和 diagnostics guard failure 继续产生 failed raw snapshot，并立即绕过平滑。两种
-  unmapped failed 路径均为全局 fail-closed，使用既有失败 presentation，不经过 transient
-  `quiet-shield` 或 800ms promotion。
+  unmapped failed 路径均立即 bypass smoothing，使用既有失败 presentation，不经过 transient
+  `quiet-shield` 或 800ms promotion；截图与 AX 阻断遵循既有 failure policy，而非本功能覆盖。
 - helper 启动、写入、解码或 acknowledgement 失败继续沿用现有 fail-closed。
 - 平滑器内部状态不完整或输入 generation 非递增时，返回立即 failed 的安全错误，而不是 inactive。
 - monitor 停止时清除所有 deadline，不能在 shutdown 后再次渲染。
