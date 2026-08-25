@@ -3,16 +3,32 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from enum import StrEnum
 
+from .privacy import ProtectionFailureReason
 from .protection import ProtectionSnapshot, ProtectionState
 
 PROTECTED_PROMOTION_SECONDS: float = 0.8
 SAFE_CONFIRMATION_SECONDS: float = 0.2
+PRESENTATION_SMOOTHED_FAILURES = frozenset(
+    {
+        ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+        ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+    }
+)
+
+
+def _is_smoothed_mapping_failure(snapshot: ProtectionSnapshot) -> bool:
+    return (
+        snapshot.state is ProtectionState.FAILED
+        and snapshot.failure_reason in PRESENTATION_SMOOTHED_FAILURES
+    )
 
 
 class ProtectionPresentationPhase(StrEnum):
     INACTIVE = "inactive"
     TRANSIENT_PROTECTED = "transient-protected"
     SUSTAINED_PROTECTED = "sustained-protected"
+    TRANSIENT_MAPPING_FAILURE = "transient-mapping-failure"
+    SUSTAINED_MAPPING_FAILURE = "sustained-mapping-failure"
     CLEAR_PENDING = "clear-pending"
     BYPASS = "bypass"
 
@@ -42,14 +58,14 @@ class ProtectionPresentationSmoother:
         self._safe_confirmation_seconds = safe_confirmation_seconds
         self._episode_started_at: float | None = None
         self._clear_deadline: float | None = None
-        self._last_effective_protected: ProtectionSnapshot | None = None
+        self._last_effective_risk: ProtectionSnapshot | None = None
         self._last_generation: int | None = None
         self._last_overlay_reasons_enabled = False
 
     def _reset_episode(self) -> None:
         self._episode_started_at = None
         self._clear_deadline = None
-        self._last_effective_protected = None
+        self._last_effective_risk = None
         self._last_overlay_reasons_enabled = False
 
     def reset(self) -> None:
@@ -71,7 +87,13 @@ class ProtectionPresentationSmoother:
             )
         self._last_generation = raw_snapshot.generation
 
-        if raw_snapshot.state in (ProtectionState.PAUSED, ProtectionState.FAILED):
+        mapping_failure = _is_smoothed_mapping_failure(raw_snapshot)
+        risk_active = raw_snapshot.state is ProtectionState.PROTECTED or mapping_failure
+        hard_bypass = raw_snapshot.state is ProtectionState.PAUSED or (
+            raw_snapshot.state is ProtectionState.FAILED and not mapping_failure
+        )
+
+        if hard_bypass:
             self._reset_episode()
             return ProtectionPresentationResult(
                 snapshot=raw_snapshot,
@@ -80,7 +102,7 @@ class ProtectionPresentationSmoother:
                 overlay_reasons_enabled=True,
             )
 
-        if raw_snapshot.state is ProtectionState.PROTECTED:
+        if risk_active:
             if self._episode_started_at is None:
                 self._episode_started_at = now
             self._clear_deadline = None
@@ -90,14 +112,22 @@ class ProtectionPresentationSmoother:
             if not promoted and effective_style != "off":
                 effective_style = "quiet-shield"
             effective = replace(raw_snapshot, indicator_style=effective_style)
-            self._last_effective_protected = effective
+            self._last_effective_risk = effective
             self._last_overlay_reasons_enabled = reasons_enabled
             return ProtectionPresentationResult(
                 snapshot=effective,
                 phase=(
-                    ProtectionPresentationPhase.SUSTAINED_PROTECTED
+                    (
+                        ProtectionPresentationPhase.SUSTAINED_PROTECTED
+                        if raw_snapshot.state is ProtectionState.PROTECTED
+                        else ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+                    )
                     if promoted
-                    else ProtectionPresentationPhase.TRANSIENT_PROTECTED
+                    else (
+                        ProtectionPresentationPhase.TRANSIENT_PROTECTED
+                        if raw_snapshot.state is ProtectionState.PROTECTED
+                        else ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+                    )
                 ),
                 next_deadline=(
                     None
@@ -110,7 +140,7 @@ class ProtectionPresentationSmoother:
         if self._episode_started_at is None:
             if (
                 self._clear_deadline is not None
-                or self._last_effective_protected is not None
+                or self._last_effective_risk is not None
                 or self._last_overlay_reasons_enabled
             ):
                 raise ProtectionSmoothingError(
@@ -122,22 +152,27 @@ class ProtectionPresentationSmoother:
                 next_deadline=None,
                 overlay_reasons_enabled=True,
             )
-        if self._last_effective_protected is None:
+        if self._last_effective_risk is None:
             raise ProtectionSmoothingError(
-                "episode has no protected snapshot to hold"
+                "episode has no risk snapshot to hold"
             )
+        if (
+            self._last_effective_risk.state is not ProtectionState.PROTECTED
+            and not _is_smoothed_mapping_failure(self._last_effective_risk)
+        ):
+            raise ProtectionSmoothingError("episode has invalid risk snapshot")
 
         if self._clear_deadline is None:
             self._clear_deadline = now + self._safe_confirmation_seconds
         if now < self._clear_deadline:
             held = replace(
-                self._last_effective_protected,
+                self._last_effective_risk,
                 generation=raw_snapshot.generation,
                 created_monotonic=raw_snapshot.created_monotonic,
                 fresh_until=raw_snapshot.fresh_until,
                 indicator_placement=raw_snapshot.indicator_placement,
             )
-            self._last_effective_protected = held
+            self._last_effective_risk = held
             return ProtectionPresentationResult(
                 snapshot=held,
                 phase=ProtectionPresentationPhase.CLEAR_PENDING,

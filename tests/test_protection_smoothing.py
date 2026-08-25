@@ -4,7 +4,11 @@ from dataclasses import replace
 
 import pytest
 
-from openchronicle.capture.privacy import DisplayInfo, ScreenRegion
+from openchronicle.capture.privacy import (
+    DisplayInfo,
+    ProtectionFailureReason,
+    ScreenRegion,
+)
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_reason import (
     DisplayProtectionReasons,
@@ -23,6 +27,13 @@ REASON = ProtectionReason(
     display_id=1,
     app_name="Edge",
     window_title="InPrivate",
+)
+MAPPING_FAILURES = (
+    ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+    ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+)
+HARD_FAILURES = tuple(
+    reason for reason in ProtectionFailureReason if reason not in MAPPING_FAILURES
 )
 
 
@@ -54,6 +65,22 @@ def _snapshot(
     )
 
 
+def _failure_snapshot(
+    generation: int,
+    reason: ProtectionFailureReason,
+    *,
+    style: str = "pill",
+    now: float = 10.0,
+) -> ProtectionSnapshot:
+    return replace(
+        _snapshot(generation, ProtectionState.FAILED, style=style, now=now),
+        failure_reason=reason,
+        display_reasons=DisplayProtectionReasons.from_reasons(
+            [ProtectionReason(ProtectionReasonCode(reason.value), None)]
+        ),
+    )
+
+
 def test_short_protection_stays_quiet_then_promotes_at_800ms() -> None:
     smoother = ProtectionPresentationSmoother()
     first = smoother.resolve(_snapshot(1, ProtectionState.PROTECTED), now=10.0)
@@ -71,6 +98,124 @@ def test_short_protection_stays_quiet_then_promotes_at_800ms() -> None:
     assert promoted.snapshot.indicator_style == "pill"
     assert promoted.overlay_reasons_enabled is True
     assert promoted.next_deadline is None
+
+
+@pytest.mark.parametrize("reason", MAPPING_FAILURES)
+def test_mapping_failure_stays_failed_but_promotes_at_800ms(
+    reason: ProtectionFailureReason,
+) -> None:
+    smoother = ProtectionPresentationSmoother()
+    first = smoother.resolve(_failure_snapshot(1, reason), now=10.0)
+    before = smoother.resolve(_failure_snapshot(2, reason), now=10.799)
+    promoted = smoother.resolve(_failure_snapshot(3, reason), now=10.8)
+
+    assert first.snapshot.state is ProtectionState.FAILED
+    assert first.snapshot.failure_reason is reason
+    assert first.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    assert first.snapshot.indicator_style == "quiet-shield"
+    assert first.overlay_reasons_enabled is False
+    assert first.next_deadline == pytest.approx(10.8)
+    assert before.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    assert promoted.snapshot.state is ProtectionState.FAILED
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+    assert promoted.snapshot.indicator_style == "pill"
+    assert promoted.overlay_reasons_enabled is True
+    assert promoted.next_deadline is None
+
+
+def test_mapping_failure_and_protected_share_one_episode_deadline() -> None:
+    smoother = ProtectionPresentationSmoother()
+    failed = smoother.resolve(
+        _failure_snapshot(1, ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED),
+        now=10.0,
+    )
+    protected = smoother.resolve(_snapshot(2, ProtectionState.PROTECTED), now=10.4)
+    failed_again = smoother.resolve(
+        _failure_snapshot(3, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED),
+        now=10.799,
+    )
+    promoted = smoother.resolve(_snapshot(4, ProtectionState.PROTECTED), now=10.8)
+
+    assert failed.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    assert protected.phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert protected.next_deadline == pytest.approx(10.8)
+    assert failed_again.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    assert failed_again.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
+
+
+def test_sustained_protected_to_mapping_failure_stays_sustained() -> None:
+    smoother = ProtectionPresentationSmoother()
+    smoother.resolve(_snapshot(1, ProtectionState.PROTECTED), now=10.0)
+    smoother.resolve(_snapshot(2, ProtectionState.PROTECTED), now=10.8)
+    result = smoother.resolve(
+        _failure_snapshot(3, ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED),
+        now=10.9,
+    )
+
+    assert result.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+    assert result.snapshot.state is ProtectionState.FAILED
+    assert result.snapshot.indicator_style == "pill"
+
+
+def test_mapping_failure_reason_change_does_not_restart_episode() -> None:
+    smoother = ProtectionPresentationSmoother()
+    smoother.resolve(
+        _failure_snapshot(1, ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED),
+        now=10.0,
+    )
+    changed = smoother.resolve(
+        _failure_snapshot(2, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED),
+        now=10.4,
+    )
+    promoted = smoother.resolve(
+        _failure_snapshot(3, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED),
+        now=10.8,
+    )
+
+    assert changed.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+
+
+def test_mapping_failure_clear_pending_holds_failed_until_second_safe() -> None:
+    smoother = ProtectionPresentationSmoother()
+    failed = smoother.resolve(
+        _failure_snapshot(1, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED),
+        now=10.0,
+    )
+    first_safe = smoother.resolve(_snapshot(2, ProtectionState.INACTIVE), now=10.1)
+    early_safe = smoother.resolve(_snapshot(3, ProtectionState.INACTIVE), now=10.299)
+    confirmed = smoother.resolve(_snapshot(4, ProtectionState.INACTIVE), now=10.3)
+
+    assert failed.snapshot.state is ProtectionState.FAILED
+    for held in (first_safe, early_safe):
+        assert held.phase is ProtectionPresentationPhase.CLEAR_PENDING
+        assert held.snapshot.state is ProtectionState.FAILED
+        assert held.snapshot.failure_reason is ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED
+    assert confirmed.phase is ProtectionPresentationPhase.INACTIVE
+
+
+@pytest.mark.parametrize("returned", ["protected", "mapping-failure"])
+def test_risk_return_cancels_failed_clear_pending(returned: str) -> None:
+    smoother = ProtectionPresentationSmoother()
+    smoother.resolve(
+        _failure_snapshot(1, ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED),
+        now=10.0,
+    )
+    smoother.resolve(_snapshot(2, ProtectionState.INACTIVE), now=10.1)
+    raw = (
+        _snapshot(3, ProtectionState.PROTECTED)
+        if returned == "protected"
+        else _failure_snapshot(3, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED)
+    )
+    result = smoother.resolve(raw, now=10.2)
+
+    assert result.snapshot.state is raw.state
+    assert result.phase in {
+        ProtectionPresentationPhase.TRANSIENT_PROTECTED,
+        ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE,
+    }
+    assert result.next_deadline == pytest.approx(10.8)
 
 
 def test_safe_clear_requires_second_sample_after_200ms() -> None:
@@ -126,14 +271,61 @@ def test_quiet_and_off_promote_without_inventing_another_visual_style(style: str
     assert promoted.snapshot.generation == 2
 
 
-@pytest.mark.parametrize("state", [ProtectionState.PAUSED, ProtectionState.FAILED])
-def test_pause_and_failure_bypass_smoothing(state: ProtectionState) -> None:
+def test_pause_bypasses_smoothing() -> None:
     smoother = ProtectionPresentationSmoother()
-    result = smoother.resolve(_snapshot(1, state, style="banner"), now=10.0)
+    result = smoother.resolve(_snapshot(1, ProtectionState.PAUSED, style="banner"), now=10.0)
     assert result.phase is ProtectionPresentationPhase.BYPASS
     assert result.snapshot.indicator_style == "banner"
     assert result.overlay_reasons_enabled is True
     assert result.next_deadline is None
+
+
+@pytest.mark.parametrize("reason", HARD_FAILURES)
+def test_every_non_allowlisted_failure_bypasses_immediately(
+    reason: ProtectionFailureReason,
+) -> None:
+    smoother = ProtectionPresentationSmoother()
+    result = smoother.resolve(_failure_snapshot(1, reason, style="banner"), now=10.0)
+
+    assert result.phase is ProtectionPresentationPhase.BYPASS
+    assert result.snapshot.indicator_style == "banner"
+    assert result.overlay_reasons_enabled is True
+    assert result.next_deadline is None
+
+
+def test_failed_without_reason_bypasses_immediately() -> None:
+    smoother = ProtectionPresentationSmoother()
+    result = smoother.resolve(_snapshot(1, ProtectionState.FAILED, style="banner"), now=10.0)
+
+    assert result.phase is ProtectionPresentationPhase.BYPASS
+    assert result.snapshot.indicator_style == "banner"
+    assert result.overlay_reasons_enabled is True
+    assert result.next_deadline is None
+
+
+def test_mapping_failure_off_stays_off_through_promotion() -> None:
+    smoother = ProtectionPresentationSmoother()
+    first = smoother.resolve(
+        _failure_snapshot(
+            1,
+            ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+            style="off",
+        ),
+        now=10.0,
+    )
+    promoted = smoother.resolve(
+        _failure_snapshot(
+            2,
+            ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+            style="off",
+        ),
+        now=10.8,
+    )
+
+    assert first.snapshot.indicator_style == "off"
+    assert first.overlay_reasons_enabled is False
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+    assert promoted.snapshot.indicator_style == "off"
 
 
 def test_transient_style_and_placement_reload_without_resetting_episode() -> None:
@@ -201,8 +393,19 @@ def test_negative_delays_are_rejected(
 def test_impossible_held_state_is_rejected() -> None:
     smoother = ProtectionPresentationSmoother()
     smoother._episode_started_at = 10.0
-    with pytest.raises(ProtectionSmoothingError, match="protected snapshot"):
+    with pytest.raises(ProtectionSmoothingError, match="risk snapshot"):
         smoother.resolve(_snapshot(1, ProtectionState.INACTIVE), now=10.1)
+
+
+def test_hard_failure_cannot_be_held_as_episode_risk() -> None:
+    smoother = ProtectionPresentationSmoother()
+    smoother._episode_started_at = 10.0
+    smoother._last_effective_risk = _failure_snapshot(
+        1,
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+    )
+    with pytest.raises(ProtectionSmoothingError, match="invalid risk snapshot"):
+        smoother.resolve(_snapshot(2, ProtectionState.INACTIVE), now=10.1)
 
 
 @pytest.mark.parametrize(
@@ -222,7 +425,7 @@ def test_orphan_episode_state_is_rejected(orphan_state: str) -> None:
     if "clear-deadline" in orphan_state:
         smoother._clear_deadline = 10.2
     if "held-protected" in orphan_state:
-        smoother._last_effective_protected = _snapshot(1, ProtectionState.PROTECTED)
+        smoother._last_effective_risk = _snapshot(1, ProtectionState.PROTECTED)
     if "overlay-reasons" in orphan_state:
         smoother._last_overlay_reasons_enabled = True
 
