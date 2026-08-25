@@ -23,6 +23,7 @@ from openchronicle.capture.privacy import (
     VisibleWindow,
     WindowInventory,
 )
+from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
 from openchronicle.capture.privacy_diagnostics_guard import DiagnosticsLeaseManager
 from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
 from openchronicle.capture.protection_monitor import (
@@ -113,6 +114,7 @@ def _protection_decision(
     confirmed: bool,
     fresh: bool = True,
     failure_reason: ProtectionFailureReason | None = None,
+    failure_capture_blocked: bool = True,
 ) -> ProtectionDecision:
     now = time.monotonic()
     displays = (
@@ -131,7 +133,11 @@ def _protection_decision(
         fresh_until=now + 1.0 if fresh else now - 1.0,
         failure_reason=failure_reason,
     )
-    return ProtectionDecision(snapshot=snapshot, indicator_confirmed=confirmed)
+    return ProtectionDecision(
+        snapshot=snapshot,
+        indicator_confirmed=confirmed,
+        failure_capture_blocked=failure_capture_blocked,
+    )
 
 
 def _filtered_decision(
@@ -274,6 +280,7 @@ def _failed_decision(
     *,
     reason: ProtectionFailureReason = ProtectionFailureReason.INVENTORY_UNAVAILABLE,
     generation: int = 21,
+    failure_capture_blocked: bool = True,
 ) -> ProtectionDecision:
     return _protection_decision(
         generation=generation,
@@ -282,6 +289,7 @@ def _failed_decision(
         protected_ids=set(),
         confirmed=True,
         failure_reason=reason,
+        failure_capture_blocked=failure_capture_blocked,
     )
 
 
@@ -329,7 +337,7 @@ def _inactive_decision(
     )
 
 
-def test_transient_mapping_failure_keeps_existing_scheduler_failure_policy() -> None:
+def test_transient_mapping_failure_keeps_resolved_scheduler_failure_policy() -> None:
     base = _failed_decision(reason=ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED)
     decision = replace(
         base,
@@ -341,14 +349,14 @@ def test_transient_mapping_failure_keeps_existing_scheduler_failure_policy() -> 
         screenshot_monitor="separate",
         screenshot_privacy_fail_closed=True,
     )
-    open_cfg = CaptureConfig(
-        screenshot_monitor="separate",
-        screenshot_privacy_fail_closed=False,
+    fail_open_decision = replace(
+        decision,
+        failure_capture_blocked=False,
     )
     assert scheduler_mod._decision_is_terminal(closed_cfg, decision) is True
     assert scheduler_mod._decision_blocks_ax(closed_cfg, decision) is True
-    assert scheduler_mod._decision_is_terminal(open_cfg, decision) is False
-    assert scheduler_mod._decision_blocks_ax(open_cfg, decision) is False
+    assert scheduler_mod._decision_is_terminal(closed_cfg, fail_open_decision) is False
+    assert scheduler_mod._decision_blocks_ax(closed_cfg, fail_open_decision) is False
     assert scheduler_mod._filtered_capture_is_eligible(closed_cfg, decision) is False
 
 
@@ -895,7 +903,11 @@ def test_inventory_failure_is_fail_open_only_when_configured(
     ac_root: Path, monkeypatch,
 ) -> None:
     monitor = _FakeProtectionMonitor(
-        ProtectionDecision(snapshot=_failed_decision().snapshot, indicator_confirmed=False)
+        ProtectionDecision(
+            snapshot=_failed_decision().snapshot,
+            indicator_confirmed=False,
+            failure_capture_blocked=False,
+        )
     )
     provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
     screenshot_calls: list[dict] = []
@@ -2365,9 +2377,112 @@ def test_filtered_inactive_clear_failure_never_runs_unblocked_mss(
         protection_monitor=monitor,
     )
 
-    assert out is not None
-    assert "screenshot" not in out
+    assert out is None
     assert monitor.force_calls == [True, False]
+
+
+def test_real_monitor_unconfirmed_inactive_clear_blocks_complete_tick_until_ack(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    safe_windows = (
+        VisibleWindow("Cursor", "cursor", "main.py", displays[0].region, True),
+    )
+    protected_inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "Private", displays[1].region),
+            *safe_windows,
+        ),
+        displays=displays,
+    )
+    safe_inventory = WindowInventory(windows=safe_windows, displays=displays)
+    inventory = protected_inventory
+    now = 10.0
+
+    class SequencedClearOverlay(_AlwaysConfirmedOverlay):
+        def __init__(self) -> None:
+            self.clear_results = iter((False, True, True))
+
+        def clear(self, _generation: int, timeout: float = 0.5) -> bool:
+            return next(self.clear_results)
+
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        screenshot_privacy_mode="mask-window",
+        privacy_indicator_style="pill",
+        deny_window_title_patterns=["Private"],
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=SequencedClearOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        monotonic=lambda: now,
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+    mss_calls: list[dict[str, object]] = []
+    filtered_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: mss_calls.append(kwargs) or [_shot("CONFIRMED-INACTIVE")],
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **kwargs: filtered_calls.append(kwargs) or [],
+    )
+
+    try:
+        monitor.decision_for_capture(force=True)
+        inventory = safe_inventory
+        now = 10.1
+        first_safe = monitor.decision_for_capture(force=True)
+        assert first_safe.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
+
+        now = 10.3
+        blocked = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            None,
+            protection_monitor=monitor,
+        )
+        unconfirmed = monitor.decision_for_capture(force=False)
+        diagnostics = PrivacyDiagnosticsServer._snapshot_payload(
+            unconfirmed,
+            detail="category",
+            created_at="2026-08-25T00:00:00Z",
+        )
+
+        assert blocked is None
+        assert provider.calls == 0
+        assert mss_calls == []
+        assert filtered_calls == []
+        assert unconfirmed.snapshot.state is ProtectionState.INACTIVE
+        assert unconfirmed.indicator_confirmed is False
+        assert all(display["screenshot_blocked"] is True for display in diagnostics["displays"])
+        assert all(display["ax_blocked"] is True for display in diagnostics["displays"])
+
+        resumed = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            None,
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert resumed is not None
+    assert "ax_tree" in resumed
+    assert provider.calls == 1
+    assert len(mss_calls) == 1
+    assert filtered_calls == []
 
 
 def test_filtered_inactive_post_change_discards_unblocked_mss_frame(

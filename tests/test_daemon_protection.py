@@ -606,6 +606,7 @@ async def test_daemon_fail_open_inventory_failure_allows_unprotected_capture(
             failure_reason=ProtectionFailureReason.HELPER_EXIT,
         ),
         indicator_confirmed=False,
+        failure_capture_blocked=False,
     )
     monitor.decision_for_capture = lambda *, force=True: failed  # type: ignore[attr-defined]
     screenshot_calls = 0

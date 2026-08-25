@@ -3,6 +3,11 @@
 日期：2026-08-25
 状态：已实现并验证
 
+后续修订：本设计关于 `active_window_unmapped` 与 `sensitive_window_unmapped` 立即绕过
+平滑的结论，已由
+[unmapped failure presentation smoothing 设计](2026-08-25-unmapped-failure-presentation-smoothing-design.md)
+取代。本文保留原始结论以记录设计演进；这些明确标记为 superseded 的段落不再是当前规范。
+
 ## 背景
 
 OpenChronicle 通过 CoreGraphics 的 `optionOnScreenOnly` 窗口清单保护实际出现在屏幕合成结果中的
@@ -74,14 +79,17 @@ protected 之后第一次得到安全窗口清单：
 ### 其他状态
 
 - `paused`：取消普通 protected 平滑，立即显示用户配置的暂停样式和原因。
-- `failed`：取消普通 protected 平滑，立即显示现有失败 presentation；截图与 AX 遵循既有
-  failure policy。
-- `active_window_unmapped` 与 `sensitive_window_unmapped`：两者都是全局 raw
+- `failed`：除后续 unmapped failure 设计明确 allowlist 的两类纯 mapping failure 外，其他硬故障
+  取消普通 protected 平滑并立即显示现有失败 presentation；截图与 AX 遵循既有 failure policy。
+- **Superseded，以下为历史结论：** `active_window_unmapped` 与
+  `sensitive_window_unmapped` 两者都是全局 raw
   `failed`，立即绕过平滑，使用现有失败 presentation，不显示 transient `quiet-shield`，且在
   FAILED hold 中不执行正常 800ms promotion。截图与 AX 是否阻断遵循既有 failure policy：默认/当前
   fail-closed 配置和 `mask-window`/`exclude-window` 全局阻断；legacy
   `screenshot_privacy_fail_closed = false` 的 `skip-monitor`/`off` 保留既有 fail-open。Mission
   Control 可能出现这两种路径；它们只证明配置的失败处理，不证明 normal smoothed `protected`。
+  当前规范由后续 unmapped failure 设计定义：纯 mapping FAILED 与 PROTECTED 共享风险 episode，
+  先显示 transient `quiet-shield`，但 diagnostics guard invalid 等复合硬故障仍立即 bypass。
 - `off`：不显示轻量或完整标识，但 protected 与 clear-pending 仍立即阻止截图和 AX。
 - 最终样式为 `quiet-shield`：transient 与 sustained 外观一致。
 - protected 显示器集合、原因或窗口 ID 在同一 episode 中变化时，不重置 800ms 计时；新增显示器跟随
@@ -209,10 +217,13 @@ reason 展开和 input hit panel 行为除此之外不变。
 
 ## 错误处理
 
-- inventory unavailable、`active_window_unmapped`、`sensitive_window_unmapped`、pause state
+- **Superseded，以下为历史结论：** inventory unavailable、`active_window_unmapped`、
+  `sensitive_window_unmapped`、pause state
   unavailable 和 diagnostics guard failure 继续产生 failed raw snapshot，并立即绕过平滑。两种
   unmapped failed 路径均立即 bypass smoothing，使用既有失败 presentation，不经过 transient
   `quiet-shield` 或 800ms promotion；截图与 AX 阻断遵循既有 failure policy，而非本功能覆盖。
+  当前错误分类以后续 unmapped failure 设计的固定 allowlist 为准；只有不带独立硬故障的两类
+  mapping failure 进入 presentation smoothing。
 - helper 启动、写入、解码或 acknowledgement 失败继续沿用现有 fail-closed。
 - 平滑器内部状态不完整或输入 generation 非递增时，返回立即 failed 的安全错误，而不是 inactive。
 - monitor 停止时清除所有 deadline，不能在 shutdown 后再次渲染。

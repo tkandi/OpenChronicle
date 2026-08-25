@@ -22,7 +22,7 @@ from ..logger import get
 from ..store import fts as fts_store
 from . import ax_capture, privacy, s1_parser, screenshot, window_meta
 from .event_dispatcher import EventDispatcher
-from .protection import ProtectionState, failure_requires_fail_closed
+from .protection import ProtectionState
 from .protection_monitor import PrivacyProtectionMonitor, ProtectionDecision
 from .watcher import AXWatcherProcess
 
@@ -30,19 +30,28 @@ logger = get("openchronicle.capture")
 _WINDOW_FILTERED_PRIVACY_MODES = frozenset({"mask-window", "exclude-window"})
 
 
-def _decision_is_terminal(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
+def _decision_is_terminal(_cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
     snapshot = decision.snapshot
-    return snapshot.state is ProtectionState.PAUSED or failure_requires_fail_closed(
-        cfg, snapshot
+    return (
+        snapshot.state is ProtectionState.PAUSED
+        or (
+            snapshot.state is ProtectionState.FAILED
+            and decision.failure_capture_blocked
+        )
+        or (
+            snapshot.state is ProtectionState.INACTIVE
+            and not decision.capture_confirmation_satisfied
+        )
     )
 
 
 def _decision_blocks_ax(cfg: CaptureConfig, decision: ProtectionDecision) -> bool:
     snapshot = decision.snapshot
-    return (
-        snapshot.state is not ProtectionState.FAILED
-        or failure_requires_fail_closed(cfg, snapshot)
-    ) and snapshot.ax_blocked
+    if _decision_is_terminal(cfg, decision):
+        return True
+    if snapshot.state is ProtectionState.FAILED:
+        return decision.failure_capture_blocked
+    return snapshot.ax_blocked
 
 
 def _valid_window_ids(window_ids: object, *, require_nonempty: bool) -> bool:
@@ -76,7 +85,7 @@ def _filtered_capture_is_eligible(
         and snapshot.window_filterable
         and not snapshot.diagnostics_guard_active
         and not snapshot.diagnostics_guard_invalid
-        and decision.indicator_confirmed
+        and decision.capture_confirmation_satisfied
         and overlay_ids_eligible
         and _valid_window_ids(
             tuple(snapshot.protected_window_ids),
@@ -142,13 +151,6 @@ def _fallback_regions_are_valid(decision: ProtectionDecision) -> bool:
     return not snapshot.protected_display_ids and not snapshot.protected_regions
 
 
-def _indicator_confirmation_allows_capture(decision: ProtectionDecision) -> bool:
-    return (
-        decision.snapshot.indicator_style == "off"
-        or decision.indicator_confirmed
-    )
-
-
 def _grab_current_monitor_screenshots(
     cfg: CaptureConfig,
     decision: ProtectionDecision,
@@ -156,7 +158,7 @@ def _grab_current_monitor_screenshots(
     snapshot = decision.snapshot
     if snapshot.state is ProtectionState.FAILED:
         blocked_regions: list[privacy.ScreenRegion] = []
-    elif snapshot.indicator_style != "off" and not decision.indicator_confirmed:
+    elif not decision.capture_confirmation_satisfied:
         logger.warning("screenshot skipped: privacy indicator not confirmed")
         return []
     else:
@@ -179,7 +181,7 @@ def _grab_fresh_skip_monitor_fallback(
     latest = current_decision or protection_monitor.decision_for_capture(force=True)
     if _decision_is_terminal(cfg, latest):
         return None
-    if not _indicator_confirmation_allows_capture(latest):
+    if not latest.capture_confirmation_satisfied:
         logger.warning("screenshot fallback skipped: privacy indicator not confirmed")
         return [], latest
     if not _fallback_regions_are_valid(latest):
@@ -198,7 +200,7 @@ def _grab_fresh_skip_monitor_fallback(
     if _decision_is_terminal(cfg, after_capture):
         return None
     if (
-        not _indicator_confirmation_allows_capture(after_capture)
+        not after_capture.capture_confirmation_satisfied
         or not _fallback_regions_are_valid(after_capture)
         or _filtered_authorization_key(after_capture) != authorization
     ):
@@ -212,7 +214,7 @@ def _grab_inactive_filtered_screenshots(
     protection_monitor: PrivacyProtectionMonitor,
     decision: ProtectionDecision,
 ) -> tuple[list[screenshot.Screenshot], ProtectionDecision] | None:
-    if not _indicator_confirmation_allows_capture(decision):
+    if not decision.capture_confirmation_satisfied:
         logger.warning("screenshot skipped: privacy indicator clear not confirmed")
         return [], decision
     if not _fallback_regions_are_valid(decision):
@@ -230,7 +232,7 @@ def _grab_inactive_filtered_screenshots(
         return None
     if (
         after_capture.snapshot.state is not ProtectionState.INACTIVE
-        or not _indicator_confirmation_allows_capture(after_capture)
+        or not after_capture.capture_confirmation_satisfied
         or not _fallback_regions_are_valid(after_capture)
         or _filtered_authorization_key(after_capture) != authorization
     ):

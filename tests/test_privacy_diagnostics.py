@@ -392,6 +392,69 @@ def test_category_mapping_failure_presentation_does_not_expose_exact_values() ->
 
 
 @pytest.mark.parametrize(
+    ("cfg", "expected_blocked"),
+    [
+        (CaptureConfig(screenshot_monitor="separate"), True),
+        (
+            CaptureConfig(
+                screenshot_monitor="separate",
+                screenshot_privacy_mode="mask-window",
+                screenshot_privacy_fail_closed=False,
+            ),
+            True,
+        ),
+        (
+            CaptureConfig(
+                screenshot_monitor="separate",
+                screenshot_privacy_mode="skip-monitor",
+                screenshot_privacy_fail_closed=False,
+            ),
+            False,
+        ),
+    ],
+    ids=["default", "filtered", "legacy-fail-open"],
+)
+def test_real_monitor_failed_diagnostics_follow_resolved_capture_policy(
+    cfg: CaptureConfig,
+    expected_blocked: bool,
+) -> None:
+    inventory = WindowInventory(
+        windows=(),
+        displays=(
+            DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+            DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+        ),
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: InventoryReadResult(
+            inventory,
+            ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+        ),
+        pause_reader=lambda: False,
+    )
+    try:
+        decision = monitor.decision_for_capture(force=True)
+    finally:
+        monitor.stop()
+
+    payload = PrivacyDiagnosticsServer._snapshot_payload(
+        decision,
+        detail="category",
+        created_at="2026-08-25T00:00:00Z",
+    )
+
+    assert decision.failure_capture_blocked is expected_blocked
+    assert all(
+        display["screenshot_blocked"] is expected_blocked
+        and display["ax_blocked"] is expected_blocked
+        for display in payload["displays"]
+    )
+
+
+@pytest.mark.parametrize(
     "reason",
     [
         ProtectionFailureReason.INVENTORY_UNAVAILABLE,

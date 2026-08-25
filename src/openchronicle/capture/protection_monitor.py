@@ -54,6 +54,7 @@ class ProtectionDecision:
     indicator_confirmed: bool
     covered_request_epoch: int = 0
     indicator_window_ids: tuple[int, ...] = ()
+    failure_capture_blocked: bool = field(default=True, kw_only=True)
     raw_state: ProtectionState | None = field(default=None, kw_only=True)
     presentation_phase: ProtectionPresentationPhase = field(
         default=ProtectionPresentationPhase.BYPASS,
@@ -61,6 +62,17 @@ class ProtectionDecision:
     )
     overlay_reasons_enabled: bool = field(default=True, kw_only=True)
     presentation_deadline_monotonic: float | None = field(default=None, kw_only=True)
+
+    @property
+    def capture_confirmation_satisfied(self) -> bool:
+        return (
+            self.snapshot.indicator_style == "off"
+            or self.indicator_confirmed
+            or (
+                self.snapshot.state is ProtectionState.FAILED
+                and not self.failure_capture_blocked
+            )
+        )
 
 
 class PrivacyProtectionMonitor:
@@ -338,10 +350,15 @@ class PrivacyProtectionMonitor:
                 overlay_reasons_enabled = result.overlay_reasons_enabled
                 next_smoothing_deadline = result.next_deadline
                 raw_state = raw_snapshot.state
-            self._log_failure_transition(snapshot)
+            failure_capture_blocked = failure_requires_fail_closed(self._cfg, snapshot)
+            self._log_failure_transition(
+                snapshot,
+                failure_capture_blocked=failure_capture_blocked,
+            )
             self._raise_if_stopped()
             rendered = self._render(
                 snapshot,
+                failure_capture_blocked=failure_capture_blocked,
                 overlay_reasons_enabled=overlay_reasons_enabled,
             )
             indicator_confirmed = rendered or snapshot.indicator_style == "off"
@@ -351,7 +368,7 @@ class PrivacyProtectionMonitor:
             )
             if not indicator_confirmed and not (
                 snapshot.state is ProtectionState.FAILED
-                and not failure_requires_fail_closed(self._cfg, snapshot)
+                and not failure_capture_blocked
             ):
                 snapshot = replace(
                     snapshot,
@@ -371,6 +388,7 @@ class PrivacyProtectionMonitor:
                 indicator_confirmed,
                 covered_request_epoch=covered_request_epoch,
                 indicator_window_ids=indicator_window_ids,
+                failure_capture_blocked=failure_capture_blocked,
                 raw_state=raw_state,
                 presentation_phase=phase,
                 overlay_reasons_enabled=overlay_reasons_enabled,
@@ -485,6 +503,7 @@ class PrivacyProtectionMonitor:
         self,
         snapshot: ProtectionSnapshot,
         *,
+        failure_capture_blocked: bool,
         overlay_reasons_enabled: bool,
     ) -> bool:
         with self._lifecycle_lock:
@@ -496,7 +515,7 @@ class PrivacyProtectionMonitor:
         try:
             if (
                 snapshot.state is ProtectionState.FAILED
-                and not failure_requires_fail_closed(self._cfg, snapshot)
+                and not failure_capture_blocked
             ):
                 if snapshot.indicator_style == "off":
                     self._overlay.render(
@@ -593,7 +612,12 @@ class PrivacyProtectionMonitor:
             return ()
         return tuple(sorted(window_ids))
 
-    def _log_failure_transition(self, snapshot: ProtectionSnapshot) -> None:
+    def _log_failure_transition(
+        self,
+        snapshot: ProtectionSnapshot,
+        *,
+        failure_capture_blocked: bool,
+    ) -> None:
         if snapshot.diagnostics_guard_invalid:
             key = ("diagnostics_guard_invalid", True)
             if key != self._last_logged_failure:
@@ -605,12 +629,11 @@ class PrivacyProtectionMonitor:
         if snapshot.state is not ProtectionState.FAILED or snapshot.failure_reason is None:
             self._last_logged_failure = None
             return
-        requires_fail_closed = failure_requires_fail_closed(self._cfg, snapshot)
-        key = (snapshot.failure_reason.value, requires_fail_closed)
+        key = (snapshot.failure_reason.value, failure_capture_blocked)
         if key == self._last_logged_failure:
             return
         self._last_logged_failure = key
-        if requires_fail_closed:
+        if failure_capture_blocked:
             logger.warning(
                 "privacy protection failed closed: reason=%s",
                 snapshot.failure_reason.value,

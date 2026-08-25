@@ -20,6 +20,7 @@ def _is_smoothed_mapping_failure(snapshot: ProtectionSnapshot) -> bool:
     return (
         snapshot.state is ProtectionState.FAILED
         and snapshot.failure_reason in PRESENTATION_SMOOTHED_FAILURES
+        and not snapshot.diagnostics_guard_invalid
     )
 
 

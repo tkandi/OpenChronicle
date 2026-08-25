@@ -21,7 +21,7 @@ from typing import Any
 
 from ..logger import get
 from .privacy_diagnostics_guard import DiagnosticsLeaseManager
-from .protection import ProtectionSnapshot, ProtectionState
+from .protection import ProtectionState
 from .protection_monitor import ProtectionDecision
 from .protection_reason import ProtectionReasonCode
 
@@ -799,10 +799,9 @@ class PrivacyDiagnosticsServer:
             ],
             "displays": [
                 PrivacyDiagnosticsServer._display_payload(
-                    snapshot,
+                    decision,
                     display.id,
                     display.is_primary,
-                    decision.indicator_confirmed,
                     detail,
                 )
                 for display in displays
@@ -811,24 +810,38 @@ class PrivacyDiagnosticsServer:
 
     @staticmethod
     def _display_payload(
-        snapshot: ProtectionSnapshot,
+        decision: ProtectionDecision,
         display_id: int,
         is_primary: bool,
-        indicator_confirmed: bool,
         detail: str,
     ) -> dict[str, object]:
+        snapshot = decision.snapshot
         if snapshot.state in {ProtectionState.PAUSED, ProtectionState.FAILED}:
             display_state = snapshot.state
-            screenshot_blocked = True
         elif display_id in snapshot.protected_display_ids:
             display_state = ProtectionState.PROTECTED
-            screenshot_blocked = True
         else:
             display_state = ProtectionState.INACTIVE
+
+        if (
+            not decision.capture_confirmation_satisfied
+            or snapshot.state is ProtectionState.PAUSED
+        ):
+            screenshot_blocked = True
+        elif snapshot.state is ProtectionState.FAILED:
+            screenshot_blocked = decision.failure_capture_blocked
+        elif display_id in snapshot.protected_display_ids:
+            screenshot_blocked = True
+        else:
             screenshot_blocked = False
 
-        if snapshot.state in {ProtectionState.PAUSED, ProtectionState.FAILED}:
+        if snapshot.state is ProtectionState.PAUSED or (
+            snapshot.state is ProtectionState.INACTIVE
+            and not decision.capture_confirmation_satisfied
+        ):
             ax_blocked = True
+        elif snapshot.state is ProtectionState.FAILED:
+            ax_blocked = decision.failure_capture_blocked
         elif snapshot.active_display_id == display_id:
             ax_blocked = snapshot.ax_blocked
         elif snapshot.active_display_id is None:
@@ -845,7 +858,7 @@ class PrivacyDiagnosticsServer:
             "state": display_state.value,
             "screenshot_blocked": screenshot_blocked,
             "ax_blocked": ax_blocked,
-            "indicator_confirmed": indicator_confirmed,
+            "indicator_confirmed": decision.indicator_confirmed,
             "reasons": [
                 reason.to_payload(detail)
                 for reason in snapshot.reasons_for_display(display_id)

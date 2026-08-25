@@ -8,8 +8,15 @@ from openchronicle.capture.privacy import (
     DisplayInfo,
     ProtectionFailureReason,
     ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
 )
-from openchronicle.capture.protection import ProtectionSnapshot, ProtectionState
+from openchronicle.capture.protection import (
+    ProtectionSnapshot,
+    ProtectionState,
+    build_protection_snapshot,
+    failure_requires_fail_closed,
+)
 from openchronicle.capture.protection_reason import (
     DisplayProtectionReasons,
     ProtectionReason,
@@ -20,6 +27,7 @@ from openchronicle.capture.protection_smoothing import (
     ProtectionPresentationSmoother,
     ProtectionSmoothingError,
 )
+from openchronicle.config import CaptureConfig
 
 DISPLAY = DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True)
 REASON = ProtectionReason(
@@ -291,6 +299,44 @@ def test_every_non_allowlisted_failure_bypasses_immediately(
     assert result.snapshot.indicator_style == "banner"
     assert result.overlay_reasons_enabled is True
     assert result.next_deadline is None
+
+
+def test_mapping_failure_with_invalid_diagnostics_guard_bypasses_smoothing() -> None:
+    cfg = CaptureConfig(
+        screenshot_privacy_fail_closed=False,
+        privacy_indicator_style="banner",
+    )
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(200, 0, 100, 100),
+                True,
+            ),
+        ),
+        displays=(DISPLAY,),
+    )
+    snapshot = build_protection_snapshot(
+        cfg,
+        inventory,
+        paused=False,
+        generation=1,
+        now=10.0,
+        diagnostics_guard_invalid=True,
+    )
+
+    result = ProtectionPresentationSmoother().resolve(snapshot, now=10.0)
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.failure_reason is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+    assert snapshot.diagnostics_guard_invalid is True
+    assert result.phase is ProtectionPresentationPhase.BYPASS
+    assert result.snapshot.indicator_style == "banner"
+    assert result.overlay_reasons_enabled is True
+    assert result.next_deadline is None
+    assert failure_requires_fail_closed(cfg, result.snapshot) is True
 
 
 def test_failed_without_reason_bypasses_immediately() -> None:
