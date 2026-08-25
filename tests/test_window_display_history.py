@@ -73,6 +73,23 @@ def test_continuously_present_unmapped_window_does_not_expire() -> None:
     assert later.windows[0].fallback_display_ids == frozenset({1})
 
 
+def test_continuous_fallback_refreshes_before_a_later_brief_absence() -> None:
+    history = WindowDisplayHistory()
+    history.resolve(_inventory(_window(41, ScreenRegion(10, 10, 50, 50))), now=0.0)
+    history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=100.0,
+    )
+    history.resolve(_inventory(), now=104.999)
+
+    result = history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=104.999,
+    )
+
+    assert result.windows[0].fallback_display_ids == frozenset({1})
+
+
 def test_absent_entry_is_reusable_before_five_seconds() -> None:
     history = WindowDisplayHistory()
     history.resolve(_inventory(_window(41, ScreenRegion(10, 10, 50, 50))), now=0.0)
@@ -99,6 +116,19 @@ def test_absent_entry_expires_at_exactly_five_seconds() -> None:
     assert result.windows[0].fallback_display_ids == frozenset()
 
 
+def test_observed_absence_expires_before_later_fallback_lookup() -> None:
+    history = WindowDisplayHistory()
+    history.resolve(_inventory(_window(41, ScreenRegion(10, 10, 50, 50))), now=0.0)
+    history.resolve(_inventory(), now=1.0)
+
+    result = history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=6.0,
+    )
+
+    assert result.windows[0].fallback_display_ids == frozenset()
+
+
 def test_owner_mismatch_rejects_cached_mapping() -> None:
     history = WindowDisplayHistory()
     history.resolve(_inventory(_window(41, ScreenRegion(10, 10, 50, 50))), now=1.0)
@@ -118,13 +148,40 @@ def test_owner_mismatch_rejects_cached_mapping() -> None:
     assert changed.windows[0].fallback_display_ids == frozenset()
 
 
-@pytest.mark.parametrize("window_id", [None, 0, -1, True, 0x1_0000_0000])
-def test_invalid_window_ids_never_use_history(window_id: int | None) -> None:
+def test_owner_change_invalidates_the_old_identity_cache() -> None:
     history = WindowDisplayHistory()
+    history.resolve(_inventory(_window(41, ScreenRegion(10, 10, 50, 50))), now=1.0)
+    history.resolve(
+        _inventory(
+            _window(
+                41,
+                ScreenRegion(5000, 5000, 50, 50),
+                app_name="Other",
+                bundle_id="com.example.other",
+            )
+        ),
+        now=1.1,
+    )
+
+    result = history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=1.2,
+    )
+
+    assert result.windows[0].fallback_display_ids == frozenset()
+
+
+@pytest.mark.parametrize("window_id", [None, 0, -1, True, 0x1_0000_0000])
+def test_invalid_window_ids_never_seed_or_use_history(window_id: object) -> None:
+    history = WindowDisplayHistory()
+    history.resolve(
+        _inventory(_window(window_id, ScreenRegion(10, 10, 50, 50))),
+        now=1.0,
+    )
 
     result = history.resolve(
         _inventory(_window(window_id, ScreenRegion(5000, 5000, 50, 50))),
-        now=1.0,
+        now=1.1,
     )
 
     assert result.windows[0].fallback_display_ids == frozenset()
@@ -143,6 +200,80 @@ def test_duplicate_window_id_invalidates_history_for_both_windows() -> None:
     )
 
     assert all(not window.fallback_display_ids for window in result.windows)
+    later = history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=1.2,
+    )
+    assert later.windows[0].fallback_display_ids == frozenset()
+
+
+def test_actual_mapping_clears_input_fallback_and_replaces_history() -> None:
+    history = WindowDisplayHistory()
+    actual = VisibleWindow(
+        "Edge",
+        "com.microsoft.edgemac",
+        "InPrivate",
+        ScreenRegion(10, 10, 50, 50),
+        window_id=41,
+        fallback_display_ids=frozenset({2}),
+    )
+
+    mapped = history.resolve(_inventory(actual), now=1.0)
+    fallback = history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=1.1,
+    )
+
+    assert mapped.windows[0].fallback_display_ids == frozenset()
+    assert fallback.windows[0].fallback_display_ids == frozenset({1})
+
+
+def test_blank_owner_never_seeds_or_uses_history() -> None:
+    history = WindowDisplayHistory()
+    blank_owner = _window(
+        41,
+        ScreenRegion(10, 10, 50, 50),
+        app_name=" ",
+        bundle_id="",
+    )
+    history.resolve(_inventory(blank_owner), now=1.0)
+
+    result = history.resolve(
+        _inventory(
+            _window(
+                41,
+                ScreenRegion(5000, 5000, 50, 50),
+                app_name=" ",
+                bundle_id="",
+            )
+        ),
+        now=1.1,
+    )
+
+    assert result.windows[0].fallback_display_ids == frozenset()
+
+
+def test_blank_owner_observation_clears_cached_id() -> None:
+    history = WindowDisplayHistory()
+    history.resolve(_inventory(_window(41, ScreenRegion(10, 10, 50, 50))), now=1.0)
+    history.resolve(
+        _inventory(
+            _window(
+                41,
+                ScreenRegion(5000, 5000, 50, 50),
+                app_name=" ",
+                bundle_id="",
+            )
+        ),
+        now=1.1,
+    )
+
+    result = history.resolve(
+        _inventory(_window(41, ScreenRegion(5000, 5000, 50, 50))),
+        now=1.2,
+    )
+
+    assert result.windows[0].fallback_display_ids == frozenset()
 
 
 def test_removed_display_is_not_reused_from_history() -> None:
