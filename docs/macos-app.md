@@ -217,22 +217,27 @@ indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
 On the first risk inventory frame, OpenChronicle applies the existing capture
-policy immediately. Normal raw `protected` plus the two allowlisted mapping
-failures `active_window_unmapped` and `sensitive_window_unmapped` render a
-transient `quiet-shield` for 800ms when the indicator is enabled. A newly
-acknowledged generation then promotes to the configured sustained style. The
-800ms promotion and 200ms safe-confirmation interval are fixed internal
-constants; they do not add a configuration field or settings control.
+policy immediately. Normal reliably mapped `protected`, history-fallback
+`protected`, and the two allowlisted mapping failures
+`active_window_unmapped` and `sensitive_window_unmapped` share one visual risk
+episode. Before 800ms, normal mapped protection uses `quiet-shield`, while
+history fallback and allowlisted mapping failure use presentation style `off`;
+all suppress overlay reasons. At exactly 800ms, a newly acknowledged generation
+promotes to the latest configured sustained style and reason setting. The 800ms
+promotion and 200ms safe-confirmation interval are fixed internal constants;
+they do not add a configuration field or settings control.
 
 An allowlisted mapping failure remains raw and effective `failed`; only its
-presentation is smoothed. Default/current fail-closed configuration and
+presentation is smoothed. A valid display-history fallback remains effective
+per-display `protected`, even while its transient overlay is silent.
+Default/current fail-closed configuration and
 `mask-window`/`exclude-window` still block screenshots and AX globally from the
 first failed frame. Legacy `screenshot_privacy_fail_closed = false` with
 `skip-monitor` or `off` keeps its existing fail-open behavior and clears the
-overlay rather than showing a transient shield. Mapping `failed` and normal
-`protected` transitions share one episode deadline, so Mission Control, F3,
-Space gestures, thumbnails, and animations cannot restart the 800ms timer by
-alternating those states.
+overlay rather than showing a transient shield. Mapping `failed`, normal
+`protected`, and history-fallback `protected` transitions share one episode
+deadline, so Mission Control, F3, Space gestures, thumbnails, and animations
+cannot restart the 800ms timer by alternating those states.
 
 All non-allowlisted `failed` decisions immediately bypass smoothing. Their
 presentation result enables reasons and has no smoothing deadline. The monitor
@@ -245,10 +250,11 @@ warning. `paused` also bypasses smoothing.
 
 After the first safe inventory, the app remains in clear-pending and retains
 the last effective risk decision, including an allowlisted effective `failed`
-decision. It clears only after a second safe inventory at least 200ms later;
-renewed protected or allowlisted failed risk cancels the pending clear without
-publishing inactive. With indicator style `off`, no overlay is drawn, while the
-effective capture policy and clear-pending behavior remain unchanged.
+decision and every history-fallback/category presentation field. It clears only
+after a second safe inventory at least 200ms later; renewed protected or
+allowlisted failed risk cancels the pending clear without publishing inactive.
+With indicator style `off`, no overlay is drawn and reasons stay disabled,
+while the effective capture policy and clear-pending behavior remain unchanged.
 
 Transient suppression hides reasons only in the overlay presentation. It does
 not remove reasons from the effective snapshot, diagnostics, capture policy,
@@ -258,9 +264,13 @@ overlay reason behavior, including when its configured style remains
 
 Owner-only category diagnostics add only safe presentation fields:
 `raw_state`, effective `state`, `presentation_phase`, `indicator_style`, and
-`overlay_reasons_enabled`. Mapping failures use
-`transient-mapping-failure`/`sustained-mapping-failure`; category payloads do
-not reveal exact app, bundle, title, alternate-title, or rule values.
+`overlay_reasons_enabled`, plus the boolean
+`display_mapping_fallback_active`. History fallback uses
+`transient-mapping-fallback`/`sustained-mapping-fallback`; mapping failures use
+`transient-mapping-failure`/`sustained-mapping-failure`. Category payloads do
+not reveal cached timestamps, window identities, exact app, bundle, title, URL,
+alternate-title, or rule values. Schema version remains 1, and older payloads
+without the additive boolean remain decodable.
 
 ### Filtered screenshots
 
@@ -305,6 +315,17 @@ as protected. Python forces a fresh post-helper protection decision, which
 drops persistent privacy changes from other applications; a different app's
 privacy window that appears and disappears entirely between the OS and Python
 snapshots remains a residual race.
+
+Window-to-display attribution uses actual positive-area geometry first, then a
+memory-only last-reliable display history for the same valid window ID and
+owner, and finally the existing unmapped failure. A continuously present
+unmapped window keeps its history; an absent entry expires at exactly five
+seconds, and owner mismatch or display removal invalidates it. This does not
+infer pixel occlusion, transparency, or z-order coverage. In `separate` mode a
+history fallback protects only its valid historical displays, while `all`
+retains full virtual-desktop protection semantics. A cache miss remains a
+mapping failure. History fallback is never window-filterable, so filtered modes
+use the protected-display fallback instead of stale window IDs or bounds.
 
 The decision inventory is limited to alpha-positive, positive-size, normal
 layer-0 windows returned by CoreGraphics as on-screen. It locally inspects owner

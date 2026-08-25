@@ -786,6 +786,7 @@ class PrivacyDiagnosticsServer:
             "overlay_reasons_enabled": decision.overlay_reasons_enabled,
             "indicator_confirmed": decision.indicator_confirmed,
             "diagnostics_guard_active": snapshot.diagnostics_guard_active,
+            "display_mapping_fallback_active": snapshot.display_mapping_fallback_active,
             "created_at": created_at,
             "snapshot_created_monotonic": _finite_monotonic_or_none(
                 snapshot.created_monotonic

@@ -255,6 +255,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
   let presentationPhase: String?
   let indicatorStyle: String?
   let overlayReasonsEnabled: Bool?
+  let displayMappingFallbackActive: Bool?
   let indicatorConfirmed: Bool
   let diagnosticsGuardActive: Bool
   let createdAt: Date
@@ -270,6 +271,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     presentationPhase: String? = nil,
     indicatorStyle: String? = nil,
     overlayReasonsEnabled: Bool? = nil,
+    displayMappingFallbackActive: Bool? = nil,
     indicatorConfirmed: Bool,
     diagnosticsGuardActive: Bool,
     createdAt: Date,
@@ -284,6 +286,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     self.presentationPhase = presentationPhase
     self.indicatorStyle = indicatorStyle
     self.overlayReasonsEnabled = overlayReasonsEnabled
+    self.displayMappingFallbackActive = displayMappingFallbackActive
     self.indicatorConfirmed = indicatorConfirmed
     self.diagnosticsGuardActive = diagnosticsGuardActive
     self.createdAt = createdAt
@@ -302,6 +305,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     case presentationPhase = "presentation_phase"
     case indicatorStyle = "indicator_style"
     case overlayReasonsEnabled = "overlay_reasons_enabled"
+    case displayMappingFallbackActive = "display_mapping_fallback_active"
     case indicatorConfirmed = "indicator_confirmed"
     case diagnosticsGuardActive = "diagnostics_guard_active"
     case createdAt = "created_at"
@@ -335,6 +339,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       Bool.self,
       forKey: .overlayReasonsEnabled
     )
+    let decodedDisplayMappingFallbackActive = try container.decodeIfPresent(
+      Bool.self,
+      forKey: .displayMappingFallbackActive
+    )
     let decodedIndicatorConfirmed = try container.decode(Bool.self, forKey: .indicatorConfirmed)
     let decodedDiagnosticsGuardActive = try container.decode(
       Bool.self,
@@ -364,6 +372,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     presentationPhase = decodedPresentationPhase
     indicatorStyle = decodedIndicatorStyle
     overlayReasonsEnabled = decodedOverlayReasonsEnabled
+    displayMappingFallbackActive = decodedDisplayMappingFallbackActive
     indicatorConfirmed = decodedIndicatorConfirmed
     diagnosticsGuardActive = decodedDiagnosticsGuardActive
     createdAt = decodedCreatedAt
@@ -383,6 +392,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     try container.encodeIfPresent(presentationPhase, forKey: .presentationPhase)
     try container.encodeIfPresent(indicatorStyle, forKey: .indicatorStyle)
     try container.encodeIfPresent(overlayReasonsEnabled, forKey: .overlayReasonsEnabled)
+    try container.encodeIfPresent(
+      displayMappingFallbackActive,
+      forKey: .displayMappingFallbackActive
+    )
     try container.encode(indicatorConfirmed, forKey: .indicatorConfirmed)
     try container.encode(diagnosticsGuardActive, forKey: .diagnosticsGuardActive)
     try container.encode(ProtectionDiagnosticsDateCodec.encode(createdAt), forKey: .createdAt)
@@ -400,6 +413,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       presentationPhase: presentationPhase,
       indicatorStyle: indicatorStyle,
       overlayReasonsEnabled: overlayReasonsEnabled,
+      displayMappingFallbackActive: displayMappingFallbackActive,
       indicatorConfirmed: indicatorConfirmed,
       diagnosticsGuardActive: diagnosticsGuardActive,
       createdAt: createdAt,
@@ -418,6 +432,7 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       presentationPhase: presentationPhase,
       indicatorStyle: indicatorStyle,
       overlayReasonsEnabled: overlayReasonsEnabled,
+      displayMappingFallbackActive: displayMappingFallbackActive,
       indicatorConfirmed: indicatorConfirmed,
       diagnosticsGuardActive: diagnosticsGuardActive,
       createdAt: createdAt,

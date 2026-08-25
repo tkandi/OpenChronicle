@@ -1070,7 +1070,7 @@ def test_monitor_smooths_mapping_failure_without_changing_failed_state(
         transient.presentation_phase
         is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
     )
-    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.snapshot.indicator_style == "off"
     assert transient.overlay_reasons_enabled is False
     assert transient.indicator_confirmed is True
     assert fake_overlay.reason_visibility[:2] == [False, True]
@@ -1081,7 +1081,7 @@ def test_monitor_smooths_mapping_failure_without_changing_failed_state(
     assert sustained.snapshot.indicator_style == "pill"
 
 
-def test_mapping_failure_smoothing_does_not_override_legacy_fail_open(
+def test_mapping_failure_smoothing_keeps_legacy_capture_fail_open(
     inventory, fake_overlay
 ) -> None:
     monitor = make_monitor(
@@ -1106,9 +1106,11 @@ def test_mapping_failure_smoothing_does_not_override_legacy_fail_open(
         ),
         decision.snapshot,
     ) is False
-    assert fake_overlay.render_calls == 0
-    assert fake_overlay.clear_calls == 1
-    assert decision.indicator_confirmed is False
+    assert fake_overlay.render_calls == 1
+    assert fake_overlay.clear_calls == 0
+    assert fake_overlay.snapshots[0].indicator_style == "off"
+    assert fake_overlay.reason_visibility == [False]
+    assert decision.indicator_confirmed is True
 
 
 def test_listener_and_wait_use_acknowledged_effective_decision(

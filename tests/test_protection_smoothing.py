@@ -52,6 +52,7 @@ def _snapshot(
     style: str = "pill",
     now: float = 10.0,
     protected_ids: frozenset[int] = frozenset({1}),
+    fallback: bool = False,
 ) -> ProtectionSnapshot:
     protected = state is ProtectionState.PROTECTED
     return ProtectionSnapshot(
@@ -69,7 +70,8 @@ def _snapshot(
         ),
         protected_window_ids=frozenset({41}) if protected else frozenset(),
         protected_window_regions=(ScreenRegion(0, 0, 50, 50),) if protected else (),
-        window_filterable=protected,
+        window_filterable=protected and not fallback,
+        display_mapping_fallback_active=fallback,
     )
 
 
@@ -108,6 +110,38 @@ def test_short_protection_stays_quiet_then_promotes_at_800ms() -> None:
     assert promoted.next_deadline is None
 
 
+def test_mapping_fallback_is_silent_until_exact_800ms_boundary() -> None:
+    smoother = ProtectionPresentationSmoother()
+    first = smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED, fallback=True),
+        now=10.0,
+    )
+    before = smoother.resolve(
+        _snapshot(2, ProtectionState.PROTECTED, fallback=True),
+        now=10.799,
+    )
+    promoted = smoother.resolve(
+        _snapshot(3, ProtectionState.PROTECTED, fallback=True),
+        now=10.8,
+    )
+
+    assert first.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+    assert first.snapshot.state is ProtectionState.PROTECTED
+    assert first.snapshot.display_mapping_fallback_active is True
+    assert first.snapshot.indicator_style == "off"
+    assert first.snapshot.protected_display_ids == frozenset({1})
+    assert first.snapshot.ax_blocked is True
+    assert first.overlay_reasons_enabled is False
+    assert first.next_deadline == pytest.approx(10.8)
+    assert before.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+    assert before.snapshot.indicator_style == "off"
+    assert before.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FALLBACK
+    assert promoted.snapshot.indicator_style == "pill"
+    assert promoted.overlay_reasons_enabled is True
+    assert promoted.next_deadline is None
+
+
 @pytest.mark.parametrize("reason", MAPPING_FAILURES)
 def test_mapping_failure_stays_failed_but_promotes_at_800ms(
     reason: ProtectionFailureReason,
@@ -120,10 +154,11 @@ def test_mapping_failure_stays_failed_but_promotes_at_800ms(
     assert first.snapshot.state is ProtectionState.FAILED
     assert first.snapshot.failure_reason is reason
     assert first.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
-    assert first.snapshot.indicator_style == "quiet-shield"
+    assert first.snapshot.indicator_style == "off"
     assert first.overlay_reasons_enabled is False
     assert first.next_deadline == pytest.approx(10.8)
     assert before.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    assert before.snapshot.indicator_style == "off"
     assert promoted.snapshot.state is ProtectionState.FAILED
     assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
     assert promoted.snapshot.indicator_style == "pill"
@@ -131,25 +166,41 @@ def test_mapping_failure_stays_failed_but_promotes_at_800ms(
     assert promoted.next_deadline is None
 
 
-def test_mapping_failure_and_protected_share_one_episode_deadline() -> None:
+def test_normal_fallback_and_mapping_failure_share_one_episode_deadline() -> None:
     smoother = ProtectionPresentationSmoother()
-    failed = smoother.resolve(
-        _failure_snapshot(1, ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED),
+    normal = smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED),
         now=10.0,
     )
-    protected = smoother.resolve(_snapshot(2, ProtectionState.PROTECTED), now=10.4)
-    failed_again = smoother.resolve(
-        _failure_snapshot(3, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED),
+    fallback = smoother.resolve(
+        _snapshot(2, ProtectionState.PROTECTED, fallback=True),
+        now=10.2,
+    )
+    failed = smoother.resolve(
+        _failure_snapshot(3, ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED),
+        now=10.4,
+    )
+    fallback_before = smoother.resolve(
+        _snapshot(4, ProtectionState.PROTECTED, fallback=True),
         now=10.799,
     )
-    promoted = smoother.resolve(_snapshot(4, ProtectionState.PROTECTED), now=10.8)
+    promoted = smoother.resolve(
+        _snapshot(5, ProtectionState.PROTECTED, fallback=True),
+        now=10.8,
+    )
 
+    assert normal.phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert normal.snapshot.indicator_style == "quiet-shield"
+    assert normal.next_deadline == pytest.approx(10.8)
+    assert fallback.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+    assert fallback.snapshot.indicator_style == "off"
+    assert fallback.next_deadline == pytest.approx(10.8)
     assert failed.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
-    assert protected.phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
-    assert protected.next_deadline == pytest.approx(10.8)
-    assert failed_again.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
-    assert failed_again.next_deadline == pytest.approx(10.8)
-    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
+    assert failed.snapshot.indicator_style == "off"
+    assert failed.next_deadline == pytest.approx(10.8)
+    assert fallback_before.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+    assert fallback_before.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FALLBACK
 
 
 def test_sustained_protected_to_mapping_failure_stays_sustained() -> None:
@@ -201,6 +252,43 @@ def test_mapping_failure_clear_pending_holds_failed_until_second_safe() -> None:
         assert held.snapshot.state is ProtectionState.FAILED
         assert held.snapshot.failure_reason is ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED
     assert confirmed.phase is ProtectionPresentationPhase.INACTIVE
+
+
+def test_mapping_fallback_clear_pending_holds_snapshot_and_return_keeps_episode() -> None:
+    smoother = ProtectionPresentationSmoother()
+    fallback = smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED, fallback=True),
+        now=10.0,
+    )
+    first_safe = smoother.resolve(
+        replace(
+            _snapshot(2, ProtectionState.INACTIVE, now=10.1),
+            indicator_placement="bottom-left-inset",
+        ),
+        now=10.1,
+    )
+    returned = smoother.resolve(
+        _failure_snapshot(3, ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED),
+        now=10.2,
+    )
+    promoted = smoother.resolve(
+        _snapshot(4, ProtectionState.PROTECTED, fallback=True),
+        now=10.8,
+    )
+
+    assert first_safe.phase is ProtectionPresentationPhase.CLEAR_PENDING
+    assert first_safe.snapshot.state is ProtectionState.PROTECTED
+    assert first_safe.snapshot.display_mapping_fallback_active is True
+    assert first_safe.snapshot.capture_mode == fallback.snapshot.capture_mode
+    assert first_safe.snapshot.protected_display_ids == fallback.snapshot.protected_display_ids
+    assert first_safe.snapshot.display_reasons == fallback.snapshot.display_reasons
+    assert first_safe.snapshot.window_filterable is False
+    assert first_safe.snapshot.indicator_style == "off"
+    assert first_safe.snapshot.indicator_placement == "bottom-left-inset"
+    assert first_safe.overlay_reasons_enabled is False
+    assert returned.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    assert returned.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FALLBACK
 
 
 @pytest.mark.parametrize("returned", ["protected", "mapping-failure"])
@@ -281,7 +369,11 @@ def test_quiet_and_off_promote_without_inventing_another_visual_style(style: str
 
 def test_pause_bypasses_smoothing() -> None:
     smoother = ProtectionPresentationSmoother()
-    result = smoother.resolve(_snapshot(1, ProtectionState.PAUSED, style="banner"), now=10.0)
+    smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED, fallback=True),
+        now=9.9,
+    )
+    result = smoother.resolve(_snapshot(2, ProtectionState.PAUSED, style="banner"), now=10.0)
     assert result.phase is ProtectionPresentationPhase.BYPASS
     assert result.snapshot.indicator_style == "banner"
     assert result.overlay_reasons_enabled is True
@@ -293,7 +385,11 @@ def test_every_non_allowlisted_failure_bypasses_immediately(
     reason: ProtectionFailureReason,
 ) -> None:
     smoother = ProtectionPresentationSmoother()
-    result = smoother.resolve(_failure_snapshot(1, reason, style="banner"), now=10.0)
+    smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED, fallback=True),
+        now=9.9,
+    )
+    result = smoother.resolve(_failure_snapshot(2, reason, style="banner"), now=10.0)
 
     assert result.phase is ProtectionPresentationPhase.BYPASS
     assert result.snapshot.indicator_style == "banner"
@@ -322,12 +418,17 @@ def test_mapping_failure_with_invalid_diagnostics_guard_bypasses_smoothing() -> 
         cfg,
         inventory,
         paused=False,
-        generation=1,
+        generation=2,
         now=10.0,
         diagnostics_guard_invalid=True,
     )
 
-    result = ProtectionPresentationSmoother().resolve(snapshot, now=10.0)
+    smoother = ProtectionPresentationSmoother()
+    smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED, fallback=True),
+        now=9.9,
+    )
+    result = smoother.resolve(snapshot, now=10.0)
 
     assert snapshot.state is ProtectionState.FAILED
     assert snapshot.failure_reason is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
@@ -372,6 +473,26 @@ def test_mapping_failure_off_stays_off_through_promotion() -> None:
     assert first.overlay_reasons_enabled is False
     assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
     assert promoted.snapshot.indicator_style == "off"
+    assert promoted.overlay_reasons_enabled is False
+
+
+def test_mapping_fallback_configured_off_disables_reasons_through_promotion() -> None:
+    smoother = ProtectionPresentationSmoother()
+    first = smoother.resolve(
+        _snapshot(1, ProtectionState.PROTECTED, style="off", fallback=True),
+        now=10.0,
+    )
+    promoted = smoother.resolve(
+        _snapshot(2, ProtectionState.PROTECTED, style="off", fallback=True),
+        now=10.8,
+    )
+
+    assert first.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+    assert first.snapshot.indicator_style == "off"
+    assert first.overlay_reasons_enabled is False
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FALLBACK
+    assert promoted.snapshot.indicator_style == "off"
+    assert promoted.overlay_reasons_enabled is False
 
 
 def test_transient_style_and_placement_reload_without_resetting_episode() -> None:

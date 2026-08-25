@@ -24,14 +24,48 @@ def _is_smoothed_mapping_failure(snapshot: ProtectionSnapshot) -> bool:
     )
 
 
+def _is_mapping_fallback(snapshot: ProtectionSnapshot) -> bool:
+    return (
+        snapshot.state is ProtectionState.PROTECTED
+        and snapshot.display_mapping_fallback_active
+    )
+
+
 class ProtectionPresentationPhase(StrEnum):
     INACTIVE = "inactive"
     TRANSIENT_PROTECTED = "transient-protected"
     SUSTAINED_PROTECTED = "sustained-protected"
+    TRANSIENT_MAPPING_FALLBACK = "transient-mapping-fallback"
+    SUSTAINED_MAPPING_FALLBACK = "sustained-mapping-fallback"
     TRANSIENT_MAPPING_FAILURE = "transient-mapping-failure"
     SUSTAINED_MAPPING_FAILURE = "sustained-mapping-failure"
     CLEAR_PENDING = "clear-pending"
     BYPASS = "bypass"
+
+
+def _risk_phase(
+    *,
+    promoted: bool,
+    mapping_fallback: bool,
+    mapping_failure: bool,
+) -> ProtectionPresentationPhase:
+    if mapping_fallback:
+        return (
+            ProtectionPresentationPhase.SUSTAINED_MAPPING_FALLBACK
+            if promoted
+            else ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+        )
+    if mapping_failure:
+        return (
+            ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+            if promoted
+            else ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+        )
+    return (
+        ProtectionPresentationPhase.SUSTAINED_PROTECTED
+        if promoted
+        else ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    )
 
 
 class ProtectionSmoothingError(RuntimeError):
@@ -89,6 +123,7 @@ class ProtectionPresentationSmoother:
         self._last_generation = raw_snapshot.generation
 
         mapping_failure = _is_smoothed_mapping_failure(raw_snapshot)
+        mapping_fallback = _is_mapping_fallback(raw_snapshot)
         risk_active = raw_snapshot.state is ProtectionState.PROTECTED or mapping_failure
         hard_bypass = raw_snapshot.state is ProtectionState.PAUSED or (
             raw_snapshot.state is ProtectionState.FAILED and not mapping_failure
@@ -111,24 +146,18 @@ class ProtectionPresentationSmoother:
             effective_style = raw_snapshot.indicator_style
             reasons_enabled = promoted and effective_style != "off"
             if not promoted and effective_style != "off":
-                effective_style = "quiet-shield"
+                effective_style = (
+                    "off" if mapping_fallback or mapping_failure else "quiet-shield"
+                )
             effective = replace(raw_snapshot, indicator_style=effective_style)
             self._last_effective_risk = effective
             self._last_overlay_reasons_enabled = reasons_enabled
             return ProtectionPresentationResult(
                 snapshot=effective,
-                phase=(
-                    (
-                        ProtectionPresentationPhase.SUSTAINED_PROTECTED
-                        if raw_snapshot.state is ProtectionState.PROTECTED
-                        else ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
-                    )
-                    if promoted
-                    else (
-                        ProtectionPresentationPhase.TRANSIENT_PROTECTED
-                        if raw_snapshot.state is ProtectionState.PROTECTED
-                        else ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
-                    )
+                phase=_risk_phase(
+                    promoted=promoted,
+                    mapping_fallback=mapping_fallback,
+                    mapping_failure=mapping_failure,
                 ),
                 next_deadline=(
                     None
