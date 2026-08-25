@@ -234,10 +234,14 @@ overlay rather than showing a transient shield. Mapping `failed` and normal
 Space gestures, thumbnails, and animations cannot restart the 800ms timer by
 alternating those states.
 
-All non-allowlisted failures, including inventory/display/pause/diagnostics and
-presentation-state failures, immediately bypass smoothing and show the
-configured failure presentation with reasons enabled. Future failure reasons
-also bypass by default; `paused` does the same.
+All non-allowlisted `failed` decisions immediately bypass smoothing. Their
+presentation result enables reasons and has no smoothing deadline. The monitor
+renders the configured full failure presentation only when the existing
+`failure_requires_fail_closed()` policy requires fail-closed. Legacy fail-open
+clears the overlay and preserves its existing capture policy. Inventory,
+display, pause, diagnostics, presentation-state, and future failure reasons
+remain hard-bypass by default without implying an unconditional visible
+warning. `paused` also bypasses smoothing.
 
 After the first safe inventory, the app remains in clear-pending and retains
 the last effective risk decision, including an allowlisted effective `failed`

@@ -173,10 +173,14 @@ override that policy. Transitions between normal `protected` and either
 allowlisted mapping failure keep one 800ms deadline; changing state or mapping
 failure reason does not restart the timer.
 
-Every other failure is outside the allowlist and immediately bypasses visual
-smoothing with the configured failure presentation and reasons enabled. This
-includes inventory/display/pause/diagnostics/presentation-state failures and
-any future failure reason by default. `paused` also bypasses smoothing.
+Every other `failed` decision is outside the allowlist and immediately bypasses
+visual smoothing. Its presentation result enables reasons and has no smoothing
+deadline. The monitor renders the configured full failure presentation only
+when the existing `failure_requires_fail_closed()` policy requires fail-closed.
+Legacy fail-open clears the overlay and preserves its existing capture policy.
+Inventory/display/pause/diagnostics/presentation-state failures and any future
+failure reason remain hard-bypass by default without implying an unconditional
+visible warning. `paused` also bypasses smoothing.
 
 The first safe inventory after a risk episode enters clear-pending and keeps
 the last effective risk decision, whether it was `protected` or an allowlisted
