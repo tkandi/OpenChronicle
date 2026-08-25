@@ -336,7 +336,8 @@ def build_protection_snapshot(
         if (window_id := _usable_window_id(window.window_id)) is not None
     )
     display_mapping_fallback_active = any(
-        used_fallback for _window, _matches, used_fallback in direct_window_matches
+        used_fallback
+        for _window, _matches, _mapped_display_ids, used_fallback in sensitive_window_mappings
     )
     window_filterable = (
         state is ProtectionState.PROTECTED

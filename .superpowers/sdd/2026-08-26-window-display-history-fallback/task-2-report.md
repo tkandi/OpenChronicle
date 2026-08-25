@@ -67,3 +67,52 @@ restored with `apply_patch`.
 History is used solely as a per-current-display fallback after geometry has no
 positive intersection. It neither turns no-history windows into protection nor
 authorizes window-level filtering from historical positions.
+
+## Fix Round 1
+
+Addressed both Important findings from `task-2-review.md` with test-first
+changes limited to the snapshot builder and its focused test module.
+
+### Fallback Category and Filtering Boundaries
+
+- `display_mapping_fallback_active` now aggregates fallback use across every
+  sensitive mapping, including `WINDOW_TITLE_UNKNOWN`; direct-window matches
+  remain limited to rule types that can safely produce window IDs, regions, and
+  filtered-capture eligibility.
+- A title-unavailable window protected from display history now reports its
+  `WINDOW_TITLE_UNKNOWN` reason on the historical display, sets the fallback
+  flag, and remains non-filterable.
+- An active window with multi-display history contributes all historical
+  displays as candidates when no actual intersection exists, preserving
+  conservative AX blocking.
+- A mixed actual/direct and history/direct sensitive inventory disables
+  filtering for the entire snapshot, while the existing actual-only direct
+  regression continues to permit filtering where the prior policy allows it.
+
+### TDD and Verification
+
+The three new behavioral tests were added before the production correction.
+The initial focused run failed only at the intended title-unknown boundary:
+`1 failed, 61 passed`, because the category flag was falsely `False`.
+After the minimal aggregation change:
+
+- `PYTHONPATH=src uv run pytest -q tests/test_protection.py`
+  - `62 passed`.
+- `PYTHONPATH=src uv run pytest -q tests/test_protection.py tests/test_protection_reason.py`
+  - `68 passed`.
+- `uv run ruff check src/openchronicle/capture/protection.py tests/test_protection.py`
+  - passed.
+- `git diff --check`
+  - passed.
+
+### Revised Mutation Checks
+
+Each temporary mutation failed its named behavioral test and was restored with
+`apply_patch`:
+
+- Revert fallback-category aggregation to direct-window matches: killed by the
+  title-unknown history regression.
+- Delete the multi-display active fallback candidate assignment: killed by the
+  active-window conservative-candidate regression.
+- Replace fallback aggregation `any(...)` with `all(...)`: killed by the mixed
+  actual/history direct-window filtering regression.

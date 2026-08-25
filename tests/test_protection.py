@@ -1204,3 +1204,99 @@ def test_invalid_diagnostics_guard_stays_failed_with_sensitive_display_history()
     assert snapshot.diagnostics_guard_invalid is True
     assert snapshot.display_mapping_fallback_active is True
     assert snapshot.window_filterable is False
+
+
+def test_title_unknown_display_history_marks_fallback_protection() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "",
+                ScreenRegion(300, 0, 80, 90),
+                title_available=False,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=23,
+        now=26.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({1})
+    assert snapshot.display_mapping_fallback_active is True
+    assert snapshot.window_filterable is False
+    assert [reason.code for reason in snapshot.reasons_for_display(1)] == [
+        ProtectionReasonCode.WINDOW_TITLE_UNKNOWN
+    ]
+
+
+def test_active_window_multi_display_history_remains_a_conservative_candidate() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "InPrivate", ScreenRegion(110, 0, 80, 90)),
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(300, 0, 80, 90),
+                is_active=True,
+                fallback_display_ids=frozenset({1, 2}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=24,
+        now=27.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({2})
+    assert snapshot.active_display_id is None
+    assert snapshot.active_candidate_display_ids == frozenset({1, 2})
+    assert snapshot.ax_blocked is True
+
+
+def test_mixed_actual_and_history_direct_windows_disable_filtering() -> None:
+    actual_region = ScreenRegion(110, 0, 80, 90)
+    historical_region = ScreenRegion(300, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "InPrivate", actual_region, window_id=73),
+            VisibleWindow(
+                "Passwords",
+                "com.apple.Passwords",
+                "Passwords",
+                historical_region,
+                window_id=74,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_app_names=["Edge", "Passwords"]),
+        inventory,
+        paused=False,
+        generation=25,
+        now=28.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.protected_window_ids == frozenset({73, 74})
+    assert snapshot.display_mapping_fallback_active is True
+    assert snapshot.window_filterable is False
