@@ -316,7 +316,7 @@ class PrivacyProtectionMonitor:
                     )
                 diagnostic_display_ids = diagnostics_guard.display_ids
                 diagnostics_guard_invalid = diagnostics_guard.fail_closed_all
-                if inventory is not None:
+                if inventory is not None and failure_reason is None:
                     try:
                         inventory = self._resolve_window_display_history(
                             inventory,

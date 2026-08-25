@@ -123,6 +123,19 @@ class FakeMonotonic:
         self.value += seconds
 
 
+class AdvancingMonotonic:
+    def __init__(self, value: float = 10.0, step: float = 0.1) -> None:
+        self.value = value
+        self.step = step
+        self.calls = 0
+
+    def __call__(self) -> float:
+        current = self.value
+        self.value += self.step
+        self.calls += 1
+        return current
+
+
 class WaitTrackingEvent:
     def __init__(self) -> None:
         self._event = threading.Event()
@@ -289,7 +302,7 @@ def test_monitor_uses_injected_clock_for_snapshot_and_cache_freshness(
 def test_monitor_resolves_mapped_window_history_before_snapshot_with_same_clock(
     fake_overlay,
 ) -> None:
-    clock = FakeMonotonic(10.0)
+    clock = AdvancingMonotonic(10.0)
     current_inventory = _history_inventory(ScreenRegion(10, 0, 80, 90))
     history = RecordingWindowDisplayHistory()
     monitor = make_monitor(
@@ -300,10 +313,9 @@ def test_monitor_resolves_mapped_window_history_before_snapshot_with_same_clock(
         window_display_history=history,
     )
 
-    first = monitor.decision_for_capture(force=True)
+    first = monitor._refresh()
     current_inventory = _history_inventory(ScreenRegion(300, 0, 80, 90))
-    clock.advance(0.1)
-    fallback = monitor.decision_for_capture(force=True)
+    fallback = monitor._refresh()
 
     assert first.snapshot.state is ProtectionState.PROTECTED
     assert fallback.raw_state is ProtectionState.PROTECTED
@@ -317,6 +329,82 @@ def test_monitor_resolves_mapped_window_history_before_snapshot_with_same_clock(
         first.snapshot.created_monotonic,
         fallback.snapshot.created_monotonic,
     ]
+    assert history.resolve_times == [10.0, 10.1]
+    assert clock.calls == 2
+
+
+def test_failed_inventory_with_mapped_window_cannot_seed_history(
+    fake_overlay,
+) -> None:
+    clock = FakeMonotonic(10.0)
+    mapped = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    unmapped = _history_inventory(ScreenRegion(300, 0, 80, 90))
+    readings = iter(
+        [
+            InventoryReadResult(mapped, ProtectionFailureReason.HELPER_EXIT),
+            unmapped,
+        ]
+    )
+    history = RecordingWindowDisplayHistory()
+    monitor = make_monitor(
+        inventory=mapped,
+        overlay=fake_overlay,
+        inventory_reader=lambda: next(readings),
+        monotonic=clock,
+        window_display_history=history,
+    )
+
+    failed = monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    after_failure = monitor.decision_for_capture(force=True)
+
+    assert failed.snapshot.state is ProtectionState.FAILED
+    assert failed.snapshot.failure_reason is ProtectionFailureReason.HELPER_EXIT
+    assert after_failure.snapshot.state is ProtectionState.FAILED
+    assert (
+        after_failure.snapshot.failure_reason
+        is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+    )
+    assert after_failure.snapshot.display_mapping_fallback_active is False
+    assert after_failure.snapshot.protected_display_ids == frozenset()
+    assert history.resolve_times == [10.1]
+
+
+def test_failed_inventory_cannot_replace_existing_trusted_history(
+    fake_overlay,
+) -> None:
+    clock = FakeMonotonic(10.0)
+    mapped_display_1 = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    failed_mapped_display_2 = _history_inventory(ScreenRegion(110, 0, 80, 90))
+    unmapped = _history_inventory(ScreenRegion(300, 0, 80, 90))
+    current_result: WindowInventory | InventoryReadResult = mapped_display_1
+    history = RecordingWindowDisplayHistory()
+    monitor = make_monitor(
+        inventory=mapped_display_1,
+        overlay=fake_overlay,
+        inventory_reader=lambda: current_result,
+        monotonic=clock,
+        window_display_history=history,
+    )
+
+    monitor.decision_for_capture(force=True)
+    current_result = InventoryReadResult(
+        failed_mapped_display_2,
+        ProtectionFailureReason.HELPER_EXIT,
+    )
+    clock.advance(0.1)
+    failed = monitor.decision_for_capture(force=True)
+    current_result = unmapped
+    clock.advance(0.1)
+    fallback = monitor.decision_for_capture(force=True)
+
+    assert failed.snapshot.state is ProtectionState.FAILED
+    assert failed.snapshot.failure_reason is ProtectionFailureReason.HELPER_EXIT
+    assert fallback.snapshot.state is ProtectionState.PROTECTED
+    assert fallback.snapshot.protected_display_ids == frozenset({1})
+    assert fallback.snapshot.display_mapping_fallback_active is True
+    assert 2 not in fallback.snapshot.protected_display_ids
+    assert history.resolve_times == [10.0, 10.2]
 
 
 @pytest.mark.parametrize(
@@ -485,6 +573,36 @@ def test_history_error_is_reset_and_published_as_sanitized_hard_failure(
     assert "WindowDisplayHistoryError" in rendered
 
 
+def test_unexpected_history_exception_propagates_without_conversion(
+    inventory,
+    fake_overlay,
+) -> None:
+    marker = "unexpected-history-error"
+
+    class UnexpectedHistory(RecordingWindowDisplayHistory):
+        def resolve(
+            self,
+            _inventory: WindowInventory,
+            *,
+            now: float,
+        ) -> WindowInventory:
+            raise ValueError(marker)
+
+    history = UnexpectedHistory()
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        window_display_history=history,
+    )
+
+    with pytest.raises(ValueError, match=marker):
+        monitor.decision_for_capture(force=True)
+
+    assert history.reset_calls == 0
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_calls == 0
+
+
 def test_stop_resets_history_and_never_publishes_another_decision(
     inventory,
     fake_overlay,
@@ -507,6 +625,66 @@ def test_stop_resets_history_and_never_publishes_another_decision(
     with pytest.raises(RuntimeError, match="stopped"):
         monitor.decision_for_capture(force=True)
     assert len(decisions) == 1
+
+
+def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
+    inventory,
+    fake_overlay,
+) -> None:
+    resolve_entered = threading.Event()
+    release_resolve = threading.Event()
+    stop_finished = threading.Event()
+
+    class BlockingHistory(RecordingWindowDisplayHistory):
+        def resolve(
+            self,
+            inventory: WindowInventory,
+            *,
+            now: float,
+        ) -> WindowInventory:
+            resolve_entered.set()
+            assert release_resolve.wait(timeout=1.0)
+            return super().resolve(inventory, now=now)
+
+    history = BlockingHistory()
+    decisions: list[ProtectionDecision] = []
+    refresh_errors: list[BaseException] = []
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=decisions.append,
+        window_display_history=history,
+    )
+
+    def refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=refresh)
+    refresh_thread.start()
+    assert resolve_entered.wait(timeout=0.5)
+    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+    stop_thread.start()
+    try:
+        assert stop_finished.wait(timeout=0.05) is False
+        assert decisions == []
+    finally:
+        release_resolve.set()
+        refresh_thread.join(timeout=1.0)
+        stop_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert stop_finished.is_set()
+    assert refresh_errors and isinstance(refresh_errors[0], RuntimeError)
+    assert "stopped" in str(refresh_errors[0])
+    assert decisions == []
+    assert fake_overlay.snapshots == []
+    assert history.reset_calls >= 1
+    assert history._entries == {}
+    assert history._previous_now is None
 
 
 def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
@@ -1240,6 +1418,48 @@ def test_transient_and_sustained_use_latest_hot_loaded_style_and_position(
     assert transient.snapshot.indicator_style == "quiet-shield"
     assert transient.snapshot.indicator_placement == "bottom-right-work-area"
     assert sustained.snapshot.indicator_style == "border"
+
+
+def test_indicator_hot_reload_preserves_trusted_window_display_history(
+    tmp_path,
+    fake_overlay,
+) -> None:
+    config_path = tmp_path / "config.toml"
+    config_path.write_text(
+        '[capture]\nprivacy_indicator_style="pill"\n'
+        'privacy_indicator_placement="bottom-left-flush"\n'
+    )
+    current_inventory = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    clock = FakeMonotonic(10.0)
+    monitor = make_monitor(
+        config_path=config_path,
+        inventory=current_inventory,
+        inventory_reader=lambda: current_inventory,
+        overlay=fake_overlay,
+        monotonic=clock,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
+    )
+
+    seeded = monitor.decision_for_capture(force=True)
+    old_mtime = config_path.stat().st_mtime_ns
+    config_path.write_text(
+        '[capture]\nprivacy_indicator_style="border"\n'
+        'privacy_indicator_placement="bottom-right-work-area"\n'
+    )
+    os.utime(config_path, ns=(old_mtime + 1, old_mtime + 1))
+    current_inventory = _history_inventory(ScreenRegion(300, 0, 80, 90))
+    clock.advance(0.1)
+    fallback = monitor.decision_for_capture(force=True)
+
+    assert seeded.snapshot.protected_display_ids == frozenset({1})
+    assert seeded.snapshot.display_mapping_fallback_active is False
+    assert fallback.snapshot.state is ProtectionState.PROTECTED
+    assert fallback.snapshot.failure_reason is None
+    assert fallback.snapshot.protected_display_ids == frozenset({1})
+    assert fallback.snapshot.display_mapping_fallback_active is True
+    assert fallback.snapshot.window_filterable is False
+    assert fallback.snapshot.indicator_style == "border"
+    assert fallback.snapshot.indicator_placement == "bottom-right-work-area"
 
 
 def test_style_reload_retries_a_recovered_config_with_unchanged_mtime(tmp_path, inventory, fake_overlay) -> None:
