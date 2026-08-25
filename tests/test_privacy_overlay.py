@@ -29,9 +29,14 @@ from openchronicle.capture.protection_reason import (
 
 
 class FakeTransport:
-    def __init__(self, *responses: bool) -> None:
+    def __init__(
+        self,
+        *responses: bool,
+        window_ids: tuple[int, ...] = (),
+    ) -> None:
         self.writes: list[str] = []
         self.responses = list(responses)
+        self.window_ids = window_ids
         self.closed = False
 
     def send_and_wait(
@@ -43,7 +48,7 @@ class FakeTransport:
             generation=generation,
             rendered=rendered,
             error=None if rendered else "test-error",
-            window_ids=(),
+            window_ids=self.window_ids,
         )
 
     def close(self) -> None:
@@ -603,6 +608,42 @@ def test_off_style_does_not_start_a_transport(snapshot: ProtectionSnapshot) -> N
     assert client.render(off) is True
     assert client.confirmed_window_ids(off.generation) == ()
     assert starts == 0
+
+
+def test_off_style_discards_active_transport_without_starting_replacement(
+    snapshot: ProtectionSnapshot,
+) -> None:
+    visible_transport = FakeTransport(True, window_ids=(7, 41))
+    replacement_transport = FakeTransport(True)
+    transports = (visible_transport, replacement_transport)
+    starts = 0
+
+    def factory() -> FakeTransport:
+        nonlocal starts
+        transport = transports[starts]
+        starts += 1
+        return transport
+
+    client = PrivacyOverlayClient(transport_factory=factory)
+    assert client.render(snapshot) is True
+    assert starts == 1
+    assert client.confirmed_window_ids(snapshot.generation) == (7, 41)
+
+    off = replace(
+        snapshot,
+        generation=snapshot.generation + 1,
+        indicator_style="off",
+    )
+    assert client.render(off) is True
+
+    assert visible_transport.closed is True
+    assert len(visible_transport.writes) == 1
+    assert starts == 1
+    assert replacement_transport.closed is False
+    assert client._transport is None
+    assert client._confirmed_generation == off.generation
+    assert client.confirmed_window_ids(snapshot.generation) == ()
+    assert client.confirmed_window_ids(off.generation) == ()
 
 
 def test_closed_client_never_restarts_a_transport(snapshot: ProtectionSnapshot) -> None:

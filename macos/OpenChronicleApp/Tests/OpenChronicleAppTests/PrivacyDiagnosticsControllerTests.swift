@@ -931,6 +931,52 @@ final class ProtectionDiagnosticsWireTests: XCTestCase {
     XCTAssertEqual(snapshot.presentationDeadlineMonotonic, 10.8)
   }
 
+  func testDecodesFalseMappingFallbackAndPreservesItAcrossSchemaV1Copies() throws {
+    let data = Data(
+      #"{"schema_version":1,"type":"snapshot","generation":43,"state":"protected","display_mapping_fallback_active":false,"indicator_confirmed":true,"diagnostics_guard_active":false,"created_at":"2026-08-22T04:05:07Z","reasons":[],"displays":[]}"#.utf8
+    )
+
+    let message = try JSONDecoder().decode(ProtectionDiagnosticsWireMessage.self, from: data)
+    guard case .snapshot(let snapshot) = message else {
+      return XCTFail("Expected snapshot message")
+    }
+    XCTAssertEqual(snapshot.displayMappingFallbackActive, false)
+    XCTAssertEqual(snapshot.categoryOnly().displayMappingFallbackActive, false)
+    XCTAssertEqual(snapshot.sanitizedForPublication().displayMappingFallbackActive, false)
+
+    let encoded = try JSONEncoder().encode(message)
+    let encodedObject = try XCTUnwrap(
+      JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+    )
+    XCTAssertEqual(encodedObject["schema_version"] as? Int, 1)
+    XCTAssertEqual(
+      (encodedObject["display_mapping_fallback_active"] as? NSNumber)?.boolValue,
+      false
+    )
+    let roundTrip = try JSONDecoder().decode(
+      ProtectionDiagnosticsWireMessage.self,
+      from: encoded
+    )
+    guard case .snapshot(let roundTripSnapshot) = roundTrip else {
+      return XCTFail("Expected round-trip snapshot message")
+    }
+    XCTAssertEqual(roundTripSnapshot.displayMappingFallbackActive, false)
+  }
+
+  func testDecodesExplicitNullMappingFallbackAsNil() throws {
+    let data = Data(
+      #"{"schema_version":1,"type":"snapshot","generation":44,"state":"protected","display_mapping_fallback_active":null,"indicator_confirmed":true,"diagnostics_guard_active":false,"created_at":"2026-08-22T04:05:08Z","reasons":[],"displays":[]}"#.utf8
+    )
+
+    let message = try JSONDecoder().decode(ProtectionDiagnosticsWireMessage.self, from: data)
+    guard case .snapshot(let snapshot) = message else {
+      return XCTFail("Expected snapshot message")
+    }
+    XCTAssertNil(snapshot.displayMappingFallbackActive)
+    XCTAssertNil(snapshot.categoryOnly().displayMappingFallbackActive)
+    XCTAssertNil(snapshot.sanitizedForPublication().displayMappingFallbackActive)
+  }
+
   func testDecodesLeaseAndErrorMessageVariants() throws {
     let lease = try JSONDecoder().decode(
       ProtectionDiagnosticsWireMessage.self,
