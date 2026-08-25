@@ -943,7 +943,7 @@ def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory,
 
 
 def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
-    inventory, fake_overlay, caplog
+    inventory, fake_overlay
 ) -> None:
     app_marker = "private-app-value"
     bundle_marker = "private-bundle-value"
@@ -1000,9 +1000,19 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
         pause_reader=lambda: False,
         smoother=smoother,  # type: ignore[arg-type]
     )
-    with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
         first = monitor.decision_for_capture(force=True)
         second = monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
 
     for decision in (first, second):
         assert decision.snapshot.state is ProtectionState.FAILED
@@ -1031,15 +1041,10 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
     with monitor._state_lock:
         assert monitor._next_smoothing_deadline is None
 
-    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    rendered = "\n".join(messages)
     for marker in private_markers:
         assert marker not in rendered
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno >= logging.WARNING
-    ]
-    assert warnings == [
+    assert messages == [
         "privacy protection smoothing failed: ProtectionSmoothingError",
         "privacy protection failed closed: reason=presentation_state_invalid",
         "privacy protection smoothing failed: ProtectionSmoothingError",
@@ -1597,7 +1602,6 @@ def test_stop_signals_terminal_before_draining_terminal_dependent_helper(
 
 def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
     inventory,
-    caplog,
 ) -> None:
     render_started = threading.Event()
     release_render = threading.Event()
@@ -1653,7 +1657,14 @@ def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
         stop_elapsed.append(time.monotonic() - started)
         stop_finished.set()
 
-    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+    messages: list[str] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    original_propagate = capture_logger.propagate
+    capture_logger.addHandler(handler)
+    capture_logger.propagate = False
+    try:
         stop_thread = threading.Thread(target=stop_monitor)
         stop_thread.start()
         try:
@@ -1665,6 +1676,9 @@ def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
             release_render.set()
             refresh_thread.join(timeout=1.0)
             stop_thread.join(timeout=1.0)
+    finally:
+        capture_logger.removeHandler(handler)
+        capture_logger.propagate = original_propagate
 
     assert overlay.closed.wait(timeout=0.5)
     assert close_thread_ids == helper_thread_ids
@@ -1672,7 +1686,7 @@ def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
     monitor.stop()
     assert overlay.close_calls == 1
     assert refresh_errors and "stopped" in str(refresh_errors[0])
-    assert [record.getMessage() for record in caplog.records] == [
+    assert messages == [
         "privacy protection indicator drain timed out: category=overlay_call_in_flight"
     ]
 
