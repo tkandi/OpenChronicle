@@ -1,7 +1,7 @@
 # 映射失败保护标识平滑设计
 
 日期：2026-08-25
-状态：已实现，等待最终实机复验
+状态：已实现，等待最后跨状态实机复验
 
 ## 背景
 
@@ -221,11 +221,12 @@ PROTECTED 或 allowlisted FAILED，但不能保存 paused、硬故障或 inactiv
 ## 验证证据
 
 - 状态标记后的完整门禁：Python `603 passed in 56.99s`；Swift App `89 tests, 0 failures`（3.794s）；证据文档编辑前 tracked worktree clean。
-- 同一确认流中，gen114 在 observer-relative 67343ms 为 transient mapping failure（quiet/reasons false、两屏 blocked）；gen115 在 68104ms 恢复 transient protected（仍 quiet/reasons false）；gen116 在 68186ms 升级 sustained protected（pill/reasons true）。gen114 -> gen116 为 843ms，gen115 -> gen116 仅 82ms，直接证明 FAILED -> PROTECTED 未重启 episode timer。gen126（72659ms transient）与 gen130（73423ms sustained）仅作第二序列佐证，不以 subscriber delta 断言精确阈值。
+- gen114-116 的 observer receipt 流仍证明 transient/恢复/升级 category 行为，但 observer 时间不再用于主张 FAILED -> PROTECTED 的 source-deadline continuity；该最后跨状态实机复验仍待完成。
 - 快速 Space 的五个独立 episode（gen152、171、176、182、196）均在 transient mapping failure 时保持 quiet/reasons false，未使用配置 pill；当前安装的跨屏移动中，gen1404 同时保护 display1/display4，gen1405 仅 display4 保护且 AX blocked，gen1414 在 display4 clear-pending，gen1416 两屏 inactive。
 - raw inactive clear-pending 后，重复实机尝试未能在 200ms 内诱发任何 raw risk state；自动化 monitor 测试覆盖返回 PROTECTED 与返回 allowlisted mapping FAILED 两种有效取消路径。
 - 当前安装的两个 capture JSON 仅以字段存在性检查：`2026-08-25T20-43-42p08-00.json`、`2026-08-25T20-46-17p08-00.json` 均为 `ax_skipped=protected_display`，且仅 monitor index 2 有 image presence；未解码或显示 base64/text/content。
 - 本轮为 deadline 的直接 source-time 可观测性增加 schema-v1 category 字段；自动化已覆盖 transient、FAILED -> PROTECTED 保持 deadline、promotion null、旧/新 Swift payload 兼容和非有限值 null，最终安装/实机复验待完成。
+- 直接 source-time 已确认三次 +0.8s transient deadline 与 deadline 后 promotion：gen534 为 530175.144708625 -> 530175.9447086251（+0.8000000001s），gen535 在 530175.945136791 后 deadline null；gen630 为 530279.504487416 -> 530280.304487416（+0.8s），gen631 在 530280.306086166 后 promotion；gen677 为 530330.034808083 -> 530330.834808083（+0.8s），gen680 在 530330.840057 后 promotion。gen539 clear-pending 为 530180.380178958 -> 530180.5801789579（+0.2s），gen540 在 530180.585507833 后 inactive。仅记录 monotonic/deadline/category 字段；synthetic TextEdit 仍为 `sensitive_window_unmapped`，故不主张跨状态 source continuity。
 
 ## 验收标准
 
