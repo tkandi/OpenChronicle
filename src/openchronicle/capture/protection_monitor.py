@@ -54,6 +54,7 @@ class ProtectionDecision:
     indicator_confirmed: bool
     covered_request_epoch: int = 0
     indicator_window_ids: tuple[int, ...] = ()
+    raw_state: ProtectionState | None = field(default=None, kw_only=True)
     presentation_phase: ProtectionPresentationPhase = field(
         default=ProtectionPresentationPhase.BYPASS,
         kw_only=True,
@@ -329,11 +330,13 @@ class PrivacyProtectionMonitor:
                 phase = ProtectionPresentationPhase.BYPASS
                 overlay_reasons_enabled = True
                 next_smoothing_deadline = None
+                raw_state = ProtectionState.FAILED
             else:
                 snapshot = result.snapshot
                 phase = result.phase
                 overlay_reasons_enabled = result.overlay_reasons_enabled
                 next_smoothing_deadline = result.next_deadline
+                raw_state = raw_snapshot.state
             self._log_failure_transition(snapshot)
             self._raise_if_stopped()
             rendered = self._render(
@@ -367,6 +370,7 @@ class PrivacyProtectionMonitor:
                 indicator_confirmed,
                 covered_request_epoch=covered_request_epoch,
                 indicator_window_ids=indicator_window_ids,
+                raw_state=raw_state,
                 presentation_phase=phase,
                 overlay_reasons_enabled=overlay_reasons_enabled,
             )

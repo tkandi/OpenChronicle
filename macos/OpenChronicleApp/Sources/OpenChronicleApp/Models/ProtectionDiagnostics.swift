@@ -251,6 +251,10 @@ struct ProtectionDisplayDiagnostic: Codable, Equatable {
 struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
   let generation: Int
   let state: ProtectionDiagnosticState
+  let rawState: ProtectionDiagnosticState?
+  let presentationPhase: String?
+  let indicatorStyle: String?
+  let overlayReasonsEnabled: Bool?
   let indicatorConfirmed: Bool
   let diagnosticsGuardActive: Bool
   let createdAt: Date
@@ -260,6 +264,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
   init(
     generation: Int,
     state: ProtectionDiagnosticState,
+    rawState: ProtectionDiagnosticState? = nil,
+    presentationPhase: String? = nil,
+    indicatorStyle: String? = nil,
+    overlayReasonsEnabled: Bool? = nil,
     indicatorConfirmed: Bool,
     diagnosticsGuardActive: Bool,
     createdAt: Date,
@@ -268,6 +276,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
   ) {
     self.generation = generation
     self.state = state
+    self.rawState = rawState
+    self.presentationPhase = presentationPhase
+    self.indicatorStyle = indicatorStyle
+    self.overlayReasonsEnabled = overlayReasonsEnabled
     self.indicatorConfirmed = indicatorConfirmed
     self.diagnosticsGuardActive = diagnosticsGuardActive
     self.createdAt = createdAt
@@ -280,6 +292,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
   enum CodingKeys: String, CodingKey {
     case generation
     case state
+    case rawState = "raw_state"
+    case presentationPhase = "presentation_phase"
+    case indicatorStyle = "indicator_style"
+    case overlayReasonsEnabled = "overlay_reasons_enabled"
     case indicatorConfirmed = "indicator_confirmed"
     case diagnosticsGuardActive = "diagnostics_guard_active"
     case createdAt = "created_at"
@@ -298,6 +314,19 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       )
     }
     let decodedState = try container.decode(ProtectionDiagnosticState.self, forKey: .state)
+    let decodedRawState = try container.decodeIfPresent(
+      ProtectionDiagnosticState.self,
+      forKey: .rawState
+    )
+    let decodedPresentationPhase = try container.decodeIfPresent(
+      String.self,
+      forKey: .presentationPhase
+    )
+    let decodedIndicatorStyle = try container.decodeIfPresent(String.self, forKey: .indicatorStyle)
+    let decodedOverlayReasonsEnabled = try container.decodeIfPresent(
+      Bool.self,
+      forKey: .overlayReasonsEnabled
+    )
     let decodedIndicatorConfirmed = try container.decode(Bool.self, forKey: .indicatorConfirmed)
     let decodedDiagnosticsGuardActive = try container.decode(
       Bool.self,
@@ -315,6 +344,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     let wireDisplays = try container.decode([ProtectionDisplayDiagnostic].self, forKey: .displays)
     generation = decodedGeneration
     state = decodedState
+    rawState = decodedRawState
+    presentationPhase = decodedPresentationPhase
+    indicatorStyle = decodedIndicatorStyle
+    overlayReasonsEnabled = decodedOverlayReasonsEnabled
     indicatorConfirmed = decodedIndicatorConfirmed
     diagnosticsGuardActive = decodedDiagnosticsGuardActive
     createdAt = decodedCreatedAt
@@ -328,6 +361,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     var container = encoder.container(keyedBy: CodingKeys.self)
     try container.encode(generation, forKey: .generation)
     try container.encode(state, forKey: .state)
+    try container.encodeIfPresent(rawState, forKey: .rawState)
+    try container.encodeIfPresent(presentationPhase, forKey: .presentationPhase)
+    try container.encodeIfPresent(indicatorStyle, forKey: .indicatorStyle)
+    try container.encodeIfPresent(overlayReasonsEnabled, forKey: .overlayReasonsEnabled)
     try container.encode(indicatorConfirmed, forKey: .indicatorConfirmed)
     try container.encode(diagnosticsGuardActive, forKey: .diagnosticsGuardActive)
     try container.encode(ProtectionDiagnosticsDateCodec.encode(createdAt), forKey: .createdAt)
@@ -339,6 +376,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     ProtectionDiagnosticsSnapshot(
       generation: generation,
       state: state,
+      rawState: rawState,
+      presentationPhase: presentationPhase,
+      indicatorStyle: indicatorStyle,
+      overlayReasonsEnabled: overlayReasonsEnabled,
       indicatorConfirmed: indicatorConfirmed,
       diagnosticsGuardActive: diagnosticsGuardActive,
       createdAt: createdAt,
@@ -351,6 +392,10 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     ProtectionDiagnosticsSnapshot(
       generation: generation,
       state: state,
+      rawState: rawState,
+      presentationPhase: presentationPhase,
+      indicatorStyle: indicatorStyle,
+      overlayReasonsEnabled: overlayReasonsEnabled,
       indicatorConfirmed: indicatorConfirmed,
       diagnosticsGuardActive: diagnosticsGuardActive,
       createdAt: createdAt,

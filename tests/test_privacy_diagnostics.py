@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime
 from io import BufferedReader
 from pathlib import Path
@@ -43,6 +44,7 @@ from openchronicle.capture.protection_reason import (
     ProtectionReason,
     ProtectionReasonCode,
 )
+from openchronicle.capture.protection_smoothing import ProtectionPresentationPhase
 from openchronicle.config import CaptureConfig
 
 _MAX_LINE_BYTES = 64 * 1024
@@ -246,6 +248,31 @@ def test_category_subscription_never_contains_exact_values(tmp_path: Path) -> No
         assert response["displays"][0]["reasons"] == [
             {"code": "window_title_rule", "display_id": 2}
         ]
+        assert marker not in json.dumps(response)
+    finally:
+        _stop_test_server(server)
+
+
+def test_category_snapshot_exposes_safe_presentation_fields(tmp_path: Path) -> None:
+    marker = "private-window-title"
+    effective = _private_decision(marker).snapshot
+    decision = ProtectionDecision(
+        snapshot=replace(effective, indicator_style="quiet-shield"),
+        indicator_confirmed=True,
+        raw_state=ProtectionState.PROTECTED,
+        presentation_phase=ProtectionPresentationPhase.TRANSIENT_PROTECTED,
+        overlay_reasons_enabled=False,
+    )
+    server = _start_test_server(tmp_path, decision=decision)
+    try:
+        response = _round_trip(
+            server.socket_path,
+            {"schema_version": 1, "action": "subscribe"},
+        )
+        assert response["raw_state"] == "protected"
+        assert response["presentation_phase"] == "transient-protected"
+        assert response["indicator_style"] == "quiet-shield"
+        assert response["overlay_reasons_enabled"] is False
         assert marker not in json.dumps(response)
     finally:
         _stop_test_server(server)

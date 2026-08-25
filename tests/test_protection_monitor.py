@@ -245,8 +245,12 @@ def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
     sustained = monitor.decision_for_capture(force=True)
 
     assert transient.snapshot.state is ProtectionState.PROTECTED
+    assert transient.raw_state is ProtectionState.PROTECTED
+    assert transient.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
     assert transient.snapshot.indicator_style == "quiet-shield"
     assert transient.overlay_reasons_enabled is False
+    assert sustained.raw_state is ProtectionState.PROTECTED
+    assert sustained.presentation_phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
     assert sustained.snapshot.indicator_style == "pill"
     assert sustained.overlay_reasons_enabled is True
     assert fake_overlay.reason_visibility == [False, True]
@@ -280,6 +284,7 @@ def test_monitor_holds_capture_until_safe_confirmation_deadline(
 
     assert protected.snapshot.indicator_style == "quiet-shield"
     for held in (first_safe, early_safe):
+        assert held.raw_state is ProtectionState.INACTIVE
         assert held.snapshot.state is ProtectionState.PROTECTED
         assert held.snapshot.protected_display_ids == frozenset({2})
         assert held.snapshot.protected_window_ids
@@ -287,6 +292,8 @@ def test_monitor_holds_capture_until_safe_confirmation_deadline(
         assert held.indicator_window_ids == (7, 41)
         assert held.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
     assert confirmed_safe.snapshot.state is ProtectionState.INACTIVE
+    assert confirmed_safe.raw_state is ProtectionState.INACTIVE
+    assert confirmed_safe.presentation_phase is ProtectionPresentationPhase.INACTIVE
     assert confirmed_safe.snapshot.generation > early_safe.snapshot.generation
 
 
@@ -453,8 +460,33 @@ def test_pause_and_inventory_failure_bypass_smoothing(inventory, fake_overlay) -
         ),
     ).decision_for_capture(force=True)
     assert failed.snapshot.state is ProtectionState.FAILED
+    assert failed.raw_state is ProtectionState.FAILED
     assert failed.presentation_phase is ProtectionPresentationPhase.BYPASS
     assert failed.snapshot.indicator_style == "pill"
+
+
+@pytest.mark.parametrize(
+    "failure_reason",
+    [
+        ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+        ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+    ],
+)
+def test_unmapped_failures_bypass_smoothing_without_transient_shield(
+    inventory,
+    failure_reason: ProtectionFailureReason,
+) -> None:
+    decision = make_monitor(
+        inventory=inventory,
+        overlay=FakeOverlay(),
+        inventory_reader=lambda: InventoryReadResult(None, failure_reason),
+    ).decision_for_capture(force=True)
+
+    assert decision.raw_state is ProtectionState.FAILED
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert decision.presentation_phase is ProtectionPresentationPhase.BYPASS
+    assert decision.snapshot.indicator_style == "pill"
+    assert decision.snapshot.indicator_style != "quiet-shield"
 
 
 def test_listener_and_wait_use_acknowledged_effective_decision(
@@ -1000,22 +1032,26 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
         pause_reader=lambda: False,
         smoother=smoother,  # type: ignore[arg-type]
     )
-    messages: list[str] = []
+    records: list[logging.LogRecord] = []
     handler = logging.Handler()
-    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    handler.emit = lambda record: records.append(record)  # type: ignore[method-assign]
     capture_logger = logging.getLogger("openchronicle.capture")
     original_propagate = capture_logger.propagate
+    original_level = capture_logger.level
     capture_logger.addHandler(handler)
     capture_logger.propagate = False
+    capture_logger.setLevel(logging.DEBUG)
     try:
         first = monitor.decision_for_capture(force=True)
         second = monitor.decision_for_capture(force=True)
     finally:
         capture_logger.removeHandler(handler)
         capture_logger.propagate = original_propagate
+        capture_logger.setLevel(original_level)
 
     for decision in (first, second):
         assert decision.snapshot.state is ProtectionState.FAILED
+        assert decision.raw_state is ProtectionState.FAILED
         assert (
             decision.snapshot.failure_reason
             is ProtectionFailureReason.PRESENTATION_STATE_INVALID
@@ -1041,14 +1077,15 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
     with monitor._state_lock:
         assert monitor._next_smoothing_deadline is None
 
-    rendered = "\n".join(messages)
+    rendered = "\n".join(record.getMessage() for record in records)
     for marker in private_markers:
         assert marker not in rendered
-    assert messages == [
+    assert [record.getMessage() for record in records if record.levelno == logging.WARNING] == [
         "privacy protection smoothing failed: ProtectionSmoothingError",
         "privacy protection failed closed: reason=presentation_state_invalid",
         "privacy protection smoothing failed: ProtectionSmoothingError",
     ]
+    assert capture_logger.level == original_level
 
 
 def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmation(
@@ -1657,13 +1694,15 @@ def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
         stop_elapsed.append(time.monotonic() - started)
         stop_finished.set()
 
-    messages: list[str] = []
+    records: list[logging.LogRecord] = []
     handler = logging.Handler()
-    handler.emit = lambda record: messages.append(record.getMessage())  # type: ignore[method-assign]
+    handler.emit = lambda record: records.append(record)  # type: ignore[method-assign]
     capture_logger = logging.getLogger("openchronicle.capture")
     original_propagate = capture_logger.propagate
+    original_level = capture_logger.level
     capture_logger.addHandler(handler)
     capture_logger.propagate = False
+    capture_logger.setLevel(logging.DEBUG)
     try:
         stop_thread = threading.Thread(target=stop_monitor)
         stop_thread.start()
@@ -1679,6 +1718,7 @@ def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
     finally:
         capture_logger.removeHandler(handler)
         capture_logger.propagate = original_propagate
+        capture_logger.setLevel(original_level)
 
     assert overlay.closed.wait(timeout=0.5)
     assert close_thread_ids == helper_thread_ids
@@ -1686,9 +1726,10 @@ def test_stop_bounds_noncompliant_helper_and_defers_close_to_helper_thread(
     monitor.stop()
     assert overlay.close_calls == 1
     assert refresh_errors and "stopped" in str(refresh_errors[0])
-    assert messages == [
+    assert [record.getMessage() for record in records if record.levelno == logging.WARNING] == [
         "privacy protection indicator drain timed out: category=overlay_call_in_flight"
     ]
+    assert capture_logger.level == original_level
 
 
 def test_request_refresh_wakes_daemon_and_stop_closes_overlay_once(inventory, fake_overlay) -> None:

@@ -760,6 +760,7 @@ class PrivacyDiagnosticsServer:
         created_at: str,
     ) -> dict[str, object]:
         snapshot = decision.snapshot
+        raw_state = decision.raw_state or snapshot.state
         displays = sorted(
             snapshot.displays,
             key=lambda display: (
@@ -772,6 +773,10 @@ class PrivacyDiagnosticsServer:
             "type": "snapshot",
             "generation": snapshot.generation,
             "state": snapshot.state.value,
+            "raw_state": raw_state.value,
+            "presentation_phase": decision.presentation_phase.value,
+            "indicator_style": snapshot.indicator_style,
+            "overlay_reasons_enabled": decision.overlay_reasons_enabled,
             "indicator_confirmed": decision.indicator_confirmed,
             "diagnostics_guard_active": snapshot.diagnostics_guard_active,
             "created_at": created_at,
