@@ -203,3 +203,18 @@ def test_impossible_held_state_is_rejected() -> None:
     smoother._episode_started_at = 10.0
     with pytest.raises(ProtectionSmoothingError, match="protected snapshot"):
         smoother.resolve(_snapshot(1, ProtectionState.INACTIVE), now=10.1)
+
+
+@pytest.mark.parametrize(
+    "orphan_state",
+    ["clear-deadline", "held-protected", "clear-deadline-and-held-protected"],
+)
+def test_orphan_clear_state_is_rejected(orphan_state: str) -> None:
+    smoother = ProtectionPresentationSmoother()
+    if orphan_state in {"clear-deadline", "clear-deadline-and-held-protected"}:
+        smoother._clear_deadline = 10.2
+    if orphan_state in {"held-protected", "clear-deadline-and-held-protected"}:
+        smoother._last_effective_protected = _snapshot(1, ProtectionState.PROTECTED)
+
+    with pytest.raises(ProtectionSmoothingError, match="inconsistent"):
+        smoother.resolve(_snapshot(2, ProtectionState.INACTIVE), now=10.1)
