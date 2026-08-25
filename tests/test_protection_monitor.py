@@ -18,6 +18,7 @@ from openchronicle.capture.privacy import (
     VisibleWindow,
     WindowInventory,
 )
+from openchronicle.capture.privacy_diagnostics import PrivacyDiagnosticsServer
 from openchronicle.capture.privacy_diagnostics_guard import (
     DiagnosticsGuardSnapshot,
     DiagnosticsLeaseManager,
@@ -1051,7 +1052,7 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
 
     for decision in (first, second):
         assert decision.snapshot.state is ProtectionState.FAILED
-        assert decision.raw_state is ProtectionState.FAILED
+        assert decision.raw_state is ProtectionState.PROTECTED
         assert (
             decision.snapshot.failure_reason
             is ProtectionFailureReason.PRESENTATION_STATE_INVALID
@@ -1067,6 +1068,14 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
         assert [reason.to_payload("exact") for reason in decision.snapshot.reasons_for_display(None)] == [
             {"code": "presentation_state_invalid", "display_id": None}
         ]
+        payload = PrivacyDiagnosticsServer._snapshot_payload(
+            decision,
+            detail="category",
+            created_at="2026-08-25T00:00:00Z",
+        )
+        assert payload["raw_state"] == "protected"
+        assert payload["state"] == "failed"
+        assert payload["presentation_phase"] == "bypass"
 
     assert second.snapshot.generation > first.snapshot.generation
     assert smoother.reset_calls == 2

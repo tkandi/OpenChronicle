@@ -330,7 +330,7 @@ class PrivacyProtectionMonitor:
                 phase = ProtectionPresentationPhase.BYPASS
                 overlay_reasons_enabled = True
                 next_smoothing_deadline = None
-                raw_state = ProtectionState.FAILED
+                raw_state = raw_snapshot.state
             else:
                 snapshot = result.snapshot
                 phase = result.phase
