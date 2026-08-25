@@ -207,14 +207,24 @@ def test_impossible_held_state_is_rejected() -> None:
 
 @pytest.mark.parametrize(
     "orphan_state",
-    ["clear-deadline", "held-protected", "clear-deadline-and-held-protected"],
+    [
+        "clear-deadline",
+        "held-protected",
+        "overlay-reasons",
+        "clear-deadline-and-held-protected",
+        "clear-deadline-and-overlay-reasons",
+        "held-protected-and-overlay-reasons",
+        "clear-deadline-and-held-protected-and-overlay-reasons",
+    ],
 )
-def test_orphan_clear_state_is_rejected(orphan_state: str) -> None:
+def test_orphan_episode_state_is_rejected(orphan_state: str) -> None:
     smoother = ProtectionPresentationSmoother()
-    if orphan_state in {"clear-deadline", "clear-deadline-and-held-protected"}:
+    if "clear-deadline" in orphan_state:
         smoother._clear_deadline = 10.2
-    if orphan_state in {"held-protected", "clear-deadline-and-held-protected"}:
+    if "held-protected" in orphan_state:
         smoother._last_effective_protected = _snapshot(1, ProtectionState.PROTECTED)
+    if "overlay-reasons" in orphan_state:
+        smoother._last_overlay_reasons_enabled = True
 
     with pytest.raises(ProtectionSmoothingError, match="inconsistent"):
         smoother.resolve(_snapshot(2, ProtectionState.INACTIVE), now=10.1)

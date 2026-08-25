@@ -108,7 +108,11 @@ class ProtectionPresentationSmoother:
             )
 
         if self._episode_started_at is None:
-            if self._clear_deadline is not None or self._last_effective_protected is not None:
+            if (
+                self._clear_deadline is not None
+                or self._last_effective_protected is not None
+                or self._last_overlay_reasons_enabled
+            ):
                 raise ProtectionSmoothingError(
                     "inconsistent inactive episode state"
                 )
