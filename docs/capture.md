@@ -163,6 +163,14 @@ settings-page control. Mission Control, F3, Space gestures, thumbnails, and
 transition animation do not bypass this gate: any privacy window that macOS
 reports as on-screen remains protected.
 
+This smoothing applies only to a normal raw `protected` decision. The
+`active_window_unmapped` and `sensitive_window_unmapped` classifications are
+global raw `failed` decisions: they immediately remain screenshot- and
+AX-fail-closed, use the existing failure presentation, do not first render a
+transient `quiet-shield`, and do not run the normal 800ms promotion while they
+remain failed. Mission Control can encounter either path; an unmapped failure
+proves immediate fail-closed behavior, not normal protected smoothing.
+
 The first safe inventory after an episode enters clear-pending and keeps the
 last effective protected decision, including screenshot and AX blocking. Only
 a second safe inventory at least 200ms later may clear the indicator and resume

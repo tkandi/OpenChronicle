@@ -225,6 +225,14 @@ settings control. Mission Control, F3, Space gestures, transition thumbnails,
 and animations never bypass protection when a privacy window is reported
 on-screen.
 
+The transient/sustained sequence applies only to a normal raw `protected`
+decision. `active_window_unmapped` and `sensitive_window_unmapped` are global
+raw `failed` decisions: they immediately keep screenshots and AX fail-closed,
+use the existing failure presentation, skip the transient `quiet-shield`, and
+do not execute normal 800ms promotion while failed. A Mission Control sequence
+that remains unmapped therefore confirms fail-closed handling, not normal
+protected smoothing.
+
 After the first safe inventory, the app remains in clear-pending: it retains
 the effective protected decision and continues blocking screenshots and AX. It
 clears only after a second safe inventory at least 200ms later; renewed
