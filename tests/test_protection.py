@@ -1001,3 +1001,206 @@ def test_snapshot_classifies_non_inventory_failure_reasons() -> None:
     assert build_protection_snapshot(
         cfg, sensitive_unmapped, paused=False, generation=13, now=16.0
     ).failure_reason is ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED
+
+
+def test_sensitive_window_display_history_protects_its_last_display() -> None:
+    historical_region = ScreenRegion(300, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "InPrivate",
+                historical_region,
+                window_id=73,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=16,
+        now=19.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.failure_reason is None
+    assert snapshot.protected_display_ids == frozenset({1})
+    assert snapshot.display_mapping_fallback_active is True
+    assert snapshot.window_filterable is False
+    assert [reason.display_id for reason in snapshot.display_reasons.reasons] == [1]
+
+
+def test_unmapped_sensitive_window_without_display_history_still_fails() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "InPrivate",
+                ScreenRegion(300, 0, 80, 90),
+                window_id=73,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=17,
+        now=20.0,
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.failure_reason is ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED
+
+
+def test_actual_sensitive_geometry_takes_priority_over_stale_display_history() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "InPrivate",
+                ScreenRegion(110, 0, 80, 90),
+                window_id=73,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=18,
+        now=21.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({2})
+    assert snapshot.display_mapping_fallback_active is False
+    assert snapshot.window_filterable is True
+    assert [reason.display_id for reason in snapshot.display_reasons.reasons] == [2]
+
+
+def test_all_mode_expands_sensitive_display_history_protection() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "InPrivate",
+                ScreenRegion(300, 0, 80, 90),
+                window_id=73,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(screenshot_monitor="all", deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=19,
+        now=22.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.display_mapping_fallback_active is True
+    assert snapshot.window_filterable is False
+
+
+def test_active_window_display_history_resolves_a_single_last_display() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(300, 0, 80, 90),
+                is_active=True,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(), inventory, paused=False, generation=20, now=23.0
+    )
+
+    assert snapshot.state is ProtectionState.INACTIVE
+    assert snapshot.active_display_id == 1
+    assert snapshot.active_candidate_display_ids == frozenset()
+
+
+def test_active_candidate_display_history_keeps_multiple_last_displays_conservative() -> None:
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", "InPrivate", ScreenRegion(110, 0, 80, 90)),
+            VisibleWindow(
+                "Cursor",
+                "cursor",
+                "main.py",
+                ScreenRegion(300, 0, 80, 90),
+                is_active_candidate=True,
+                fallback_display_ids=frozenset({1, 2}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=21,
+        now=24.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.active_display_id is None
+    assert snapshot.active_candidate_display_ids == frozenset({1, 2})
+    assert snapshot.ax_blocked is True
+
+
+def test_invalid_diagnostics_guard_stays_failed_with_sensitive_display_history() -> None:
+    historical_region = ScreenRegion(300, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "InPrivate",
+                historical_region,
+                window_id=73,
+                fallback_display_ids=frozenset({1}),
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        CaptureConfig(deny_window_title_patterns=["InPrivate"]),
+        inventory,
+        paused=False,
+        generation=22,
+        now=25.0,
+        diagnostics_guard_invalid=True,
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.protected_display_ids == frozenset({1, 2})
+    assert snapshot.diagnostics_guard_invalid is True
+    assert snapshot.display_mapping_fallback_active is True
+    assert snapshot.window_filterable is False

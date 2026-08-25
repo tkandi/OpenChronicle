@@ -77,6 +77,7 @@ class ProtectionSnapshot:
     protected_window_ids: frozenset[int] = frozenset()
     protected_window_regions: tuple[ScreenRegion, ...] = ()
     window_filterable: bool = False
+    display_mapping_fallback_active: bool = field(default=False, kw_only=True)
 
     @property
     def protected_regions(self) -> list[ScreenRegion]:
@@ -143,9 +144,25 @@ def _display_for_active_window(
 ) -> int | None:
     if window is None:
         return None
+    display_ids, used_fallback = _display_mapping_for_window(window, displays)
+    if used_fallback:
+        return next(iter(display_ids)) if len(display_ids) == 1 else None
     areas = [(_intersection_area(window.region, display.region), display.id) for display in displays]
     area, display_id = max(areas, default=(0.0, -1))
     return display_id if area > 0 else None
+
+
+def _display_mapping_for_window(
+    window: VisibleWindow,
+    displays: tuple[DisplayInfo, ...],
+) -> tuple[frozenset[int], bool]:
+    actual_display_ids = frozenset(
+        display.id for display in displays if _regions_intersect(display.region, window.region)
+    )
+    if actual_display_ids:
+        return actual_display_ids, False
+    fallback_display_ids = window.fallback_display_ids & frozenset(display.id for display in displays)
+    return fallback_display_ids, bool(fallback_display_ids)
 
 
 def build_protection_snapshot(
@@ -173,6 +190,11 @@ def build_protection_snapshot(
     effective_guard_invalid = diagnostics_guard_invalid or diagnostics_guard_unmapped
     active_windows = tuple(window for window in inventory.windows if window.is_active) if inventory else ()
     active_window = active_windows[0] if len(active_windows) == 1 else None
+    active_window_display_ids, active_window_used_fallback = (
+        _display_mapping_for_window(active_window, displays)
+        if active_window is not None
+        else (frozenset(), False)
+    )
     active_display_id = _display_for_active_window(active_window, displays)
     active_candidates = (
         tuple(window for window in inventory.windows if window.is_active_candidate)
@@ -180,16 +202,14 @@ def build_protection_snapshot(
         else ()
     )
     active_candidate_display_ids = frozenset(
-        display.id
-        for display in displays
-        if any(_regions_intersect(display.region, window.region) for window in active_candidates)
+        display_id
+        for window in active_candidates
+        for display_id in _display_mapping_for_window(window, displays)[0]
     )
+    if active_window_used_fallback and len(active_window_display_ids) > 1:
+        active_candidate_display_ids |= active_window_display_ids
     has_unmapped_guarded_active_candidate = diagnostics_guard_active and any(
-        not any(
-            _display_is_usable(display)
-            and _regions_intersect(display.region, window.region)
-            for display in displays
-        )
+        not _display_mapping_for_window(window, displays)[0]
         for window in active_candidates
     )
     sensitive_windows = (
@@ -201,10 +221,14 @@ def build_protection_snapshot(
         if inventory is not None
         else []
     )
+    sensitive_window_mappings = tuple(
+        (window, matches, *_display_mapping_for_window(window, displays))
+        for window, matches in sensitive_windows
+    )
     has_unmapped_sensitive_window = any(
         any(match.kind is not ProtectionReasonCode.WINDOW_TITLE_UNKNOWN for match in matches)
-        and not any(_regions_intersect(display.region, window.region) for display in displays)
-        for window, matches in sensitive_windows
+        and not mapped_display_ids
+        for _window, matches, mapped_display_ids, _used_fallback in sensitive_window_mappings
     )
     derived_failure_reason = failure_reason
     if derived_failure_reason is None:
@@ -217,7 +241,7 @@ def build_protection_snapshot(
         elif len(active_windows) > 1:
             derived_failure_reason = ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS
         elif (
-            active_window is not None and active_display_id is None
+            active_window is not None and not active_window_display_ids
         ) or has_unmapped_guarded_active_candidate:
             derived_failure_reason = ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
         elif has_unmapped_sensitive_window:
@@ -234,22 +258,17 @@ def build_protection_snapshot(
         protected_ids = frozenset()
     else:
         matched_ids = frozenset(
-            display.id
-            for window, _matches in sensitive_windows
-            for display in displays
-            if _regions_intersect(display.region, window.region)
+            display_id
+            for _window, _matches, mapped_display_ids, _used_fallback in sensitive_window_mappings
+            for display_id in mapped_display_ids
         ) | (requested_diagnostic_ids & all_ids)
         state = ProtectionState.PROTECTED if matched_ids else ProtectionState.INACTIVE
         protected_ids = all_ids if matched_ids and cfg.screenshot_monitor == "all" else matched_ids
 
     direct_reason_display_ids: set[int] = set()
     reasons: list[ProtectionReason] = []
-    for window, matches in sensitive_windows:
-        matched_display_ids = tuple(
-            display.id
-            for display in displays
-            if _regions_intersect(display.region, window.region)
-        )
+    for _window, matches, mapped_display_ids, _used_fallback in sensitive_window_mappings:
+        matched_display_ids = tuple(sorted(mapped_display_ids))
         for display_id in matched_display_ids:
             direct_reason_display_ids.add(display_id)
             reasons.extend(
@@ -300,12 +319,12 @@ def build_protection_snapshot(
         )
 
     direct_window_matches = tuple(
-        (window, matches)
-        for window, matches in sensitive_windows
+        (window, matches, used_fallback)
+        for window, matches, _mapped_display_ids, used_fallback in sensitive_window_mappings
         if any(match.kind in _DIRECT_WINDOW_RULE_CODES for match in matches)
     )
-    protected_window_regions = tuple(window.region for window, _matches in direct_window_matches)
-    window_ids = tuple(window.window_id for window, _matches in direct_window_matches)
+    protected_window_regions = tuple(window.region for window, _matches, _used_fallback in direct_window_matches)
+    window_ids = tuple(window.window_id for window, _matches, _used_fallback in direct_window_matches)
     protected_window_ids = frozenset(
         window_id
         for window_id in window_ids
@@ -316,11 +335,15 @@ def build_protection_snapshot(
         for window in (inventory.windows if inventory is not None else ())
         if (window_id := _usable_window_id(window.window_id)) is not None
     )
+    display_mapping_fallback_active = any(
+        used_fallback for _window, _matches, used_fallback in direct_window_matches
+    )
     window_filterable = (
         state is ProtectionState.PROTECTED
         and bool(direct_window_matches)
         and len(direct_window_matches) == len(sensitive_windows)
         and not diagnostics_guard_active
+        and not display_mapping_fallback_active
         and len(protected_window_ids) == len(window_ids)
         and all(inventory_window_id_counts[window_id] == 1 for window_id in protected_window_ids)
     )
@@ -347,4 +370,5 @@ def build_protection_snapshot(
         protected_window_ids=protected_window_ids,
         protected_window_regions=protected_window_regions,
         window_filterable=window_filterable,
+        display_mapping_fallback_active=display_mapping_fallback_active,
     )
