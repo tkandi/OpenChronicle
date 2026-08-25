@@ -8,7 +8,7 @@ import os
 import platform
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -48,6 +48,10 @@ class VisibleWindow:
     is_active_candidate: bool = False
     alternate_title: str = ""
     window_id: int | None = None
+    fallback_display_ids: frozenset[int] = field(
+        default_factory=frozenset,
+        kw_only=True,
+    )
 
 
 @dataclass(frozen=True)
