@@ -1,7 +1,7 @@
 # 保护标识过渡平滑设计
 
 日期：2026-08-25
-状态：已确认，等待书面规格复核
+状态：已实现，等待实机验证
 
 ## 背景
 
@@ -138,6 +138,8 @@ WindowInventory / pause / diagnostics guard
 - effective snapshot；
 - 当前 presentation phase（不写入原生 wire）；
 - 可选的 next deadline。
+- `overlay_reasons_enabled`：只控制本次 overlay presentation 是否发送原因；不会删除
+  effective snapshot、diagnostics 或 capture policy 中的结构化原因。
 
 effective snapshot 是系统唯一发布给下游的权威状态。transient 阶段将
 `indicator_style` 替换为 `quiet-shield`；clear-pending 使用新的 generation/time 重新发布上一份

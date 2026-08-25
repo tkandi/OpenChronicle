@@ -216,6 +216,29 @@ is fail-closed. The overlay helper is a separate process, so no visible
 indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
+On the first protected inventory frame, OpenChronicle immediately blocks
+screenshots and AX capture and renders a transient `quiet-shield` for 800ms.
+If protection persists, a newly acknowledged generation promotes to the
+configured sustained style. The 800ms promotion and 200ms safe-confirmation
+interval are fixed internal constants; they do not add a configuration field or
+settings control. Mission Control, F3, Space gestures, transition thumbnails,
+and animations never bypass protection when a privacy window is reported
+on-screen.
+
+After the first safe inventory, the app remains in clear-pending: it retains
+the effective protected decision and continues blocking screenshots and AX. It
+clears only after a second safe inventory at least 200ms later; renewed
+protection cancels the pending clear. `paused` and `failed` immediately use
+their existing paused/fail-closed presentations rather than ordinary protected
+smoothing. With indicator style `off`, no overlay is drawn, while protected and
+clear-pending still block capture.
+
+Transient suppression hides reasons only in the overlay presentation. It does
+not remove reasons from the effective snapshot, diagnostics, capture policy,
+or filtering authorization. A sustained generation restores the configured
+overlay reason behavior, including when its configured style remains
+`quiet-shield`.
+
 ### Filtered screenshots
 
 `capture.screenshot_privacy_mode` offers four capture policies. `off` keeps the

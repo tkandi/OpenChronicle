@@ -154,6 +154,30 @@ helper displays the protection state after the protection decision is confirmed.
 The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
 `banner`.
 
+Protection remains fail-closed from the first protected inventory frame: the
+same effective decision immediately blocks screenshots and active-window AX
+capture. A new protected episode first renders the transient `quiet-shield`
+for 800ms; if it remains protected, a new confirmed generation promotes to the
+configured sustained style. This is a fixed internal policy, not a TOML or
+settings-page control. Mission Control, F3, Space gestures, thumbnails, and
+transition animation do not bypass this gate: any privacy window that macOS
+reports as on-screen remains protected.
+
+The first safe inventory after an episode enters clear-pending and keeps the
+last effective protected decision, including screenshot and AX blocking. Only
+a second safe inventory at least 200ms later may clear the indicator and resume
+capture; a protected result before then cancels the clear. `paused` and
+`failed` bypass ordinary protected smoothing and immediately use their existing
+paused or fail-closed presentation. With `privacy_indicator_style = "off"`, no
+overlay is rendered, but protected and clear-pending decisions still block
+screenshots and AX.
+
+During the transient quiet shield, reason suppression applies only to overlay
+presentation. The effective snapshot, diagnostics, policy reasons, window
+filtering authorization, and capture gates keep their complete structured
+reason data. At sustained promotion, overlay reason presentation is restored,
+including when the configured sustained style is itself `quiet-shield`.
+
 The runtime executable is launched from a generated
 `runtime/helpers/OpenChroniclePrivacyOverlay.app` helper bundle under the active
 OpenChronicle root. That bundle identity gives its
