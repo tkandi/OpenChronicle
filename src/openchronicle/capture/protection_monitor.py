@@ -108,6 +108,9 @@ class PrivacyProtectionMonitor:
             [decision_listener] if decision_listener is not None else []
         )
         self._lifecycle_lock = threading.Lock()
+        self._overlay_call_condition = threading.Condition(threading.Lock())
+        self._overlay_calls_blocked = False
+        self._overlay_calls_in_flight = 0
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._thread: threading.Thread | None = None
@@ -137,9 +140,14 @@ class PrivacyProtectionMonitor:
                 return
             self._overlay_closed = True
             monitor_thread = self._thread
+            with self._overlay_call_condition:
+                self._overlay_calls_blocked = True
         with self._decision_condition:
             self._next_smoothing_deadline = None
             self._decision_condition.notify_all()
+        with self._overlay_call_condition:
+            while self._overlay_calls_in_flight:
+                self._overlay_call_condition.wait()
         self._overlay.mark_terminal()
         if monitor_thread is not None and monitor_thread is not threading.current_thread():
             monitor_thread.join(timeout=_MONITOR_JOIN_TIMEOUT)
@@ -355,10 +363,18 @@ class PrivacyProtectionMonitor:
                 if self._stopped:
                     raise RuntimeError("privacy protection monitor is stopped")
                 with self._decision_condition:
+                    previous_smoothing_deadline = self._next_smoothing_deadline
                     self._generation = generation
                     self._decision = decision
                     self._next_smoothing_deadline = next_smoothing_deadline
+                    wake_worker_for_deadline = (
+                        previous_smoothing_deadline != next_smoothing_deadline
+                        and self._thread is not None
+                        and threading.current_thread() is not self._thread
+                    )
                     self._decision_condition.notify_all()
+            if wake_worker_for_deadline:
+                self._wake.set()
             logger.debug(
                 "privacy protection generation=%s state=%s style=%s placement=%s displays=%s confirmed=%s",
                 generation,
@@ -458,9 +474,8 @@ class PrivacyProtectionMonitor:
             if self._stopped:
                 return False
         self._before_overlay_call()
-        with self._lifecycle_lock:
-            if self._stopped:
-                return False
+        if not self._begin_overlay_call():
+            return False
         try:
             if (
                 snapshot.state is ProtectionState.FAILED
@@ -483,6 +498,24 @@ class PrivacyProtectionMonitor:
         except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
             logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
             return False
+        finally:
+            self._end_overlay_call()
+
+    def _begin_overlay_call(self) -> bool:
+        with self._lifecycle_lock:
+            if self._stopped:
+                return False
+            with self._overlay_call_condition:
+                if self._overlay_calls_blocked:
+                    return False
+                self._overlay_calls_in_flight += 1
+                return True
+
+    def _end_overlay_call(self) -> None:
+        with self._overlay_call_condition:
+            self._overlay_calls_in_flight -= 1
+            if self._overlay_calls_in_flight == 0:
+                self._overlay_call_condition.notify_all()
 
     def _confirmed_indicator_window_ids(
         self,

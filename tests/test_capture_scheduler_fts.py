@@ -30,6 +30,7 @@ from openchronicle.capture.protection_monitor import (
     ProtectionDecision,
 )
 from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.capture.protection_smoothing import ProtectionPresentationPhase
 from openchronicle.config import CaptureConfig
 from openchronicle.store import fts
 
@@ -149,6 +150,7 @@ def _filtered_decision(
     displays: tuple[DisplayInfo, ...] | None = None,
     protected_display_ids: frozenset[int] = frozenset({2}),
     active_display_id: int | None = 1,
+    presentation_phase: ProtectionPresentationPhase = ProtectionPresentationPhase.BYPASS,
 ) -> ProtectionDecision:
     now = time.monotonic()
     resolved_displays = displays or (
@@ -173,6 +175,7 @@ def _filtered_decision(
         ),
         indicator_confirmed=confirmed,
         indicator_window_ids=indicator_window_ids,
+        presentation_phase=presentation_phase,
     )
     return decision
 
@@ -214,6 +217,38 @@ def test_filtered_authorization_changes_across_protection_promotion() -> None:
     )
     assert scheduler_mod._filtered_authorization_key(transient) != (
         scheduler_mod._filtered_authorization_key(sustained)
+    )
+
+
+def test_filtered_authorization_changes_for_style_only_at_same_generation() -> None:
+    transient = _filtered_decision(
+        generation=20,
+        indicator_style="quiet-shield",
+        indicator_window_ids=(7, 41),
+    )
+    sustained = _filtered_decision(
+        generation=20,
+        indicator_style="pill",
+        indicator_window_ids=(7, 41),
+    )
+    assert scheduler_mod._filtered_authorization_key(transient) != (
+        scheduler_mod._filtered_authorization_key(sustained)
+    )
+
+
+def test_filtered_authorization_changes_for_confirmed_ids_only_at_same_generation() -> None:
+    first = _filtered_decision(
+        generation=20,
+        indicator_style="quiet-shield",
+        indicator_window_ids=(7, 41),
+    )
+    second = _filtered_decision(
+        generation=20,
+        indicator_style="quiet-shield",
+        indicator_window_ids=(8, 41),
+    )
+    assert scheduler_mod._filtered_authorization_key(first) != (
+        scheduler_mod._filtered_authorization_key(second)
     )
 
 
@@ -1714,6 +1749,108 @@ def test_window_filtered_capture_uses_exact_backend_contract_for_each_monitor_mo
         }
     ]
     assert monitor.force_calls == [True, False, True]
+
+
+@pytest.mark.parametrize("privacy_mode", ["mask-window", "exclude-window"])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        ProtectionPresentationPhase.TRANSIENT_PROTECTED,
+        ProtectionPresentationPhase.CLEAR_PENDING,
+    ],
+)
+def test_effective_smoothed_protection_blocks_ax_and_keeps_filtered_capture_safe(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    privacy_mode: str,
+    phase: ProtectionPresentationPhase,
+) -> None:
+    decision = _filtered_decision(
+        indicator_style="quiet-shield",
+        active_display_id=2,
+        presentation_phase=phase,
+    )
+    monitor = _FakeProtectionMonitor(decision)
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://must-not-capture.example"))
+    filtered_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **kwargs: filtered_calls.append(kwargs) or [_shot("SAFE-FILTERED")],
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_kwargs: pytest.fail("eligible filtered capture must not use mss"),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode=privacy_mode,
+        ),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert out["ax_skipped"] == "protected_display"
+    assert provider.calls == 0
+    assert out["screenshot"]["image_base64"] == "SAFE-FILTERED"
+    assert filtered_calls[0]["privacy_mode"] == privacy_mode
+    assert filtered_calls[0]["overlay_window_ids"] == (7, 41)
+
+
+@pytest.mark.parametrize("privacy_mode", ["mask-window", "exclude-window"])
+@pytest.mark.parametrize(
+    "phase",
+    [
+        ProtectionPresentationPhase.TRANSIENT_PROTECTED,
+        ProtectionPresentationPhase.CLEAR_PENDING,
+    ],
+)
+def test_helper_unconfirmed_smoothed_protection_blocks_ax_and_all_screenshot_helpers(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    privacy_mode: str,
+    phase: ProtectionPresentationPhase,
+) -> None:
+    decision = _filtered_decision(
+        indicator_style="quiet-shield",
+        confirmed=False,
+        active_display_id=2,
+        presentation_phase=phase,
+    )
+    monitor = _FakeProtectionMonitor(decision)
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://must-not-capture.example"))
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **_kwargs: pytest.fail("unconfirmed helper must not authorize filtered capture"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **_kwargs: pytest.fail("unconfirmed helper must not authorize mss fallback"),
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode=privacy_mode,
+        ),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert out["ax_skipped"] == "protected_display"
+    assert provider.calls == 0
+    assert "screenshot" not in out
 
 
 def test_style_off_authorizes_filtered_capture_without_overlay_window_ids(

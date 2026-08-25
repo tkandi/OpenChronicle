@@ -24,6 +24,7 @@ from openchronicle.capture.privacy_diagnostics_guard import (
 from openchronicle.capture.protection import (
     ProtectionSnapshot,
     ProtectionState,
+    build_protection_snapshot,
     failure_requires_fail_closed,
 )
 from openchronicle.capture.protection_monitor import (
@@ -116,12 +117,29 @@ class FakeMonotonic:
         self.value += seconds
 
 
-class RaisingSmoother:
+class WaitTrackingEvent:
     def __init__(self) -> None:
+        self._event = threading.Event()
+        self.wait_started = threading.Event()
+
+    def set(self) -> None:
+        self._event.set()
+
+    def clear(self) -> None:
+        self._event.clear()
+
+    def wait(self, timeout: float | None = None) -> bool:
+        self.wait_started.set()
+        return self._event.wait(timeout)
+
+
+class RaisingSmoother:
+    def __init__(self, marker: str = "private-value-that-must-not-be-logged") -> None:
+        self.marker = marker
         self.reset_calls = 0
 
     def resolve(self, _snapshot: ProtectionSnapshot, *, now: float):
-        raise ProtectionSmoothingError("private-value-that-must-not-be-logged")
+        raise ProtectionSmoothingError(self.marker)
 
     def reset(self) -> None:
         self.reset_calls += 1
@@ -339,6 +357,68 @@ def test_worker_wakes_at_promotion_deadline_without_another_timer(
         monitor.stop()
         time.sleep(0.05)
     assert fake_overlay.render_calls == renders_before_stop
+
+
+def test_external_deadline_publication_wakes_worker_for_fresh_promotion(
+    tmp_path, inventory, fake_overlay
+) -> None:
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    current_inventory = safe_inventory
+    inventory_reads = 0
+    inventory_lock = threading.Lock()
+
+    def read_inventory() -> WindowInventory:
+        nonlocal inventory_reads
+        with inventory_lock:
+            inventory_reads += 1
+            return current_inventory
+
+    monitor = make_monitor(
+        config_path=tmp_path / "config.toml",
+        inventory=inventory,
+        inventory_reader=read_inventory,
+        overlay=fake_overlay,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0.05),
+        watchdog_seconds=10.0,
+    )
+    wake = WaitTrackingEvent()
+    monitor._wake = wake  # type: ignore[assignment]
+    monitor.start()
+    try:
+        assert wake.wait_started.wait(timeout=0.5)
+        current_inventory = inventory
+        external_decisions: list[ProtectionDecision] = []
+        external_errors: list[BaseException] = []
+
+        def publish_transient() -> None:
+            try:
+                external_decisions.append(monitor.decision_for_capture(force=True))
+            except BaseException as exc:  # pragma: no cover - diagnostic capture
+                external_errors.append(exc)
+
+        publisher = threading.Thread(target=publish_transient)
+        publisher.start()
+        publisher.join(timeout=0.5)
+        assert not publisher.is_alive()
+        assert external_errors == []
+        assert external_decisions[0].snapshot.indicator_style == "quiet-shield"
+
+        deadline = time.monotonic() + 0.4
+        while time.monotonic() < deadline:
+            if any(
+                snapshot.indicator_style == "pill"
+                for snapshot in fake_overlay.snapshots
+            ):
+                break
+            time.sleep(0.005)
+
+        assert any(
+            snapshot.indicator_style == "pill" for snapshot in fake_overlay.snapshots
+        )
+        with inventory_lock:
+            assert 3 <= inventory_reads < 10
+    finally:
+        monitor.stop()
 
 
 def test_off_keeps_effective_protection_without_overlay_ids(inventory, fake_overlay) -> None:
@@ -864,31 +944,105 @@ def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory,
 def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
     inventory, fake_overlay, caplog
 ) -> None:
-    smoother = RaisingSmoother()
-    monitor = make_monitor(
-        inventory=inventory,
+    app_marker = "private-app-value"
+    bundle_marker = "private-bundle-value"
+    title_marker = "private-title-value"
+    url_title_marker = "private-url-title.example"
+    rule_marker = "private-rule-pattern"
+    url_rule_marker = "private-url-rule-pattern"
+    exception_marker = "private-exception-body"
+    private_inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                app_marker,
+                bundle_marker,
+                f"{title_marker} {rule_marker}",
+                ScreenRegion(110, 0, 80, 90),
+                alternate_title=f"https://{url_title_marker}/{url_rule_marker}",
+                window_id=73,
+            ),
+        ),
+        displays=inventory.displays,
+    )
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        privacy_indicator_style="pill",
+        deny_window_title_patterns=[rule_marker, url_rule_marker],
+        screenshot_privacy_fail_closed=False,
+    )
+    raw_snapshot = build_protection_snapshot(
+        cfg,
+        private_inventory,
+        paused=False,
+        generation=1,
+        now=10.0,
+    )
+    private_markers = (
+        app_marker,
+        bundle_marker,
+        title_marker,
+        url_title_marker,
+        rule_marker,
+        url_rule_marker,
+        exception_marker,
+    )
+    raw_reasons = repr(raw_snapshot.display_reasons.reasons)
+    for marker in private_markers[:-1]:
+        assert marker in raw_reasons
+
+    smoother = RaisingSmoother(exception_marker)
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
         overlay=fake_overlay,
+        inventory_reader=lambda: private_inventory,
+        pause_reader=lambda: False,
         smoother=smoother,  # type: ignore[arg-type]
-        fail_closed=False,
     )
-    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
-        decision = monitor.decision_for_capture(force=True)
-    assert decision.snapshot.state is ProtectionState.FAILED
-    assert (
-        decision.snapshot.failure_reason
-        is ProtectionFailureReason.PRESENTATION_STATE_INVALID
-    )
-    assert failure_requires_fail_closed(
-        CaptureConfig(screenshot_privacy_fail_closed=False),
-        decision.snapshot,
-    ) is True
-    assert [reason.code for reason in decision.snapshot.reasons_for_display(None)] == [
-        ProtectionReasonCode.PRESENTATION_STATE_INVALID
-    ]
-    assert smoother.reset_calls == 1
+    with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
+        first = monitor.decision_for_capture(force=True)
+        second = monitor.decision_for_capture(force=True)
+
+    for decision in (first, second):
+        assert decision.snapshot.state is ProtectionState.FAILED
+        assert (
+            decision.snapshot.failure_reason
+            is ProtectionFailureReason.PRESENTATION_STATE_INVALID
+        )
+        assert decision.presentation_phase is ProtectionPresentationPhase.BYPASS
+        assert decision.overlay_reasons_enabled is True
+        assert failure_requires_fail_closed(cfg, decision.snapshot) is True
+        assert decision.snapshot.protected_display_ids == frozenset()
+        assert decision.snapshot.active_candidate_display_ids == frozenset()
+        assert decision.snapshot.protected_window_ids == frozenset()
+        assert decision.snapshot.protected_window_regions == ()
+        assert decision.snapshot.window_filterable is False
+        assert [reason.to_payload("exact") for reason in decision.snapshot.reasons_for_display(None)] == [
+            {"code": "presentation_state_invalid", "display_id": None}
+        ]
+
+    assert second.snapshot.generation > first.snapshot.generation
+    assert smoother.reset_calls == 2
+    assert fake_overlay.render_calls == 2
+    assert fake_overlay.clear_calls == 0
+    assert fake_overlay.snapshots == [first.snapshot, second.snapshot]
+    assert fake_overlay.reason_visibility == [True, True]
+    with monitor._state_lock:
+        assert monitor._next_smoothing_deadline is None
+
     rendered = "\n".join(record.getMessage() for record in caplog.records)
-    assert "ProtectionSmoothingError" in rendered
-    assert "private-value-that-must-not-be-logged" not in rendered
+    for marker in private_markers:
+        assert marker not in rendered
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+    assert warnings == [
+        "privacy protection smoothing failed: ProtectionSmoothingError",
+        "privacy protection failed closed: reason=presentation_state_invalid",
+        "privacy protection smoothing failed: ProtectionSmoothingError",
+    ]
 
 
 def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmation(
@@ -1269,6 +1423,119 @@ def test_stop_marks_overlay_terminal_while_a_pre_overlay_barrier_is_blocked(
     assert fake_overlay.clear_calls == 0
     assert fake_overlay.snapshots == []
     assert fake_overlay.clear_generations == []
+
+
+def test_stop_after_before_overlay_call_prevents_helper_entry(
+    inventory, fake_overlay, monkeypatch
+) -> None:
+    before_finished = threading.Event()
+    gate_reached = threading.Event()
+    release_gate = threading.Event()
+    stop_finished = threading.Event()
+    refresh_errors: list[Exception] = []
+
+    def before_overlay_call() -> None:
+        before_finished.set()
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="pill",
+            deny_window_title_patterns=["InPrivate"],
+        ),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        before_overlay_call=before_overlay_call,
+    )
+    original_begin = getattr(monitor, "_begin_overlay_call", lambda: True)
+
+    def blocked_begin() -> bool:
+        gate_reached.set()
+        assert release_gate.wait(timeout=1.0)
+        return original_begin()
+
+    monkeypatch.setattr(monitor, "_begin_overlay_call", blocked_begin, raising=False)
+
+    def force_refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except RuntimeError as exc:
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=force_refresh)
+    refresh_thread.start()
+    assert before_finished.wait(timeout=0.5)
+    try:
+        assert gate_reached.wait(timeout=0.5)
+        stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+        stop_thread.start()
+        assert stop_finished.wait(timeout=0.5)
+    finally:
+        release_gate.set()
+        refresh_thread.join(timeout=1.0)
+        if "stop_thread" in locals():
+            stop_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_calls == 0
+
+
+def test_stop_waits_for_started_helper_before_terminal_and_close(inventory) -> None:
+    render_started = threading.Event()
+    release_render = threading.Event()
+    render_finished = threading.Event()
+    stop_finished = threading.Event()
+
+    class BlockingRenderOverlay(FakeOverlay):
+        def render(
+            self,
+            snapshot: ProtectionSnapshot,
+            timeout: float = 0.5,
+            *,
+            overlay_reasons_enabled: bool = True,
+        ) -> bool:
+            self.render_calls += 1
+            render_started.set()
+            assert release_render.wait(timeout=1.0)
+            self.snapshots.append(snapshot)
+            self.reason_visibility.append(overlay_reasons_enabled)
+            render_finished.set()
+            return True
+
+    overlay = BlockingRenderOverlay()
+    monitor = make_monitor(inventory=inventory, overlay=overlay)
+    refresh_errors: list[Exception] = []
+
+    def force_refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except RuntimeError as exc:
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(target=force_refresh)
+    refresh_thread.start()
+    assert render_started.wait(timeout=0.5)
+    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+    stop_thread.start()
+    try:
+        assert stop_finished.wait(timeout=0.1) is False
+        assert overlay.terminal_marked.is_set() is False
+        assert overlay.closed.is_set() is False
+    finally:
+        release_render.set()
+        refresh_thread.join(timeout=1.0)
+        stop_thread.join(timeout=1.0)
+
+    assert render_finished.is_set()
+    assert stop_finished.is_set()
+    assert overlay.terminal_marked.is_set()
+    assert overlay.closed.is_set()
+    assert refresh_errors and "stopped" in str(refresh_errors[0])
 
 
 def test_request_refresh_wakes_daemon_and_stop_closes_overlay_once(inventory, fake_overlay) -> None:
