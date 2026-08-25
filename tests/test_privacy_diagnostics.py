@@ -278,6 +278,93 @@ def test_category_snapshot_exposes_safe_presentation_fields(tmp_path: Path) -> N
         _stop_test_server(server)
 
 
+def test_category_mapping_failure_presentation_does_not_expose_exact_values() -> None:
+    app_marker = "private-mapping-app"
+    bundle_marker = "private-mapping-bundle"
+    title_marker = "private-mapping-title"
+    alternate_title_marker = "private-mapping-alternate-title"
+    title_rule_marker = "private-mapping-title-rule"
+    alternate_rule_marker = "private-mapping-alternate-rule"
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                app_marker,
+                bundle_marker,
+                f"{title_marker} {title_rule_marker}",
+                ScreenRegion(110, 0, 80, 90),
+                alternate_title=(
+                    f"https://{alternate_title_marker}/{alternate_rule_marker}"
+                ),
+                window_id=73,
+            ),
+        ),
+        displays=(
+            DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+            DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+        ),
+    )
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        privacy_indicator_style="pill",
+        deny_app_names=[app_marker],
+        deny_bundle_ids=[bundle_marker],
+        deny_window_title_patterns=[title_rule_marker, alternate_rule_marker],
+    )
+    times = iter([10.0, 10.0, 10.8, 10.8])
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: InventoryReadResult(
+            inventory,
+            ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+        ),
+        pause_reader=lambda: False,
+        monotonic=lambda: next(times),
+    )
+    transient_decision = monitor.decision_for_capture(force=True)
+    sustained_decision = monitor.decision_for_capture(force=True)
+
+    transient = PrivacyDiagnosticsServer._snapshot_payload(
+        transient_decision,
+        detail="category",
+        created_at="2026-08-25T00:00:00Z",
+    )
+    sustained = PrivacyDiagnosticsServer._snapshot_payload(
+        sustained_decision,
+        detail="category",
+        created_at="2026-08-25T00:00:01Z",
+    )
+    exact = PrivacyDiagnosticsServer._snapshot_payload(
+        transient_decision,
+        detail="exact",
+        created_at="2026-08-25T00:00:00Z",
+    )
+
+    assert transient["raw_state"] == "failed"
+    assert transient["state"] == "failed"
+    assert transient["presentation_phase"] == "transient-mapping-failure"
+    assert transient["indicator_style"] == "quiet-shield"
+    assert transient["overlay_reasons_enabled"] is False
+    assert sustained["presentation_phase"] == "sustained-mapping-failure"
+    assert sustained["indicator_style"] == "pill"
+    assert sustained["overlay_reasons_enabled"] is True
+
+    category_json = json.dumps([transient, sustained])
+    exact_json = json.dumps(exact)
+    private_markers = (
+        app_marker,
+        bundle_marker,
+        title_marker,
+        alternate_title_marker,
+        title_rule_marker,
+        alternate_rule_marker,
+    )
+    for marker in private_markers:
+        assert marker in exact_json
+        assert marker not in category_json
+
+
 @pytest.mark.parametrize(
     "reason",
     [

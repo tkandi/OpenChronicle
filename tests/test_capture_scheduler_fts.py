@@ -329,6 +329,29 @@ def _inactive_decision(
     )
 
 
+def test_transient_mapping_failure_keeps_existing_scheduler_failure_policy() -> None:
+    base = _failed_decision(reason=ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED)
+    decision = replace(
+        base,
+        snapshot=replace(base.snapshot, indicator_style="quiet-shield"),
+        presentation_phase=ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE,
+        overlay_reasons_enabled=False,
+    )
+    closed_cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        screenshot_privacy_fail_closed=True,
+    )
+    open_cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        screenshot_privacy_fail_closed=False,
+    )
+    assert scheduler_mod._decision_is_terminal(closed_cfg, decision) is True
+    assert scheduler_mod._decision_blocks_ax(closed_cfg, decision) is True
+    assert scheduler_mod._decision_is_terminal(open_cfg, decision) is False
+    assert scheduler_mod._decision_blocks_ax(open_cfg, decision) is False
+    assert scheduler_mod._filtered_capture_is_eligible(closed_cfg, decision) is False
+
+
 def _capture_dict(
     *, ts: str, app: str, title: str, value: str, text: str,
 ) -> dict:

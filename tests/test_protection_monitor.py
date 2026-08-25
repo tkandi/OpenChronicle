@@ -171,6 +171,12 @@ def fake_overlay() -> FakeOverlay:
     return FakeOverlay()
 
 
+MAPPING_FAILURES = (
+    ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+    ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+)
+
+
 def make_monitor(
     *,
     inventory: WindowInventory,
@@ -321,6 +327,78 @@ def test_monitor_cancels_clear_when_protection_returns(
     assert returned.snapshot.indicator_style == "quiet-shield"
 
 
+def test_monitor_mapping_failure_to_protected_keeps_episode_deadline(
+    inventory, fake_overlay
+) -> None:
+    readings = iter(
+        [
+            InventoryReadResult(
+                inventory,
+                ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
+            ),
+            inventory,
+            inventory,
+        ]
+    )
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        inventory=inventory,
+        inventory_reader=lambda: next(readings),
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
+    failed = monitor.decision_for_capture(force=True)
+    clock.advance(0.4)
+    protected = monitor.decision_for_capture(force=True)
+    clock.advance(0.4)
+    promoted = monitor.decision_for_capture(force=True)
+
+    assert (
+        failed.presentation_phase
+        is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    )
+    assert protected.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert promoted.presentation_phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
+
+
+def test_monitor_protected_return_cancels_failed_clear_pending(
+    inventory, fake_overlay
+) -> None:
+    safe = WindowInventory(windows=(), displays=inventory.displays)
+    readings = iter(
+        [
+            InventoryReadResult(
+                inventory,
+                ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+            ),
+            safe,
+            inventory,
+        ]
+    )
+    published: list[ProtectionDecision] = []
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        inventory=inventory,
+        inventory_reader=lambda: next(readings),
+        overlay=fake_overlay,
+        monotonic=clock,
+        decision_listener=published.append,
+    )
+    monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    held = monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    returned = monitor.decision_for_capture(force=True)
+
+    assert held.raw_state is ProtectionState.INACTIVE
+    assert held.snapshot.state is ProtectionState.FAILED
+    assert held.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
+    assert returned.raw_state is ProtectionState.PROTECTED
+    assert returned.snapshot.state is ProtectionState.PROTECTED
+    assert returned.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert all(item.snapshot.state is not ProtectionState.INACTIVE for item in published)
+
+
 def test_worker_wakes_at_promotion_deadline_without_another_timer(
     tmp_path, inventory, fake_overlay
 ) -> None:
@@ -439,7 +517,7 @@ def test_off_keeps_effective_protection_without_overlay_ids(inventory, fake_over
     assert decision.indicator_window_ids == ()
 
 
-def test_pause_and_inventory_failure_bypass_smoothing(inventory, fake_overlay) -> None:
+def test_pause_bypasses_smoothing(inventory, fake_overlay) -> None:
     paused = make_monitor(
         inventory=inventory,
         overlay=fake_overlay,
@@ -452,42 +530,93 @@ def test_pause_and_inventory_failure_bypass_smoothing(inventory, fake_overlay) -
     assert paused.presentation_phase is ProtectionPresentationPhase.BYPASS
     assert paused.snapshot.indicator_style == "pill"
 
-    failed = make_monitor(
-        inventory=inventory,
-        overlay=FakeOverlay(),
-        inventory_reader=lambda: InventoryReadResult(
-            None,
-            ProtectionFailureReason.INVENTORY_UNAVAILABLE,
-        ),
-    ).decision_for_capture(force=True)
-    assert failed.snapshot.state is ProtectionState.FAILED
-    assert failed.raw_state is ProtectionState.FAILED
-    assert failed.presentation_phase is ProtectionPresentationPhase.BYPASS
-    assert failed.snapshot.indicator_style == "pill"
-
 
 @pytest.mark.parametrize(
-    "failure_reason",
+    "reason",
     [
-        ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
-        ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+        ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        ProtectionFailureReason.EMPTY_DISPLAYS,
+        ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE,
+        ProtectionFailureReason.PRESENTATION_STATE_INVALID,
     ],
 )
-def test_unmapped_failures_bypass_smoothing_without_transient_shield(
-    inventory,
-    failure_reason: ProtectionFailureReason,
+def test_monitor_hard_failures_still_bypass_smoothing(
+    reason, inventory, fake_overlay
 ) -> None:
-    decision = make_monitor(
+    monitor = make_monitor(
         inventory=inventory,
-        overlay=FakeOverlay(),
-        inventory_reader=lambda: InventoryReadResult(None, failure_reason),
-    ).decision_for_capture(force=True)
-
-    assert decision.raw_state is ProtectionState.FAILED
+        inventory_reader=lambda: InventoryReadResult(inventory, reason),
+        overlay=fake_overlay,
+    )
+    decision = monitor.decision_for_capture(force=True)
     assert decision.snapshot.state is ProtectionState.FAILED
     assert decision.presentation_phase is ProtectionPresentationPhase.BYPASS
     assert decision.snapshot.indicator_style == "pill"
-    assert decision.snapshot.indicator_style != "quiet-shield"
+    assert decision.overlay_reasons_enabled is True
+    assert monitor._next_smoothing_deadline is None
+
+
+@pytest.mark.parametrize("reason", MAPPING_FAILURES)
+def test_monitor_smooths_mapping_failure_without_changing_failed_state(
+    reason, inventory, fake_overlay
+) -> None:
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        inventory=inventory,
+        inventory_reader=lambda: InventoryReadResult(inventory, reason),
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
+    transient = monitor.decision_for_capture(force=True)
+    clock.advance(0.8)
+    sustained = monitor.decision_for_capture(force=True)
+
+    assert transient.raw_state is ProtectionState.FAILED
+    assert transient.snapshot.state is ProtectionState.FAILED
+    assert transient.snapshot.failure_reason is reason
+    assert (
+        transient.presentation_phase
+        is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    )
+    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.overlay_reasons_enabled is False
+    assert transient.indicator_confirmed is True
+    assert fake_overlay.reason_visibility[:2] == [False, True]
+    assert (
+        sustained.presentation_phase
+        is ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
+    )
+    assert sustained.snapshot.indicator_style == "pill"
+
+
+def test_mapping_failure_smoothing_does_not_override_legacy_fail_open(
+    inventory, fake_overlay
+) -> None:
+    monitor = make_monitor(
+        inventory=inventory,
+        inventory_reader=lambda: InventoryReadResult(
+            inventory,
+            ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+        ),
+        overlay=fake_overlay,
+        fail_closed=False,
+    )
+    decision = monitor.decision_for_capture(force=True)
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert (
+        decision.presentation_phase
+        is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+    )
+    assert failure_requires_fail_closed(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_fail_closed=False,
+        ),
+        decision.snapshot,
+    ) is False
+    assert fake_overlay.render_calls == 0
+    assert fake_overlay.clear_calls == 1
+    assert decision.indicator_confirmed is False
 
 
 def test_listener_and_wait_use_acknowledged_effective_decision(

@@ -154,41 +154,48 @@ helper displays the protection state after the protection decision is confirmed.
 The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
 `banner`.
 
-Protection remains fail-closed from the first protected inventory frame: the
-same effective decision immediately blocks screenshots and active-window AX
-capture. A new protected episode first renders the transient `quiet-shield`
-for 800ms; if it remains protected, a new confirmed generation promotes to the
-configured sustained style. This is a fixed internal policy, not a TOML or
-settings-page control. Mission Control, F3, Space gestures, thumbnails, and
-transition animation do not bypass this gate: any privacy window that macOS
-reports as on-screen remains protected.
+Protection and failure policy apply from the first inventory frame. A normal
+raw `protected` decision and the two allowlisted mapping failures
+`active_window_unmapped` and `sensitive_window_unmapped` start the same visual
+risk episode. For the first 800ms, a non-`off` indicator uses
+`quiet-shield`; a new confirmed generation then promotes to the configured
+sustained style. This is a fixed internal policy, not a TOML or settings-page
+control. Mission Control, F3, Space gestures, thumbnails, and transition
+animation do not bypass capture policy while the presentation is transient.
 
-This smoothing applies only to a normal raw `protected` decision. The
-`active_window_unmapped` and `sensitive_window_unmapped` classifications are
-global raw `failed` decisions: they immediately bypass smoothing, use the
-existing failure presentation, do not first render a transient `quiet-shield`,
-and do not run the normal 800ms promotion while they remain failed. Screenshot
-and AX blocking follow the existing failure policy: the default/current
-fail-closed configuration and `mask-window`/`exclude-window` modes block
-globally, while legacy `screenshot_privacy_fail_closed = false` with
-`skip-monitor` or `off` can retain its existing fail-open behavior. Mission
-Control can encounter either path; an unmapped failure proves its configured
-failure handling, not normal protected smoothing.
+Mapping failures remain raw and effective `failed` decisions. Presentation
+smoothing does not turn them into `protected` or weaken screenshot/AX policy:
+default/current fail-closed configuration and `mask-window`/`exclude-window`
+still block globally from the first frame. The legacy
+`screenshot_privacy_fail_closed = false` policy with `skip-monitor` or `off`
+remains fail-open and clears the overlay instead of letting `quiet-shield`
+override that policy. Transitions between normal `protected` and either
+allowlisted mapping failure keep one 800ms deadline; changing state or mapping
+failure reason does not restart the timer.
 
-The first safe inventory after an episode enters clear-pending and keeps the
-last effective protected decision, including screenshot and AX blocking. Only
-a second safe inventory at least 200ms later may clear the indicator and resume
-capture; a protected result before then cancels the clear. `paused` and
-`failed` bypass ordinary protected smoothing and immediately use their existing
-paused or fail-closed presentation. With `privacy_indicator_style = "off"`, no
-overlay is rendered, but protected and clear-pending decisions still block
-screenshots and AX.
+Every other failure is outside the allowlist and immediately bypasses visual
+smoothing with the configured failure presentation and reasons enabled. This
+includes inventory/display/pause/diagnostics/presentation-state failures and
+any future failure reason by default. `paused` also bypasses smoothing.
+
+The first safe inventory after a risk episode enters clear-pending and keeps
+the last effective risk decision, whether it was `protected` or an allowlisted
+`failed` decision. Only a second safe inventory at least 200ms later may clear
+the indicator and resume capture; a protected or allowlisted mapping-failure
+result before then cancels the clear without publishing an inactive decision.
+With `privacy_indicator_style = "off"`, no overlay is rendered, but effective
+capture policy and clear-pending still apply.
 
 During the transient quiet shield, reason suppression applies only to overlay
 presentation. The effective snapshot, diagnostics, policy reasons, window
 filtering authorization, and capture gates keep their complete structured
 reason data. At sustained promotion, overlay reason presentation is restored,
 including when the configured sustained style is itself `quiet-shield`.
+Owner-only category diagnostics expose only safe presentation state, including
+`raw_state`, effective `state`, `presentation_phase`, `indicator_style`, and
+`overlay_reasons_enabled`. Mapping failures report
+`transient-mapping-failure` or `sustained-mapping-failure`; category payloads do
+not add exact app, bundle, title, alternate-title, or matching-rule values.
 
 The runtime executable is launched from a generated
 `runtime/helpers/OpenChroniclePrivacyOverlay.app` helper bundle under the active

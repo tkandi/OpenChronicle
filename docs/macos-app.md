@@ -216,40 +216,47 @@ is fail-closed. The overlay helper is a separate process, so no visible
 indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
-On the first protected inventory frame, OpenChronicle immediately blocks
-screenshots and AX capture and renders a transient `quiet-shield` for 800ms.
-If protection persists, a newly acknowledged generation promotes to the
-configured sustained style. The 800ms promotion and 200ms safe-confirmation
-interval are fixed internal constants; they do not add a configuration field or
-settings control. Mission Control, F3, Space gestures, transition thumbnails,
-and animations never bypass protection when a privacy window is reported
-on-screen.
+On the first risk inventory frame, OpenChronicle applies the existing capture
+policy immediately. Normal raw `protected` plus the two allowlisted mapping
+failures `active_window_unmapped` and `sensitive_window_unmapped` render a
+transient `quiet-shield` for 800ms when the indicator is enabled. A newly
+acknowledged generation then promotes to the configured sustained style. The
+800ms promotion and 200ms safe-confirmation interval are fixed internal
+constants; they do not add a configuration field or settings control.
 
-The transient/sustained sequence applies only to a normal raw `protected`
-decision. `active_window_unmapped` and `sensitive_window_unmapped` are global
-raw `failed` decisions: they immediately bypass smoothing, use the existing
-failure presentation, skip the transient `quiet-shield`, and do not execute
-normal 800ms promotion while failed. Screenshot and AX blocking follow the
-existing failure policy: default/current fail-closed configuration and
-`mask-window`/`exclude-window` block globally, while legacy
-`screenshot_privacy_fail_closed = false` with `skip-monitor` or `off` can keep
-its existing fail-open behavior. A Mission Control sequence that remains
-unmapped therefore confirms configured failure handling, not normal protected
-smoothing.
+An allowlisted mapping failure remains raw and effective `failed`; only its
+presentation is smoothed. Default/current fail-closed configuration and
+`mask-window`/`exclude-window` still block screenshots and AX globally from the
+first failed frame. Legacy `screenshot_privacy_fail_closed = false` with
+`skip-monitor` or `off` keeps its existing fail-open behavior and clears the
+overlay rather than showing a transient shield. Mapping `failed` and normal
+`protected` transitions share one episode deadline, so Mission Control, F3,
+Space gestures, thumbnails, and animations cannot restart the 800ms timer by
+alternating those states.
 
-After the first safe inventory, the app remains in clear-pending: it retains
-the effective protected decision and continues blocking screenshots and AX. It
-clears only after a second safe inventory at least 200ms later; renewed
-protection cancels the pending clear. `paused` and `failed` immediately use
-their existing paused/fail-closed presentations rather than ordinary protected
-smoothing. With indicator style `off`, no overlay is drawn, while protected and
-clear-pending still block capture.
+All non-allowlisted failures, including inventory/display/pause/diagnostics and
+presentation-state failures, immediately bypass smoothing and show the
+configured failure presentation with reasons enabled. Future failure reasons
+also bypass by default; `paused` does the same.
+
+After the first safe inventory, the app remains in clear-pending and retains
+the last effective risk decision, including an allowlisted effective `failed`
+decision. It clears only after a second safe inventory at least 200ms later;
+renewed protected or allowlisted failed risk cancels the pending clear without
+publishing inactive. With indicator style `off`, no overlay is drawn, while the
+effective capture policy and clear-pending behavior remain unchanged.
 
 Transient suppression hides reasons only in the overlay presentation. It does
 not remove reasons from the effective snapshot, diagnostics, capture policy,
 or filtering authorization. A sustained generation restores the configured
 overlay reason behavior, including when its configured style remains
 `quiet-shield`.
+
+Owner-only category diagnostics add only safe presentation fields:
+`raw_state`, effective `state`, `presentation_phase`, `indicator_style`, and
+`overlay_reasons_enabled`. Mapping failures use
+`transient-mapping-failure`/`sustained-mapping-failure`; category payloads do
+not reveal exact app, bundle, title, alternate-title, or rule values.
 
 ### Filtered screenshots
 
