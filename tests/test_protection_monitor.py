@@ -31,6 +31,11 @@ from openchronicle.capture.protection_monitor import (
     ProtectionDecision,
 )
 from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.capture.protection_smoothing import (
+    ProtectionPresentationPhase,
+    ProtectionPresentationSmoother,
+    ProtectionSmoothingError,
+)
 from openchronicle.capture_pause import CapturePauseDecision, CapturePauseKind
 from openchronicle.config import CaptureConfig
 
@@ -42,17 +47,34 @@ class FakeOverlay:
         self.render_calls = 0
         self.clear_calls = 0
         self.snapshots: list[ProtectionSnapshot] = []
+        self.reason_visibility: list[bool] = []
+        self.window_ids_by_generation: dict[int, tuple[int, ...]] = {}
         self.clear_generations: list[int] = []
         self.close_calls = 0
         self.closed = threading.Event()
         self.terminal_marked = threading.Event()
+        self.rendered = threading.Event()
 
-    def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+    def render(
+        self,
+        snapshot: ProtectionSnapshot,
+        timeout: float = 0.5,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> bool:
         self.render_calls += 1
         if self.terminal_marked.is_set():
+            self.rendered.set()
             return False
         self.snapshots.append(snapshot)
+        self.reason_visibility.append(overlay_reasons_enabled)
+        if self.render_result and snapshot.indicator_style != "off":
+            self.window_ids_by_generation[snapshot.generation] = (7, 41)
+        self.rendered.set()
         return self.render_result
+
+    def confirmed_window_ids(self, generation: int) -> tuple[int, ...]:
+        return self.window_ids_by_generation.get(generation, ())
 
     def clear(self, generation: int, timeout: float = 0.5) -> bool:
         self.clear_calls += 1
@@ -83,6 +105,28 @@ class MutableGuard:
         return DiagnosticsGuardSnapshot(self.display_ids, self.fail_closed_all)
 
 
+class FakeMonotonic:
+    def __init__(self, value: float = 10.0) -> None:
+        self.value = value
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+class RaisingSmoother:
+    def __init__(self) -> None:
+        self.reset_calls = 0
+
+    def resolve(self, _snapshot: ProtectionSnapshot, *, now: float):
+        raise ProtectionSmoothingError("private-value-that-must-not-be-logged")
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+
+
 @pytest.fixture
 def inventory() -> WindowInventory:
     displays = (
@@ -90,7 +134,14 @@ def inventory() -> WindowInventory:
         DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
     )
     windows = (
-        VisibleWindow("Edge", "edge", "InPrivate", ScreenRegion(110, 0, 80, 90), False),
+        VisibleWindow(
+            "Edge",
+            "edge",
+            "InPrivate",
+            ScreenRegion(110, 0, 80, 90),
+            False,
+            window_id=73,
+        ),
     )
     return WindowInventory(windows=windows, displays=displays)
 
@@ -114,6 +165,8 @@ def make_monitor(
     diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
     decision_listener: Callable[[ProtectionDecision], None] | None = None,
     fail_closed: bool = True,
+    smoother: ProtectionPresentationSmoother | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> PrivacyProtectionMonitor:
     cfg = CaptureConfig(
         screenshot_monitor="separate",
@@ -130,7 +183,227 @@ def make_monitor(
         watchdog_seconds=watchdog_seconds,
         diagnostics_guard_reader=diagnostics_guard_reader,
         decision_listener=decision_listener,
+        smoother=smoother,
+        monotonic=monotonic,
     )
+
+
+def test_monitor_uses_injected_clock_for_snapshot_and_cache_freshness(
+    tmp_path, inventory, fake_overlay, monkeypatch
+) -> None:
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        config_path=tmp_path / "config.toml",
+        inventory=inventory,
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
+
+    def unexpected_wall_clock() -> float:
+        raise AssertionError("decision freshness used the module-level monotonic clock")
+
+    monkeypatch.setattr(
+        "openchronicle.capture.protection_monitor.time.monotonic",
+        unexpected_wall_clock,
+    )
+    decision = monitor.decision_for_capture(force=True)
+    assert decision.snapshot.created_monotonic == 10.0
+    assert decision.snapshot.fresh_until == pytest.approx(10.25)
+
+
+def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
+    tmp_path, inventory, fake_overlay
+) -> None:
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        config_path=tmp_path / "config.toml",
+        inventory=inventory,
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
+    transient = monitor.decision_for_capture(force=True)
+    clock.advance(0.8)
+    sustained = monitor.decision_for_capture(force=True)
+
+    assert transient.snapshot.state is ProtectionState.PROTECTED
+    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.overlay_reasons_enabled is False
+    assert sustained.snapshot.indicator_style == "pill"
+    assert sustained.overlay_reasons_enabled is True
+    assert fake_overlay.reason_visibility == [False, True]
+    assert sustained.snapshot.generation > transient.snapshot.generation
+    assert transient.indicator_confirmed and sustained.indicator_confirmed
+
+
+def test_monitor_holds_capture_until_safe_confirmation_deadline(
+    tmp_path: Path,
+    inventory: WindowInventory,
+    fake_overlay: FakeOverlay,
+) -> None:
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    readings = iter([inventory, safe_inventory, safe_inventory, safe_inventory])
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        config_path=tmp_path / "config.toml",
+        inventory=inventory,
+        inventory_reader=lambda: next(readings),
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
+
+    protected = monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    first_safe = monitor.decision_for_capture(force=True)
+    clock.advance(0.199)
+    early_safe = monitor.decision_for_capture(force=True)
+    clock.advance(0.001)
+    confirmed_safe = monitor.decision_for_capture(force=True)
+
+    assert protected.snapshot.indicator_style == "quiet-shield"
+    for held in (first_safe, early_safe):
+        assert held.snapshot.state is ProtectionState.PROTECTED
+        assert held.snapshot.protected_display_ids == frozenset({2})
+        assert held.snapshot.protected_window_ids
+        assert held.indicator_confirmed is True
+        assert held.indicator_window_ids == (7, 41)
+        assert held.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
+    assert confirmed_safe.snapshot.state is ProtectionState.INACTIVE
+    assert confirmed_safe.snapshot.generation > early_safe.snapshot.generation
+
+
+def test_monitor_cancels_clear_when_protection_returns(
+    tmp_path, inventory, fake_overlay
+) -> None:
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    readings = iter([inventory, safe_inventory, inventory])
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        config_path=tmp_path / "config.toml",
+        inventory=inventory,
+        inventory_reader=lambda: next(readings),
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
+    monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    returned = monitor.decision_for_capture(force=True)
+    assert returned.snapshot.state is ProtectionState.PROTECTED
+    assert returned.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert returned.snapshot.indicator_style == "quiet-shield"
+
+
+def test_worker_wakes_at_promotion_deadline_without_another_timer(
+    tmp_path, inventory, fake_overlay
+) -> None:
+    before = {thread.ident for thread in threading.enumerate()}
+    inventory_reads = 0
+
+    def read_inventory() -> WindowInventory:
+        nonlocal inventory_reads
+        inventory_reads += 1
+        return inventory
+
+    monitor = make_monitor(
+        config_path=tmp_path / "config.toml",
+        inventory=inventory,
+        inventory_reader=read_inventory,
+        overlay=fake_overlay,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0.03),
+        watchdog_seconds=10.0,
+    )
+    monitor.start()
+    try:
+        deadline = time.monotonic() + 0.3
+        while time.monotonic() < deadline:
+            if [snapshot.indicator_style for snapshot in fake_overlay.snapshots][:2] == [
+                "quiet-shield",
+                "pill",
+            ]:
+                break
+            time.sleep(0.005)
+        assert [snapshot.indicator_style for snapshot in fake_overlay.snapshots][:2] == [
+            "quiet-shield",
+            "pill",
+        ]
+        assert inventory_reads >= 2
+        created = [
+            thread
+            for thread in threading.enumerate()
+            if thread.ident not in before and thread.name == "privacy-protection-monitor"
+        ]
+        assert len(created) == 1
+    finally:
+        renders_before_stop = fake_overlay.render_calls
+        monitor.stop()
+        time.sleep(0.05)
+    assert fake_overlay.render_calls == renders_before_stop
+
+
+def test_off_keeps_effective_protection_without_overlay_ids(inventory, fake_overlay) -> None:
+    monitor = make_monitor(inventory=inventory, overlay=fake_overlay, style="off")
+    decision = monitor.decision_for_capture(force=True)
+    assert decision.snapshot.state is ProtectionState.PROTECTED
+    assert decision.snapshot.indicator_style == "off"
+    assert decision.indicator_confirmed is True
+    assert decision.indicator_window_ids == ()
+
+
+def test_pause_and_inventory_failure_bypass_smoothing(inventory, fake_overlay) -> None:
+    paused = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        pause_reader=lambda: CapturePauseDecision(
+            paused=True,
+            kind=CapturePauseKind.INDEFINITE,
+        ),
+    ).decision_for_capture(force=True)
+    assert paused.snapshot.state is ProtectionState.PAUSED
+    assert paused.presentation_phase is ProtectionPresentationPhase.BYPASS
+    assert paused.snapshot.indicator_style == "pill"
+
+    failed = make_monitor(
+        inventory=inventory,
+        overlay=FakeOverlay(),
+        inventory_reader=lambda: InventoryReadResult(
+            None,
+            ProtectionFailureReason.INVENTORY_UNAVAILABLE,
+        ),
+    ).decision_for_capture(force=True)
+    assert failed.snapshot.state is ProtectionState.FAILED
+    assert failed.presentation_phase is ProtectionPresentationPhase.BYPASS
+    assert failed.snapshot.indicator_style == "pill"
+
+
+def test_listener_and_wait_use_acknowledged_effective_decision(
+    inventory, fake_overlay
+) -> None:
+    published: list[ProtectionDecision] = []
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=published.append,
+    )
+    transient = monitor.decision_for_capture(force=True)
+    assert published == [transient]
+    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.snapshot.display_reasons.reasons
+    assert monitor.wait_for_display_protection(
+        2,
+        after_generation=0,
+        timeout=0.1,
+    ) == transient.snapshot.generation
+
+    fake_overlay.render_result = False
+    unconfirmed = monitor.decision_for_capture(force=True)
+    assert unconfirmed.indicator_confirmed is False
+    assert unconfirmed.indicator_window_ids == ()
+    assert monitor.wait_for_display_protection(
+        2,
+        after_generation=transient.snapshot.generation,
+        timeout=0.01,
+    ) is None
 
 
 def test_monitor_renders_pause_on_all_displays(tmp_path, inventory, fake_overlay) -> None:
@@ -204,6 +477,7 @@ def test_guard_only_monitor_ignores_normal_rules_and_becomes_inactive_after_rele
     fake_overlay,
 ) -> None:
     guard = MutableGuard(display_ids=frozenset({1}))
+    clock = FakeMonotonic()
     monitor = PrivacyProtectionMonitor(
         CaptureConfig(
             screenshot_monitor="separate",
@@ -216,11 +490,14 @@ def test_guard_only_monitor_ignores_normal_rules_and_becomes_inactive_after_rele
         pause_reader=lambda: False,
         diagnostics_guard_reader=guard.snapshot,
         diagnostics_guard_only=True,
+        monotonic=clock,
     )
 
     guarded = monitor.decision_for_capture(force=True)
     guard.display_ids = frozenset()
     monitor.request_refresh()
+    held = monitor.decision_for_capture(force=True)
+    clock.advance(0.2)
     released = monitor.decision_for_capture(force=True)
 
     assert guarded.snapshot.state is ProtectionState.PROTECTED
@@ -228,6 +505,8 @@ def test_guard_only_monitor_ignores_normal_rules_and_becomes_inactive_after_rele
     assert [reason.code for reason in guarded.snapshot.reasons_for_display(1)] == [
         ProtectionReasonCode.DIAGNOSTICS_REVEAL
     ]
+    assert held.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
+    assert held.snapshot.protected_display_ids == frozenset({1})
     assert released.snapshot.state is ProtectionState.INACTIVE
     assert released.snapshot.protected_display_ids == frozenset()
     assert released.snapshot.display_reasons.reasons == ()
@@ -410,32 +689,36 @@ def test_listener_exception_is_sanitized_and_does_not_stop_monitor(
     assert marker not in "\n".join(messages)
 
 
-def test_indicator_settings_hot_reload_atomically(tmp_path, inventory, fake_overlay) -> None:
+def test_transient_and_sustained_use_latest_hot_loaded_style_and_position(
+    tmp_path, inventory, fake_overlay
+) -> None:
     config_path = tmp_path / "config.toml"
     config_path.write_text(
-        '[capture]\nprivacy_indicator_style = "shield"\n'
-        'privacy_indicator_placement = "bottom-left-flush"\n'
+        '[capture]\nprivacy_indicator_style="pill"\n'
+        'privacy_indicator_placement="bottom-left-flush"\n'
     )
-    monitor = make_monitor(config_path=config_path, inventory=inventory, overlay=fake_overlay)
+    clock = FakeMonotonic()
+    monitor = make_monitor(
+        config_path=config_path,
+        inventory=inventory,
+        overlay=fake_overlay,
+        monotonic=clock,
+    )
     first = monitor.decision_for_capture(force=True)
-
-    previous_mtime = config_path.stat().st_mtime_ns
+    old_mtime = config_path.stat().st_mtime_ns
     config_path.write_text(
-        '[capture]\nprivacy_indicator_style = "banner"\n'
-        'privacy_indicator_placement = "bottom-right-work-area"\n'
+        '[capture]\nprivacy_indicator_style="border"\n'
+        'privacy_indicator_placement="bottom-right-work-area"\n'
     )
-    os.utime(config_path, ns=(previous_mtime + 1, previous_mtime + 1))
-    second = monitor.decision_for_capture(force=True)
-
-    assert (first.snapshot.indicator_style, first.snapshot.indicator_placement) == (
-        "shield",
-        "bottom-left-flush",
-    )
-    assert (second.snapshot.indicator_style, second.snapshot.indicator_placement) == (
-        "banner",
-        "bottom-right-work-area",
-    )
-    assert second.snapshot.generation > first.snapshot.generation
+    os.utime(config_path, ns=(old_mtime + 1, old_mtime + 1))
+    clock.advance(0.4)
+    transient = monitor.decision_for_capture(force=True)
+    clock.advance(0.4)
+    sustained = monitor.decision_for_capture(force=True)
+    assert first.snapshot.indicator_style == "quiet-shield"
+    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.snapshot.indicator_placement == "bottom-right-work-area"
+    assert sustained.snapshot.indicator_style == "border"
 
 
 def test_style_reload_retries_a_recovered_config_with_unchanged_mtime(tmp_path, inventory, fake_overlay) -> None:
@@ -446,6 +729,7 @@ def test_style_reload_retries_a_recovered_config_with_unchanged_mtime(tmp_path, 
         inventory=inventory,
         overlay=fake_overlay,
         style="border",
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
     )
 
     first = monitor.decision_for_capture(force=True)
@@ -465,7 +749,12 @@ def test_style_reload_normalizes_invalid_value_without_reloading_capture_policy(
     config_path.write_text(
         '[capture]\nprivacy_indicator_style = "invalid"\nscreenshot_monitor = "all"\n'
     )
-    monitor = make_monitor(config_path=config_path, inventory=inventory, overlay=fake_overlay)
+    monitor = make_monitor(
+        config_path=config_path,
+        inventory=inventory,
+        overlay=fake_overlay,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
+    )
 
     decision = monitor.decision_for_capture(force=True)
 
@@ -570,6 +859,36 @@ def test_inventory_failure_is_failed_without_private_metadata_in_logs(inventory,
     assert decision.indicator_confirmed is True
     assert fake_overlay.snapshots[-1].state is ProtectionState.FAILED
     assert marker not in caplog.text
+
+
+def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
+    inventory, fake_overlay, caplog
+) -> None:
+    smoother = RaisingSmoother()
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        smoother=smoother,  # type: ignore[arg-type]
+        fail_closed=False,
+    )
+    with caplog.at_level(logging.WARNING, logger="openchronicle.capture"):
+        decision = monitor.decision_for_capture(force=True)
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert (
+        decision.snapshot.failure_reason
+        is ProtectionFailureReason.PRESENTATION_STATE_INVALID
+    )
+    assert failure_requires_fail_closed(
+        CaptureConfig(screenshot_privacy_fail_closed=False),
+        decision.snapshot,
+    ) is True
+    assert [reason.code for reason in decision.snapshot.reasons_for_display(None)] == [
+        ProtectionReasonCode.PRESENTATION_STATE_INVALID
+    ]
+    assert smoother.reset_calls == 1
+    rendered = "\n".join(record.getMessage() for record in caplog.records)
+    assert "ProtectionSmoothingError" in rendered
+    assert "private-value-that-must-not-be-logged" not in rendered
 
 
 def test_fail_open_inventory_failure_clears_indicator_without_visual_confirmation(

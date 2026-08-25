@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .. import config
@@ -37,6 +37,11 @@ from .protection_reason import (
     ProtectionReason,
     ProtectionReasonCode,
 )
+from .protection_smoothing import (
+    ProtectionPresentationPhase,
+    ProtectionPresentationSmoother,
+    ProtectionSmoothingError,
+)
 
 logger = get("openchronicle.capture")
 _MONITOR_JOIN_TIMEOUT = 0.25
@@ -48,6 +53,11 @@ class ProtectionDecision:
     indicator_confirmed: bool
     covered_request_epoch: int = 0
     indicator_window_ids: tuple[int, ...] = ()
+    presentation_phase: ProtectionPresentationPhase = field(
+        default=ProtectionPresentationPhase.BYPASS,
+        kw_only=True,
+    )
+    overlay_reasons_enabled: bool = field(default=True, kw_only=True)
 
 
 class PrivacyProtectionMonitor:
@@ -66,6 +76,8 @@ class PrivacyProtectionMonitor:
         diagnostics_guard_reader: Callable[[], DiagnosticsGuardSnapshot] | None = None,
         diagnostics_guard_only: bool = False,
         decision_listener: Callable[[ProtectionDecision], None] | None = None,
+        smoother: ProtectionPresentationSmoother | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self._cfg = cfg
         self._config_path = config_path
@@ -76,12 +88,17 @@ class PrivacyProtectionMonitor:
         self._before_overlay_call = before_overlay_call or (lambda: None)
         self._diagnostics_guard_reader = diagnostics_guard_reader
         self._diagnostics_guard_only = diagnostics_guard_only
+        self._smoother = (
+            smoother if smoother is not None else ProtectionPresentationSmoother()
+        )
+        self._monotonic = monotonic
         self._indicator_style = cfg.privacy_indicator_style
         self._indicator_placement = cfg.privacy_indicator_placement
         self._config_mtime_ns: int | None = None
         self._generation = 0
         self._requested_epoch = 0
         self._decision: ProtectionDecision | None = None
+        self._next_smoothing_deadline: float | None = None
 
         self._state_lock = threading.Lock()
         self._decision_condition = threading.Condition(self._state_lock)
@@ -121,6 +138,7 @@ class PrivacyProtectionMonitor:
             self._overlay_closed = True
             monitor_thread = self._thread
         with self._decision_condition:
+            self._next_smoothing_deadline = None
             self._decision_condition.notify_all()
         self._overlay.mark_terminal()
         if monitor_thread is not None and monitor_thread is not threading.current_thread():
@@ -182,7 +200,7 @@ class PrivacyProtectionMonitor:
             if (
                 current is not None
                 and current.covered_request_epoch >= requested_epoch
-                and current.snapshot.fresh_until >= time.monotonic()
+                and current.snapshot.fresh_until >= self._monotonic()
             ):
                 self._raise_if_stopped()
                 return current
@@ -194,7 +212,15 @@ class PrivacyProtectionMonitor:
         except RuntimeError:
             return
         while not self._stop.is_set():
-            self._wake.wait(self._watchdog_seconds)
+            timeout = self._watchdog_seconds
+            with self._state_lock:
+                deadline = self._next_smoothing_deadline
+            if deadline is not None:
+                timeout = min(
+                    timeout,
+                    max(0.0, deadline - self._monotonic()),
+                )
+            self._wake.wait(timeout)
             self._wake.clear()
             if not self._stop.is_set():
                 try:
@@ -211,12 +237,12 @@ class PrivacyProtectionMonitor:
                 covered_request_epoch = self._requested_epoch
             diagnostics_guard = self._read_diagnostics_guard()
             self._raise_if_stopped()
-            now = time.monotonic()
+            now = self._monotonic()
             generation = self._generation + 1
             if self._diagnostics_guard_only and not (
                 diagnostics_guard.fail_closed_all or diagnostics_guard.display_ids
             ):
-                snapshot = ProtectionSnapshot(
+                raw_snapshot = ProtectionSnapshot(
                     generation=generation,
                     state=ProtectionState.INACTIVE,
                     capture_mode=self._cfg.screenshot_monitor,
@@ -245,7 +271,7 @@ class PrivacyProtectionMonitor:
                         deny_bundle_ids=[],
                         deny_window_title_patterns=[],
                     )
-                snapshot = build_protection_snapshot(
+                raw_snapshot = build_protection_snapshot(
                     snapshot_cfg,
                     inventory,
                     paused=paused,
@@ -256,9 +282,45 @@ class PrivacyProtectionMonitor:
                     diagnostic_display_ids=diagnostics_guard.display_ids,
                     diagnostics_guard_invalid=diagnostics_guard.fail_closed_all,
                 )
+            try:
+                result = self._smoother.resolve(raw_snapshot, now=now)
+            except ProtectionSmoothingError:
+                logger.warning(
+                    "privacy protection smoothing failed: ProtectionSmoothingError"
+                )
+                self._smoother.reset()
+                snapshot = replace(
+                    raw_snapshot,
+                    state=ProtectionState.FAILED,
+                    failure_reason=ProtectionFailureReason.PRESENTATION_STATE_INVALID,
+                    protected_display_ids=frozenset(),
+                    active_candidate_display_ids=frozenset(),
+                    display_reasons=DisplayProtectionReasons.from_reasons(
+                        [
+                            ProtectionReason(
+                                ProtectionReasonCode.PRESENTATION_STATE_INVALID,
+                                None,
+                            )
+                        ]
+                    ),
+                    protected_window_ids=frozenset(),
+                    protected_window_regions=(),
+                    window_filterable=False,
+                )
+                phase = ProtectionPresentationPhase.BYPASS
+                overlay_reasons_enabled = True
+                next_smoothing_deadline = None
+            else:
+                snapshot = result.snapshot
+                phase = result.phase
+                overlay_reasons_enabled = result.overlay_reasons_enabled
+                next_smoothing_deadline = result.next_deadline
             self._log_failure_transition(snapshot)
             self._raise_if_stopped()
-            rendered = self._render(snapshot)
+            rendered = self._render(
+                snapshot,
+                overlay_reasons_enabled=overlay_reasons_enabled,
+            )
             indicator_confirmed = rendered or snapshot.indicator_style == "off"
             indicator_window_ids = self._confirmed_indicator_window_ids(
                 snapshot,
@@ -286,6 +348,8 @@ class PrivacyProtectionMonitor:
                 indicator_confirmed,
                 covered_request_epoch=covered_request_epoch,
                 indicator_window_ids=indicator_window_ids,
+                presentation_phase=phase,
+                overlay_reasons_enabled=overlay_reasons_enabled,
             )
             with self._lifecycle_lock:
                 if self._stopped:
@@ -293,6 +357,7 @@ class PrivacyProtectionMonitor:
                 with self._decision_condition:
                     self._generation = generation
                     self._decision = decision
+                    self._next_smoothing_deadline = next_smoothing_deadline
                     self._decision_condition.notify_all()
             logger.debug(
                 "privacy protection generation=%s state=%s style=%s placement=%s displays=%s confirmed=%s",
@@ -383,7 +448,12 @@ class PrivacyProtectionMonitor:
             )
         raise TypeError("pause reader returned an unsupported decision")
 
-    def _render(self, snapshot: ProtectionSnapshot) -> bool:
+    def _render(
+        self,
+        snapshot: ProtectionSnapshot,
+        *,
+        overlay_reasons_enabled: bool,
+    ) -> bool:
         with self._lifecycle_lock:
             if self._stopped:
                 return False
@@ -397,13 +467,19 @@ class PrivacyProtectionMonitor:
                 and not failure_requires_fail_closed(self._cfg, snapshot)
             ):
                 if snapshot.indicator_style == "off":
-                    self._overlay.render(snapshot)
+                    self._overlay.render(
+                        snapshot,
+                        overlay_reasons_enabled=overlay_reasons_enabled,
+                    )
                 else:
                     self._overlay.clear(snapshot.generation)
                 return False
             if snapshot.indicator_style != "off" and snapshot.state is ProtectionState.INACTIVE:
                 return self._overlay.clear(snapshot.generation)
-            return self._overlay.render(snapshot)
+            return self._overlay.render(
+                snapshot,
+                overlay_reasons_enabled=overlay_reasons_enabled,
+            )
         except Exception as exc:  # Helper failure is reflected by acknowledgement, not exception text.
             logger.warning("privacy protection indicator failed: %s", type(exc).__name__)
             return False

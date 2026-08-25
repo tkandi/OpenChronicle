@@ -32,6 +32,7 @@ class ProtectionReasonCode(StrEnum):
     ACTIVE_WINDOW_UNMAPPED = "active_window_unmapped"
     SENSITIVE_WINDOW_UNMAPPED = "sensitive_window_unmapped"
     INDICATOR_UNCONFIRMED = "indicator_unconfirmed"
+    PRESENTATION_STATE_INVALID = "presentation_state_invalid"
 
 
 class ProtectionReasonState(StrEnum):
@@ -53,6 +54,7 @@ _FAILED_CODES = frozenset(
         ProtectionReasonCode.SENSITIVE_WINDOW_UNMAPPED,
         ProtectionReasonCode.INDICATOR_UNCONFIRMED,
         ProtectionReasonCode.DIAGNOSTICS_GUARD_INVALID,
+        ProtectionReasonCode.PRESENTATION_STATE_INVALID,
     }
 )
 _PAUSED_CODES = frozenset(

@@ -50,6 +50,7 @@ def failure_requires_fail_closed(
         or cfg.screenshot_privacy_mode in _WINDOW_FILTERED_PRIVACY_MODES
         or cfg.screenshot_privacy_fail_closed
         or snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+        or snapshot.failure_reason is ProtectionFailureReason.PRESENTATION_STATE_INVALID
     )
 
 

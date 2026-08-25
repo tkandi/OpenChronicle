@@ -869,6 +869,17 @@ private final class ReconnectSchedulerRecorder {
 }
 
 final class ProtectionDiagnosticsWireTests: XCTestCase {
+  func testPresentationStateInvalidDecodesAsFixedFailureCategory() throws {
+    let data = Data(
+      #"{"code":"presentation_state_invalid","display_id":null}"#.utf8
+    )
+    let reason = try JSONDecoder().decode(ProtectionReasonDiagnostic.self, from: data)
+    XCTAssertEqual(reason.code, .presentationStateInvalid)
+    XCTAssertNil(reason.appName)
+    XCTAssertNil(reason.windowTitle)
+    XCTAssertNil(reason.rule)
+  }
+
   func testDecodesCompleteSchemaV1SnapshotAndRFC3339Timestamp() throws {
     let data = Data(
       #"{"schema_version":1,"type":"snapshot","generation":42,"state":"protected","indicator_confirmed":true,"diagnostics_guard_active":true,"created_at":"2026-08-22T04:05:06.789000Z","reasons":[{"code":"manual_pause","display_id":null,"effective_resume_at":"2026-08-22T05:05:06+00:00"}],"displays":[{"id":2,"primary":true,"state":"protected","screenshot_blocked":true,"ax_blocked":true,"indicator_confirmed":true,"reasons":[{"code":"window_title_rule","display_id":2,"source_display_id":1,"app_name":"Safari","bundle_id":"com.apple.Safari","window_title":"Private","rule":"private-*"}]}]}"#.utf8

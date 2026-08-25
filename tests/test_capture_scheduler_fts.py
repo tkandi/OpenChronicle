@@ -84,7 +84,13 @@ class _FakeProtectionMonitor:
 
 
 class _AlwaysConfirmedOverlay:
-    def render(self, _snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+    def render(
+        self,
+        _snapshot: ProtectionSnapshot,
+        timeout: float = 0.5,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> bool:
         return True
 
     def clear(self, _generation: int, timeout: float = 0.5) -> bool:
@@ -192,6 +198,22 @@ def test_filtered_authorization_key_includes_indicator_placement() -> None:
 
     assert scheduler_mod._filtered_authorization_key(first) != (
         scheduler_mod._filtered_authorization_key(second)
+    )
+
+
+def test_filtered_authorization_changes_across_protection_promotion() -> None:
+    transient = _filtered_decision(
+        generation=20,
+        indicator_style="quiet-shield",
+        indicator_window_ids=(7, 41),
+    )
+    sustained = _filtered_decision(
+        generation=21,
+        indicator_style="pill",
+        indicator_window_ids=(8, 41),
+    )
+    assert scheduler_mod._filtered_authorization_key(transient) != (
+        scheduler_mod._filtered_authorization_key(sustained)
     )
 
 
@@ -1087,7 +1109,13 @@ def test_pause_state_failure_blocks_before_ax_even_when_inventory_is_fail_open(
             self.snapshots: list[ProtectionSnapshot] = []
             self.clear_calls = 0
 
-        def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+        def render(
+            self,
+            snapshot: ProtectionSnapshot,
+            timeout: float = 0.5,
+            *,
+            overlay_reasons_enabled: bool = True,
+        ) -> bool:
             self.snapshots.append(snapshot)
             return True
 
@@ -1347,7 +1375,13 @@ def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(
     inventory = safe_inventory
 
     class Overlay:
-        def render(self, _snapshot, timeout: float = 0.5) -> bool:
+        def render(
+            self,
+            _snapshot: ProtectionSnapshot,
+            timeout: float = 0.5,
+            *,
+            overlay_reasons_enabled: bool = True,
+        ) -> bool:
             return True
 
         def clear(self, _generation: int, timeout: float = 0.5) -> bool:

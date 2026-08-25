@@ -2,6 +2,7 @@ from openchronicle.capture.protection_reason import (
     DisplayProtectionReasons,
     ProtectionReason,
     ProtectionReasonCode,
+    ProtectionReasonState,
     sanitize_reason_value,
 )
 
@@ -49,6 +50,20 @@ def test_exact_payload_includes_only_bounded_reason_fields() -> None:
         "bundle_id": "com.microsoft.edgemac",
         "window_title": "InPrivate ",
         "rule": "InPrivate",
+    }
+
+
+def test_presentation_state_invalid_is_a_fixed_failure_reason() -> None:
+    reason = ProtectionReason(
+        ProtectionReasonCode.PRESENTATION_STATE_INVALID,
+        display_id=None,
+    )
+
+    assert reason.state is ProtectionReasonState.FAILED
+    assert reason.priority == 600
+    assert reason.to_payload(detail="category") == {
+        "code": "presentation_state_invalid",
+        "display_id": None,
     }
 
 

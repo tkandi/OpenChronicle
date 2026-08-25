@@ -66,6 +66,7 @@ class ProtectionFailureReason(StrEnum):
     INVALID_DISPLAY_INVENTORY = "invalid_display_inventory"
     ACTIVE_WINDOW_UNMAPPED = "active_window_unmapped"
     SENSITIVE_WINDOW_UNMAPPED = "sensitive_window_unmapped"
+    PRESENTATION_STATE_INVALID = "presentation_state_invalid"
 
 
 @dataclass(frozen=True)

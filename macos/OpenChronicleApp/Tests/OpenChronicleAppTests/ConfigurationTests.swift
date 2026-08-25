@@ -283,6 +283,20 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertTrue(descriptors[0].detail?.contains(exactValue) == true)
   }
 
+  func testPresentationStateInvalidUsesFixedFailurePresentation() {
+    let descriptor = ProtectionReasonPresentationDescriptor(
+      reason: ProtectionReasonDiagnostic(
+        code: .presentationStateInvalid,
+        displayID: nil
+      ),
+      detail: .category,
+      showsExactValues: false
+    )
+
+    XCTAssertEqual(descriptor.title, "Protection state invalid")
+    XCTAssertEqual(descriptor.systemImage, "exclamationmark.triangle.fill")
+  }
+
   func testReasonPresentationUsesFixedPlaceholderWhileExactValuesAreHidden() {
     let marker = String(repeating: "private", count: 20)
     let descriptor = ProtectionReasonPresentationDescriptor(

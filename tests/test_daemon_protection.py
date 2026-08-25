@@ -125,7 +125,13 @@ class FakeSessionManager:
 
 
 class RejectingOverlay:
-    def render(self, _snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+    def render(
+        self,
+        _snapshot: ProtectionSnapshot,
+        timeout: float = 0.5,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> bool:
         return False
 
     def clear(self, _generation: int, timeout: float = 0.5) -> bool:
@@ -143,7 +149,13 @@ class ConfirmingWindowIDOverlay:
         self.window_ids = tuple(window_ids)
         self.generation: int | None = None
 
-    def render(self, snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+    def render(
+        self,
+        snapshot: ProtectionSnapshot,
+        timeout: float = 0.5,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> bool:
         self.generation = snapshot.generation
         return True
 

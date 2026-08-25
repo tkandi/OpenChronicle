@@ -28,6 +28,7 @@ enum ProtectionReasonDiagnosticCode: String, Codable, Equatable {
   case activeWindowUnmapped = "active_window_unmapped"
   case sensitiveWindowUnmapped = "sensitive_window_unmapped"
   case indicatorUnconfirmed = "indicator_unconfirmed"
+  case presentationStateInvalid = "presentation_state_invalid"
   case unknown
 }
 

@@ -101,6 +101,7 @@ struct ProtectionReasonPresentationDescriptor: Equatable {
     case .activeWindowUnmapped: return "Active window unmapped"
     case .sensitiveWindowUnmapped: return "Sensitive window unmapped"
     case .indicatorUnconfirmed: return "Indicator unconfirmed"
+    case .presentationStateInvalid: return "Protection state invalid"
     case .unknown: return "Unknown reason"
     }
   }
@@ -120,6 +121,8 @@ struct ProtectionReasonPresentationDescriptor: Equatable {
       .multipleActiveWindows, .activeWindowUnmapped, .sensitiveWindowUnmapped,
       .indicatorUnconfirmed:
       return "exclamationmark.triangle"
+    case .presentationStateInvalid:
+      return "exclamationmark.triangle.fill"
     case .unknown:
       return "questionmark.circle"
     }

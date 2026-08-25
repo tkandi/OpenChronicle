@@ -72,6 +72,20 @@ def test_window_filtered_modes_force_inventory_failures_closed(
     assert failure_requires_fail_closed(cfg, snapshot) is True
 
 
+def test_presentation_state_failure_is_always_fail_closed() -> None:
+    cfg = CaptureConfig(screenshot_privacy_fail_closed=False)
+    snapshot = build_protection_snapshot(
+        cfg,
+        None,
+        paused=False,
+        generation=92,
+        now=22.0,
+        failure_reason=ProtectionFailureReason.PRESENTATION_STATE_INVALID,
+    )
+    assert snapshot.state is ProtectionState.FAILED
+    assert failure_requires_fail_closed(cfg, snapshot) is True
+
+
 def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     cfg = CaptureConfig(
         screenshot_monitor="separate",

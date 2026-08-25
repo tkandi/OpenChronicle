@@ -76,7 +76,13 @@ class FakeProtectionCallbacks:
 
 
 class _AlwaysConfirmedOverlay:
-    def render(self, _snapshot: ProtectionSnapshot, timeout: float = 0.5) -> bool:
+    def render(
+        self,
+        _snapshot: ProtectionSnapshot,
+        timeout: float = 0.5,
+        *,
+        overlay_reasons_enabled: bool = True,
+    ) -> bool:
         return True
 
     def clear(self, _generation: int, timeout: float = 0.5) -> bool:
