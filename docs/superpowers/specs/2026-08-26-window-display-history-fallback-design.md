@@ -163,7 +163,8 @@ owner key 出现时立即拒绝旧 entry。
 - `window_id <= 0`、布尔值、超过 UInt32 或缺失：不缓存；
 - 同一 inventory 中重复 window ID：该 ID 本次和已有 entry 均视为不可信并删除；
 - owner key 为空：不缓存；
-- monotonic 非递增：抛固定内部错误，由 monitor 走现有 fail-closed presentation-state 路径。
+- monotonic 小于上一轮（时钟回退）：抛固定内部错误，由 monitor 走现有 fail-closed
+  presentation-state 路径；连续采样得到相同 monotonic 值是允许的。
 
 ## ProtectionSnapshot 构建
 
