@@ -60,6 +60,7 @@ class ProtectionDecision:
         kw_only=True,
     )
     overlay_reasons_enabled: bool = field(default=True, kw_only=True)
+    presentation_deadline_monotonic: float | None = field(default=None, kw_only=True)
 
 
 class PrivacyProtectionMonitor:
@@ -373,6 +374,7 @@ class PrivacyProtectionMonitor:
                 raw_state=raw_state,
                 presentation_phase=phase,
                 overlay_reasons_enabled=overlay_reasons_enabled,
+                presentation_deadline_monotonic=next_smoothing_deadline,
             )
             with self._lifecycle_lock:
                 if self._stopped:

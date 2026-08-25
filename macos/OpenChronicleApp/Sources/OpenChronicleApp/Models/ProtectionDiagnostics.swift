@@ -258,6 +258,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
   let indicatorConfirmed: Bool
   let diagnosticsGuardActive: Bool
   let createdAt: Date
+  let snapshotCreatedMonotonic: Double?
+  let presentationDeadlineMonotonic: Double?
   let reasons: [ProtectionReasonDiagnostic]
   let displays: [ProtectionDisplayDiagnostic]
 
@@ -271,6 +273,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     indicatorConfirmed: Bool,
     diagnosticsGuardActive: Bool,
     createdAt: Date,
+    snapshotCreatedMonotonic: Double? = nil,
+    presentationDeadlineMonotonic: Double? = nil,
     reasons: [ProtectionReasonDiagnostic],
     displays: [ProtectionDisplayDiagnostic]
   ) {
@@ -283,6 +287,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     self.indicatorConfirmed = indicatorConfirmed
     self.diagnosticsGuardActive = diagnosticsGuardActive
     self.createdAt = createdAt
+    self.snapshotCreatedMonotonic = snapshotCreatedMonotonic
+    self.presentationDeadlineMonotonic = presentationDeadlineMonotonic
     self.reasons = reasons
     self.displays = displays.map {
       $0.withSnapshotContext(generation: generation, updatedAt: createdAt)
@@ -299,6 +305,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     case indicatorConfirmed = "indicator_confirmed"
     case diagnosticsGuardActive = "diagnostics_guard_active"
     case createdAt = "created_at"
+    case snapshotCreatedMonotonic = "snapshot_created_monotonic"
+    case presentationDeadlineMonotonic = "presentation_deadline_monotonic"
     case reasons
     case displays
   }
@@ -337,6 +345,14 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       createdAtValue,
       codingPath: decoder.codingPath + [CodingKeys.createdAt]
     )
+    let decodedSnapshotCreatedMonotonic = try container.decodeIfPresent(
+      Double.self,
+      forKey: .snapshotCreatedMonotonic
+    )
+    let decodedPresentationDeadlineMonotonic = try container.decodeIfPresent(
+      Double.self,
+      forKey: .presentationDeadlineMonotonic
+    )
     let decodedReasons = try container.decode(
       [ProtectionReasonDiagnostic].self,
       forKey: .reasons
@@ -351,6 +367,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     indicatorConfirmed = decodedIndicatorConfirmed
     diagnosticsGuardActive = decodedDiagnosticsGuardActive
     createdAt = decodedCreatedAt
+    snapshotCreatedMonotonic = decodedSnapshotCreatedMonotonic
+    presentationDeadlineMonotonic = decodedPresentationDeadlineMonotonic
     reasons = decodedReasons
     displays = wireDisplays.map {
       $0.withSnapshotContext(generation: decodedGeneration, updatedAt: decodedCreatedAt)
@@ -368,6 +386,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
     try container.encode(indicatorConfirmed, forKey: .indicatorConfirmed)
     try container.encode(diagnosticsGuardActive, forKey: .diagnosticsGuardActive)
     try container.encode(ProtectionDiagnosticsDateCodec.encode(createdAt), forKey: .createdAt)
+    try container.encodeIfPresent(snapshotCreatedMonotonic, forKey: .snapshotCreatedMonotonic)
+    try container.encodeIfPresent(presentationDeadlineMonotonic, forKey: .presentationDeadlineMonotonic)
     try container.encode(reasons, forKey: .reasons)
     try container.encode(displays, forKey: .displays)
   }
@@ -383,6 +403,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       indicatorConfirmed: indicatorConfirmed,
       diagnosticsGuardActive: diagnosticsGuardActive,
       createdAt: createdAt,
+      snapshotCreatedMonotonic: snapshotCreatedMonotonic,
+      presentationDeadlineMonotonic: presentationDeadlineMonotonic,
       reasons: reasons.map { $0.categoryOnly() },
       displays: displays.map { $0.categoryOnly() }
     )
@@ -399,6 +421,8 @@ struct ProtectionDiagnosticsSnapshot: Codable, Equatable {
       indicatorConfirmed: indicatorConfirmed,
       diagnosticsGuardActive: diagnosticsGuardActive,
       createdAt: createdAt,
+      snapshotCreatedMonotonic: snapshotCreatedMonotonic,
+      presentationDeadlineMonotonic: presentationDeadlineMonotonic,
       reasons: reasons.map { $0.sanitizedForPublication() },
       displays: displays.map { $0.sanitizedForPublication() }
     )

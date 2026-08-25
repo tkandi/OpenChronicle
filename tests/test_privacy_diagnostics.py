@@ -278,6 +278,28 @@ def test_category_snapshot_exposes_safe_presentation_fields(tmp_path: Path) -> N
         _stop_test_server(server)
 
 
+def test_category_snapshot_omits_nonfinite_monotonic_values(tmp_path: Path) -> None:
+    snapshot = replace(_private_decision().snapshot, created_monotonic=float("nan"))
+    decision = ProtectionDecision(
+        snapshot=snapshot,
+        indicator_confirmed=True,
+        presentation_deadline_monotonic=float("inf"),
+    )
+    server = _start_test_server(tmp_path, decision=decision)
+    try:
+        response = _round_trip(
+            server.socket_path,
+            {"schema_version": 1, "action": "subscribe"},
+        )
+        assert response["snapshot_created_monotonic"] is None
+        assert response["presentation_deadline_monotonic"] is None
+        encoded = json.dumps(response)
+        assert "NaN" not in encoded
+        assert "Infinity" not in encoded
+    finally:
+        _stop_test_server(server)
+
+
 def test_category_mapping_failure_presentation_does_not_expose_exact_values() -> None:
     app_marker = "private-mapping-app"
     bundle_marker = "private-mapping-bundle"
@@ -346,9 +368,13 @@ def test_category_mapping_failure_presentation_does_not_expose_exact_values() ->
     assert transient["presentation_phase"] == "transient-mapping-failure"
     assert transient["indicator_style"] == "quiet-shield"
     assert transient["overlay_reasons_enabled"] is False
+    assert transient["snapshot_created_monotonic"] == pytest.approx(10.0)
+    assert transient["presentation_deadline_monotonic"] == pytest.approx(10.8)
     assert sustained["presentation_phase"] == "sustained-mapping-failure"
     assert sustained["indicator_style"] == "pill"
     assert sustained["overlay_reasons_enabled"] is True
+    assert sustained["snapshot_created_monotonic"] == pytest.approx(10.8)
+    assert sustained["presentation_deadline_monotonic"] is None
 
     category_json = json.dumps([transient, sustained])
     exact_json = json.dumps(exact)

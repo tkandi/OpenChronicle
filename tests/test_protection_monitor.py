@@ -357,8 +357,14 @@ def test_monitor_mapping_failure_to_protected_keeps_episode_deadline(
         failed.presentation_phase
         is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
     )
+    assert failed.snapshot.created_monotonic == pytest.approx(10.0)
+    assert failed.presentation_deadline_monotonic == pytest.approx(10.8)
     assert protected.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert protected.snapshot.created_monotonic == pytest.approx(10.4)
+    assert protected.presentation_deadline_monotonic == pytest.approx(10.8)
     assert promoted.presentation_phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
+    assert promoted.snapshot.created_monotonic == pytest.approx(10.8)
+    assert promoted.presentation_deadline_monotonic is None
 
 
 def test_monitor_protected_return_cancels_failed_clear_pending(
@@ -1188,6 +1194,7 @@ def test_smoothing_invariant_failure_publishes_sanitized_fail_closed_decision(
         )
         assert decision.presentation_phase is ProtectionPresentationPhase.BYPASS
         assert decision.overlay_reasons_enabled is True
+        assert decision.presentation_deadline_monotonic is None
         assert failure_requires_fail_closed(cfg, decision.snapshot) is True
         assert decision.snapshot.protected_display_ids == frozenset()
         assert decision.snapshot.active_candidate_display_ids == frozenset()

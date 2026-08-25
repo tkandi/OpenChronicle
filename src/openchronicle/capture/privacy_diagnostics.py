@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import selectors
 import socket
@@ -107,6 +108,12 @@ def _error(code: str) -> dict[str, object]:
 
 def _valid_positive_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _finite_monotonic_or_none(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+        return float(value)
+    return None
 
 
 def _valid_pid(value: object) -> bool:
@@ -780,6 +787,12 @@ class PrivacyDiagnosticsServer:
             "indicator_confirmed": decision.indicator_confirmed,
             "diagnostics_guard_active": snapshot.diagnostics_guard_active,
             "created_at": created_at,
+            "snapshot_created_monotonic": _finite_monotonic_or_none(
+                snapshot.created_monotonic
+            ),
+            "presentation_deadline_monotonic": _finite_monotonic_or_none(
+                decision.presentation_deadline_monotonic
+            ),
             "reasons": [
                 reason.to_payload(detail)
                 for reason in snapshot.reasons_for_display(None)

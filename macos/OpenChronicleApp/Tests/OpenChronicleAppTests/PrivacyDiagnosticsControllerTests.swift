@@ -899,6 +899,8 @@ final class ProtectionDiagnosticsWireTests: XCTestCase {
     XCTAssertNil(snapshot.presentationPhase)
     XCTAssertNil(snapshot.indicatorStyle)
     XCTAssertNil(snapshot.overlayReasonsEnabled)
+    XCTAssertNil(snapshot.snapshotCreatedMonotonic)
+    XCTAssertNil(snapshot.presentationDeadlineMonotonic)
     let effectiveResumeAt = try XCTUnwrap(snapshot.reasons.first?.effectiveResumeAt)
     XCTAssertEqual(effectiveResumeAt.timeIntervalSince1970, 1_787_375_106, accuracy: 0.001)
     let roundTrip = try JSONDecoder().decode(
@@ -910,7 +912,7 @@ final class ProtectionDiagnosticsWireTests: XCTestCase {
 
   func testDecodesAdditiveCategoryPresentationFields() throws {
     let data = Data(
-      #"{"schema_version":1,"type":"snapshot","generation":42,"state":"protected","raw_state":"protected","presentation_phase":"transient-protected","indicator_style":"quiet-shield","overlay_reasons_enabled":false,"indicator_confirmed":true,"diagnostics_guard_active":false,"created_at":"2026-08-22T04:05:06Z","reasons":[],"displays":[]}"#.utf8
+      #"{"schema_version":1,"type":"snapshot","generation":42,"state":"protected","raw_state":"protected","presentation_phase":"transient-protected","indicator_style":"quiet-shield","overlay_reasons_enabled":false,"indicator_confirmed":true,"diagnostics_guard_active":false,"snapshot_created_monotonic":10.0,"presentation_deadline_monotonic":10.8,"created_at":"2026-08-22T04:05:06Z","reasons":[],"displays":[]}"#.utf8
     )
 
     let message = try JSONDecoder().decode(ProtectionDiagnosticsWireMessage.self, from: data)
@@ -921,6 +923,8 @@ final class ProtectionDiagnosticsWireTests: XCTestCase {
     XCTAssertEqual(snapshot.presentationPhase, "transient-protected")
     XCTAssertEqual(snapshot.indicatorStyle, "quiet-shield")
     XCTAssertEqual(snapshot.overlayReasonsEnabled, false)
+    XCTAssertEqual(snapshot.snapshotCreatedMonotonic, 10.0)
+    XCTAssertEqual(snapshot.presentationDeadlineMonotonic, 10.8)
   }
 
   func testDecodesLeaseAndErrorMessageVariants() throws {
