@@ -42,6 +42,7 @@ from .protection_smoothing import (
     ProtectionPresentationSmoother,
     ProtectionSmoothingError,
 )
+from .window_display_history import WindowDisplayHistory, WindowDisplayHistoryError
 
 logger = get("openchronicle.capture")
 _MONITOR_JOIN_TIMEOUT = 0.25
@@ -93,6 +94,7 @@ class PrivacyProtectionMonitor:
         decision_listener: Callable[[ProtectionDecision], None] | None = None,
         smoother: ProtectionPresentationSmoother | None = None,
         monotonic: Callable[[], float] = time.monotonic,
+        window_display_history: WindowDisplayHistory | None = None,
     ) -> None:
         self._cfg = cfg
         self._config_path = config_path
@@ -107,6 +109,12 @@ class PrivacyProtectionMonitor:
             smoother if smoother is not None else ProtectionPresentationSmoother()
         )
         self._monotonic = monotonic
+        self._window_display_history = (
+            window_display_history
+            if window_display_history is not None
+            else WindowDisplayHistory()
+        )
+        self._window_display_history_lock = threading.Lock()
         self._indicator_style = cfg.privacy_indicator_style
         self._indicator_placement = cfg.privacy_indicator_placement
         self._config_mtime_ns: int | None = None
@@ -153,6 +161,7 @@ class PrivacyProtectionMonitor:
             self._stopped = True
             self._stop.set()
             self._wake.set()
+            self._reset_window_display_history()
             if self._overlay_closed:
                 return
             self._overlay_closed = True
@@ -292,6 +301,7 @@ class PrivacyProtectionMonitor:
                 )
             else:
                 paused, inventory, failure_reason, pause_reason = self._read_protection_inputs()
+                self._raise_if_stopped()
                 snapshot_cfg = replace(
                     self._cfg,
                     privacy_indicator_style=self._indicator_style,
@@ -304,6 +314,29 @@ class PrivacyProtectionMonitor:
                         deny_bundle_ids=[],
                         deny_window_title_patterns=[],
                     )
+                diagnostic_display_ids = diagnostics_guard.display_ids
+                diagnostics_guard_invalid = diagnostics_guard.fail_closed_all
+                if inventory is not None:
+                    try:
+                        inventory = self._resolve_window_display_history(
+                            inventory,
+                            now=now,
+                        )
+                    except WindowDisplayHistoryError:
+                        logger.warning(
+                            "privacy window display history failed: "
+                            "WindowDisplayHistoryError"
+                        )
+                        self._reset_window_display_history()
+                        paused = False
+                        inventory = None
+                        failure_reason = (
+                            ProtectionFailureReason.PRESENTATION_STATE_INVALID
+                        )
+                        pause_reason = None
+                        diagnostic_display_ids = frozenset()
+                        diagnostics_guard_invalid = False
+                    self._reset_history_if_stopped()
                 raw_snapshot = build_protection_snapshot(
                     snapshot_cfg,
                     inventory,
@@ -312,8 +345,8 @@ class PrivacyProtectionMonitor:
                     now=now,
                     failure_reason=failure_reason,
                     pause_reason=pause_reason,
-                    diagnostic_display_ids=diagnostics_guard.display_ids,
-                    diagnostics_guard_invalid=diagnostics_guard.fail_closed_all,
+                    diagnostic_display_ids=diagnostic_display_ids,
+                    diagnostics_guard_invalid=diagnostics_guard_invalid,
                 )
             try:
                 result = self._smoother.resolve(raw_snapshot, now=now)
@@ -487,6 +520,25 @@ class PrivacyProtectionMonitor:
             ProtectionFailureReason.INVENTORY_UNAVAILABLE if result is None else None,
             pause_reason,
         )
+
+    def _resolve_window_display_history(
+        self,
+        inventory: WindowInventory,
+        *,
+        now: float,
+    ) -> WindowInventory:
+        with self._window_display_history_lock:
+            return self._window_display_history.resolve(inventory, now=now)
+
+    def _reset_window_display_history(self) -> None:
+        with self._window_display_history_lock:
+            self._window_display_history.reset()
+
+    def _reset_history_if_stopped(self) -> None:
+        if not self._is_stopped():
+            return
+        self._reset_window_display_history()
+        self._raise_if_stopped()
 
     @staticmethod
     def _normalize_pause_decision(value: CapturePauseDecision | bool) -> CapturePauseDecision:

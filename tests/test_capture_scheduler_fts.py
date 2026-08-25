@@ -678,6 +678,128 @@ def test_protected_active_display_skips_ax_but_captures_safe_monitor(
     assert screenshot_calls[0]["blocked_regions"] == monitor.snapshot.protected_regions
 
 
+def test_real_monitor_history_fallback_keeps_safe_display_and_revalidates_filtered_capture(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+
+    def private_inventory(region: ScreenRegion) -> WindowInventory:
+        return WindowInventory(
+            windows=(
+                VisibleWindow(
+                    "Edge",
+                    "edge",
+                    "InPrivate",
+                    region,
+                    True,
+                    window_id=73,
+                ),
+            ),
+            displays=displays,
+        )
+
+    mapped_inventory = private_inventory(ScreenRegion(10, 0, 80, 90))
+    fallback_inventory = private_inventory(ScreenRegion(300, 0, 80, 90))
+    current_inventory = mapped_inventory
+    cfg = CaptureConfig(
+        screenshot_monitor="separate",
+        screenshot_privacy_mode="exclude-window",
+        privacy_indicator_style="off",
+        deny_window_title_patterns=["InPrivate"],
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing-config.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: current_inventory,
+        pause_reader=lambda: False,
+        monotonic=lambda: 10.0,
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://must-not-capture.example"))
+    mss_calls: list[dict[str, object]] = []
+    filtered_calls: list[dict[str, object]] = []
+
+    def safe_display_shot(label: str) -> scheduler_mod.screenshot.Screenshot:
+        return scheduler_mod.screenshot.Screenshot(
+            image_base64=label,
+            width=100,
+            height=100,
+            monitor_index=2,
+            monitor_left=100,
+            monitor_top=0,
+            monitor_width=100,
+            monitor_height=100,
+        )
+
+    def capture_unprotected_display(**kwargs):
+        mss_calls.append(kwargs)
+        assert kwargs["monitor_mode"] == "separate"
+        assert kwargs["blocked_regions"] == [displays[0].region]
+        return [safe_display_shot(f"SAFE-DISPLAY-2-{len(mss_calls)}")]
+
+    def return_stale_filtered_frame(**kwargs):
+        nonlocal current_inventory
+        filtered_calls.append(kwargs)
+        current_inventory = fallback_inventory
+        return [_shot("STALE-PRE-FALLBACK")]
+
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        capture_unprotected_display,
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        return_stale_filtered_frame,
+    )
+
+    try:
+        monitor.decision_for_capture(force=True)
+        current_inventory = fallback_inventory
+        fallback_out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+        fallback_decision = monitor.decision_for_capture(force=False)
+
+        assert fallback_out is not None
+        assert fallback_out["ax_skipped"] == "protected_display"
+        assert fallback_out["screenshot"]["image_base64"] == "SAFE-DISPLAY-2-1"
+        assert fallback_out["screenshot"]["monitor"]["left"] == 100
+        assert fallback_decision.snapshot.state is ProtectionState.PROTECTED
+        assert fallback_decision.snapshot.active_display_id == 1
+        assert fallback_decision.snapshot.ax_blocked is True
+        assert fallback_decision.snapshot.protected_display_ids == frozenset({1})
+        assert fallback_decision.snapshot.display_mapping_fallback_active is True
+        assert fallback_decision.snapshot.window_filterable is False
+        assert filtered_calls == []
+
+        current_inventory = mapped_inventory
+        revalidated_out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            {"event_type": "manual"},
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert revalidated_out is not None
+    assert revalidated_out["screenshot"]["image_base64"] == "SAFE-DISPLAY-2-2"
+    assert "STALE-PRE-FALLBACK" not in json.dumps(revalidated_out)
+    assert len(filtered_calls) == 1
+    assert len(mss_calls) == 2
+    assert provider.calls == 0
+
+
 def test_diagnostics_guard_uses_monitor_gate_without_leaking_exact_reason(
     ac_root: Path,
     monkeypatch,

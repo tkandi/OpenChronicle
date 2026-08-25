@@ -39,6 +39,10 @@ from openchronicle.capture.protection_smoothing import (
     ProtectionPresentationSmoother,
     ProtectionSmoothingError,
 )
+from openchronicle.capture.window_display_history import (
+    WindowDisplayHistory,
+    WindowDisplayHistoryError,
+)
 from openchronicle.capture_pause import CapturePauseDecision, CapturePauseKind
 from openchronicle.config import CaptureConfig
 
@@ -147,6 +151,21 @@ class RaisingSmoother:
         self.reset_calls += 1
 
 
+class RecordingWindowDisplayHistory(WindowDisplayHistory):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resolve_times: list[float] = []
+        self.reset_calls = 0
+
+    def resolve(self, inventory: WindowInventory, *, now: float) -> WindowInventory:
+        self.resolve_times.append(now)
+        return super().resolve(inventory, now=now)
+
+    def reset(self) -> None:
+        self.reset_calls += 1
+        super().reset()
+
+
 @pytest.fixture
 def inventory() -> WindowInventory:
     displays = (
@@ -193,6 +212,7 @@ def make_monitor(
     fail_closed: bool = True,
     smoother: ProtectionPresentationSmoother | None = None,
     monotonic: Callable[[], float] = time.monotonic,
+    window_display_history: WindowDisplayHistory | None = None,
 ) -> PrivacyProtectionMonitor:
     cfg = CaptureConfig(
         screenshot_monitor="separate",
@@ -200,6 +220,9 @@ def make_monitor(
         deny_window_title_patterns=["InPrivate"],
         screenshot_privacy_fail_closed=fail_closed,
     )
+    kwargs = {}
+    if window_display_history is not None:
+        kwargs["window_display_history"] = window_display_history
     return PrivacyProtectionMonitor(
         cfg,
         config_path=config_path or Path("/nonexistent/config.toml"),
@@ -211,6 +234,32 @@ def make_monitor(
         decision_listener=decision_listener,
         smoother=smoother,
         monotonic=monotonic,
+        **kwargs,
+    )
+
+
+def _history_inventory(
+    region: ScreenRegion,
+    *,
+    window_id: int | None = 73,
+    bundle_id: str = "edge",
+    is_active: bool = True,
+) -> WindowInventory:
+    return WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                bundle_id,
+                "InPrivate",
+                region,
+                is_active,
+                window_id=window_id,
+            ),
+        ),
+        displays=(
+            DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+            DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+        ),
     )
 
 
@@ -235,6 +284,229 @@ def test_monitor_uses_injected_clock_for_snapshot_and_cache_freshness(
     decision = monitor.decision_for_capture(force=True)
     assert decision.snapshot.created_monotonic == 10.0
     assert decision.snapshot.fresh_until == pytest.approx(10.25)
+
+
+def test_monitor_resolves_mapped_window_history_before_snapshot_with_same_clock(
+    fake_overlay,
+) -> None:
+    clock = FakeMonotonic(10.0)
+    current_inventory = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    history = RecordingWindowDisplayHistory()
+    monitor = make_monitor(
+        inventory=current_inventory,
+        overlay=fake_overlay,
+        inventory_reader=lambda: current_inventory,
+        monotonic=clock,
+        window_display_history=history,
+    )
+
+    first = monitor.decision_for_capture(force=True)
+    current_inventory = _history_inventory(ScreenRegion(300, 0, 80, 90))
+    clock.advance(0.1)
+    fallback = monitor.decision_for_capture(force=True)
+
+    assert first.snapshot.state is ProtectionState.PROTECTED
+    assert fallback.raw_state is ProtectionState.PROTECTED
+    assert fallback.snapshot.state is ProtectionState.PROTECTED
+    assert fallback.snapshot.failure_reason is None
+    assert fallback.snapshot.protected_display_ids == frozenset({1})
+    assert fallback.snapshot.display_mapping_fallback_active is True
+    assert 2 not in fallback.snapshot.protected_display_ids
+    assert fallback.snapshot.window_filterable is False
+    assert history.resolve_times == [
+        first.snapshot.created_monotonic,
+        fallback.snapshot.created_monotonic,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mapped_window_id", "fallback_bundle_id"),
+    [
+        (None, "edge"),
+        (73, "different-owner"),
+    ],
+    ids=("missing-window-id", "owner-mismatch"),
+)
+def test_monitor_history_identity_miss_remains_mapping_failed(
+    fake_overlay,
+    mapped_window_id: int | None,
+    fallback_bundle_id: str,
+) -> None:
+    clock = FakeMonotonic(10.0)
+    current_inventory = _history_inventory(
+        ScreenRegion(10, 0, 80, 90),
+        window_id=mapped_window_id,
+    )
+    monitor = make_monitor(
+        inventory=current_inventory,
+        overlay=fake_overlay,
+        inventory_reader=lambda: current_inventory,
+        monotonic=clock,
+    )
+
+    monitor.decision_for_capture(force=True)
+    current_inventory = _history_inventory(
+        ScreenRegion(300, 0, 80, 90),
+        window_id=mapped_window_id,
+        bundle_id=fallback_bundle_id,
+    )
+    clock.advance(0.1)
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert (
+        decision.snapshot.failure_reason
+        is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+    )
+    assert decision.snapshot.display_mapping_fallback_active is False
+
+
+@pytest.mark.parametrize(
+    ("absence_seconds", "expected_state"),
+    [
+        (4.999, ProtectionState.PROTECTED),
+        (5.0, ProtectionState.FAILED),
+    ],
+    ids=("before-ttl", "at-ttl"),
+)
+def test_monitor_history_absence_ttl_boundary(
+    fake_overlay,
+    absence_seconds: float,
+    expected_state: ProtectionState,
+) -> None:
+    clock = FakeMonotonic(0.0)
+    current_inventory = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    monitor = make_monitor(
+        inventory=current_inventory,
+        overlay=fake_overlay,
+        inventory_reader=lambda: current_inventory,
+        monotonic=clock,
+    )
+
+    monitor.decision_for_capture(force=True)
+    current_inventory = WindowInventory(
+        windows=(),
+        displays=current_inventory.displays,
+    )
+    clock.advance(absence_seconds)
+    monitor.decision_for_capture(force=True)
+    current_inventory = _history_inventory(ScreenRegion(300, 0, 80, 90))
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is expected_state
+    if expected_state is ProtectionState.PROTECTED:
+        assert decision.snapshot.protected_display_ids == frozenset({1})
+        assert decision.snapshot.display_mapping_fallback_active is True
+    else:
+        assert (
+            decision.snapshot.failure_reason
+            is ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED
+        )
+
+
+def test_guard_only_monitor_resolves_active_display_from_history(fake_overlay) -> None:
+    clock = FakeMonotonic(10.0)
+    current_inventory = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(screenshot_monitor="separate"),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: current_inventory,
+        pause_reader=lambda: False,
+        diagnostics_guard_reader=lambda: DiagnosticsGuardSnapshot(
+            frozenset({2}),
+            False,
+        ),
+        diagnostics_guard_only=True,
+        monotonic=clock,
+    )
+
+    monitor.decision_for_capture(force=True)
+    current_inventory = _history_inventory(ScreenRegion(300, 0, 80, 90))
+    clock.advance(0.1)
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.PROTECTED
+    assert decision.snapshot.failure_reason is None
+    assert decision.snapshot.protected_display_ids == frozenset({2})
+    assert decision.snapshot.active_display_id == 1
+    assert decision.snapshot.ax_blocked is False
+
+
+def test_history_error_is_reset_and_published_as_sanitized_hard_failure(
+    inventory,
+    fake_overlay,
+) -> None:
+    marker = "private-history-error-body"
+
+    class RaisingHistory(RecordingWindowDisplayHistory):
+        def resolve(
+            self,
+            _inventory: WindowInventory,
+            *,
+            now: float,
+        ) -> WindowInventory:
+            raise WindowDisplayHistoryError(marker)
+
+    history = RaisingHistory()
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        window_display_history=history,
+    )
+
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler()
+    handler.emit = lambda record: records.append(record)  # type: ignore[method-assign]
+    capture_logger = logging.getLogger("openchronicle.capture")
+    capture_logger.addHandler(handler)
+    try:
+        decision = monitor.decision_for_capture(force=True)
+    finally:
+        capture_logger.removeHandler(handler)
+
+    assert decision.raw_state is ProtectionState.FAILED
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert (
+        decision.snapshot.failure_reason
+        is ProtectionFailureReason.PRESENTATION_STATE_INVALID
+    )
+    assert decision.snapshot.protected_display_ids == frozenset()
+    assert decision.snapshot.protected_window_ids == frozenset()
+    assert decision.snapshot.protected_window_regions == ()
+    assert decision.snapshot.window_filterable is False
+    assert decision.snapshot.display_mapping_fallback_active is False
+    assert [
+        reason.code for reason in decision.snapshot.display_reasons.reasons
+    ] == [ProtectionReasonCode.PRESENTATION_STATE_INVALID]
+    assert history.reset_calls == 1
+    rendered = "\n".join(record.getMessage() for record in records)
+    assert marker not in rendered
+    assert "WindowDisplayHistoryError" in rendered
+
+
+def test_stop_resets_history_and_never_publishes_another_decision(
+    inventory,
+    fake_overlay,
+) -> None:
+    history = RecordingWindowDisplayHistory()
+    decisions: list[ProtectionDecision] = []
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=decisions.append,
+        window_display_history=history,
+    )
+    monitor.decision_for_capture(force=True)
+
+    monitor.stop()
+    monitor.request_refresh()
+
+    assert history.reset_calls == 1
+    assert len(decisions) == 1
+    with pytest.raises(RuntimeError, match="stopped"):
+        monitor.decision_for_capture(force=True)
+    assert len(decisions) == 1
 
 
 def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
