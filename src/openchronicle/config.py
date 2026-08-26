@@ -22,6 +22,11 @@ PRIVACY_REASON_TRIGGERS = frozenset({"always", "hover", "click"})
 SCREENSHOT_PRIVACY_MODES = frozenset(
     {"off", "skip-monitor", "mask-window", "exclude-window"}
 )
+DEFAULT_PROTECT_UNKNOWN_TITLE_BUNDLE_IDS = (
+    "com.microsoft.edgemac",
+    "com.google.Chrome",
+    "org.mozilla.firefox",
+)
 
 
 def _str_list(value: Any) -> list[str]:
@@ -82,6 +87,10 @@ class CaptureConfig:
     # pattern entries are case-insensitive regular expressions.
     deny_app_names: list[str] = field(default_factory=list)
     deny_bundle_ids: list[str] = field(default_factory=list)
+    protect_unknown_title_bundle_ids: list[str] = field(
+        default_factory=lambda: list(DEFAULT_PROTECT_UNKNOWN_TITLE_BUNDLE_IDS),
+        kw_only=True,
+    )
     deny_window_title_patterns: list[str] = field(default_factory=list)
     deny_url_patterns: list[str] = field(default_factory=list)
     deny_text_patterns: list[str] = field(default_factory=list)
@@ -123,6 +132,9 @@ class CaptureConfig:
         )
         self.deny_app_names = _str_list(self.deny_app_names)
         self.deny_bundle_ids = _str_list(self.deny_bundle_ids)
+        self.protect_unknown_title_bundle_ids = _str_list(
+            self.protect_unknown_title_bundle_ids
+        )
         self.deny_window_title_patterns = _str_list(self.deny_window_title_patterns)
         self.deny_url_patterns = _str_list(self.deny_url_patterns)
         self.deny_text_patterns = _str_list(self.deny_text_patterns)
@@ -338,6 +350,11 @@ ax_timeout_seconds = 3
 # screenshot capture, FTS indexing, timeline ingestion, and model processing.
 deny_app_names = []
 deny_bundle_ids = []
+protect_unknown_title_bundle_ids = [
+  "com.microsoft.edgemac",
+  "com.google.Chrome",
+  "org.mozilla.firefox",
+]
 deny_window_title_patterns = []
 deny_url_patterns = []
 deny_text_patterns = []

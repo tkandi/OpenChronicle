@@ -54,6 +54,26 @@ deny_text_patterns = ["secret token"]
     assert cfg.capture.deny_text_patterns == ["secret token"]
 
 
+def test_unknown_title_protection_bundle_defaults_and_override(tmp_path: Path) -> None:
+    missing = config.load(tmp_path / "missing.toml").capture
+    assert missing.protect_unknown_title_bundle_ids == [
+        "com.microsoft.edgemac",
+        "com.google.Chrome",
+        "org.mozilla.firefox",
+    ]
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[capture]\nprotect_unknown_title_bundle_ids = ["com.example.browser"]\n'
+    )
+    assert config.load(path).capture.protect_unknown_title_bundle_ids == [
+        "com.example.browser"
+    ]
+
+    path.write_text('[capture]\nprotect_unknown_title_bundle_ids = []\n')
+    assert config.load(path).capture.protect_unknown_title_bundle_ids == []
+
+
 def test_capture_screenshot_monitor_config(tmp_path: Path) -> None:
     path = tmp_path / "config.toml"
     path.write_text(
@@ -222,6 +242,11 @@ def test_capture_config_preserves_pre_indicator_placement_positional_signature()
         ["private text"],
     )
     assert capture.privacy_indicator_placement == "bottom-left-flush"
+    assert capture.protect_unknown_title_bundle_ids == [
+        "com.microsoft.edgemac",
+        "com.google.Chrome",
+        "org.mozilla.firefox",
+    ]
 
 
 def test_privacy_reason_settings_default_and_normalize(tmp_path: Path) -> None:

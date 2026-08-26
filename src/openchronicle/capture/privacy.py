@@ -239,7 +239,11 @@ def visible_window_rule_matches(
             VisibleWindowRuleMatch(kind, rule, app_name, bundle_id, window_title)
             for rule in rules
         )
-    if not window.title_available and any(cfg.deny_window_title_patterns):
+    if (
+        not window.title_available
+        and any(cfg.deny_window_title_patterns)
+        and exact_match(window.bundle_id, cfg.protect_unknown_title_bundle_ids)
+    ):
         matches.append(
             VisibleWindowRuleMatch(
                 ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,

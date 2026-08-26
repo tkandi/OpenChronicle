@@ -136,13 +136,99 @@ def test_unknown_window_title_has_no_invented_title_rule_or_value() -> None:
 
     matches = privacy.visible_window_rule_matches(
         cfg,
-        _window(app="Browser", bundle="com.example.browser", title="", title_available=False),
+        _window(
+            app="Microsoft Edge",
+            bundle="com.microsoft.edgemac",
+            title="",
+            title_available=False,
+        ),
     )
 
     assert len(matches) == 1
     assert matches[0].kind.value == "window_title_unknown"
     assert matches[0].rule is None
     assert matches[0].window_title is None
+
+
+@pytest.mark.parametrize(
+    "bundle",
+    ["com.microsoft.edgemac", "com.google.Chrome", "org.mozilla.firefox"],
+)
+def test_unknown_browser_title_is_protected_by_default(bundle: str) -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(app="Browser", bundle=bundle, title="", title_available=False),
+    )
+
+    assert [match.kind.value for match in matches] == ["window_title_unknown"]
+
+
+def test_unknown_feishu_title_is_not_protected() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(
+            app="飞书会议",
+            bundle="com.electron.lark.iron",
+            title="",
+            title_available=False,
+        ),
+    )
+
+    assert matches == ()
+
+
+def test_unknown_title_bundle_scope_is_case_insensitive() -> None:
+    cfg = CaptureConfig(
+        deny_window_title_patterns=["InPrivate"],
+        protect_unknown_title_bundle_ids=["COM.MICROSOFT.EDGEMAC"],
+    )
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(bundle="com.microsoft.edgemac", title_available=False),
+    )
+
+    assert [match.kind.value for match in matches] == ["window_title_unknown"]
+
+
+def test_empty_unknown_title_bundle_scope_disables_only_unknown_branch() -> None:
+    cfg = CaptureConfig(
+        deny_window_title_patterns=["InPrivate"],
+        protect_unknown_title_bundle_ids=[],
+    )
+
+    assert privacy.visible_window_rule_matches(
+        cfg,
+        _window(bundle="com.microsoft.edgemac", title_available=False),
+    ) == ()
+    known = privacy.visible_window_rule_matches(
+        cfg,
+        _window(bundle="com.electron.lark.iron", title="New InPrivate Window"),
+    )
+    assert [match.kind.value for match in known] == ["window_title_rule"]
+
+
+def test_direct_bundle_rule_still_protects_unknown_feishu_title() -> None:
+    cfg = CaptureConfig(
+        deny_bundle_ids=["com.electron.lark.iron"],
+        deny_window_title_patterns=["InPrivate"],
+        protect_unknown_title_bundle_ids=[],
+    )
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(
+            app="飞书会议",
+            bundle="com.electron.lark.iron",
+            title_available=False,
+        ),
+    )
+
+    assert [match.kind.value for match in matches] == ["bundle_rule"]
 
 
 def test_unknown_window_title_with_only_empty_patterns_has_no_match() -> None:
@@ -185,7 +271,12 @@ def test_privacy_mode_off_preserves_every_foreground_denylist_field() -> None:
 def test_unknown_title_is_locally_sensitive_when_title_rules_are_enabled(monkeypatch) -> None:
     cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
     windows = [
-        _window(app="Unsupported", left=100, title_available=False),
+        _window(
+            app="Microsoft Edge",
+            bundle="com.microsoft.edgemac",
+            left=100,
+            title_available=False,
+        ),
         _window(app="Known", title="main.py", left=200),
     ]
     monkeypatch.setattr(privacy, "list_visible_windows", lambda: windows)

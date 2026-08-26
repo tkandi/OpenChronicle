@@ -297,7 +297,7 @@ def test_unknown_title_rule_protects_display_without_authorizing_window_filterin
         windows=(
             VisibleWindow(
                 "Private Browser",
-                "private",
+                "com.microsoft.edgemac",
                 "",
                 region,
                 title_available=False,
@@ -368,7 +368,7 @@ def test_unknown_only_sensitive_window_revokes_mixed_inventory_filterability() -
             ),
             VisibleWindow(
                 "Browser",
-                "browser",
+                "com.microsoft.edgemac",
                 "",
                 unknown_region,
                 title_available=False,
@@ -703,7 +703,7 @@ def test_unknown_title_protects_only_the_mode_mapped_displays(
         windows=(
             VisibleWindow(
                 "Browser",
-                "browser",
+                "com.microsoft.edgemac",
                 "",
                 ScreenRegion(110, 0, 80, 90),
                 title_available=False,
@@ -1249,7 +1249,7 @@ def test_title_unknown_display_history_marks_fallback_protection() -> None:
         windows=(
             VisibleWindow(
                 "Edge",
-                "edge",
+                "com.microsoft.edgemac",
                 "",
                 ScreenRegion(300, 0, 80, 90),
                 title_available=False,
