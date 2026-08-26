@@ -23,6 +23,7 @@ Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 Privacy denylist checks can short-circuit this flow:
 
 - `deny_app_names`, `deny_bundle_ids`, and `deny_window_title_patterns` run immediately after window metadata is available, before AX and screenshots.
+- `protect_unknown_title_bundle_ids` limits only the conservative `window_title_unknown` branch; it is not itself a deny rule.
 - `deny_url_patterns` and `deny_text_patterns` run after S1 parsing, before screenshots and disk writes.
 - Denied captures are not written to JSON, not inserted into `captures_fts`, not absorbed into timeline blocks, and not sent to any model stage.
 
@@ -63,15 +64,27 @@ before reading that accepted element's title. AX position, size, and geometry
 never authorize or locate a fallback. A blank title that cannot be resolved is
 still emitted with `title_available = false`; it does not invalidate unrelated
 windows. If any title deny rule is enabled, that unknown-title window is treated
-as sensitive only on the displays its CoreGraphics bounds intersect.
+as sensitive only when its exact, case-insensitive Bundle ID appears in
+`protect_unknown_title_bundle_ids`, and only on the displays its CoreGraphics
+bounds intersect. The default scope contains Edge, Chrome, and Firefox.
+
+This policy is title-based rather than a browser private-mode API:
+
+| Title state | Bundle in unknown-title scope | Direct app/bundle match | Result |
+|---|---:|---:|---|
+| reliable and title regex matches | either | either | protected |
+| unavailable | yes | no | protected: `window_title_unknown` |
+| unavailable | no | no | not protected |
+| unavailable | either | yes | protected by direct rule |
 
 The focused AX window is marked active only through the same exact identity. If
 that identity is unavailable, every on-screen layer-0 window owned by the
 frontmost PID is emitted as an active candidate. AX is then suppressed only when
 a candidate intersects a protected display. This avoids a global outage when
-the uncertain foreground candidates are confined to a different display, while
-never treating an unknown title as allowed. Genuine helper exit, JSON parse, or
-display-inventory failures still produce a fixed-code `failed` decision.
+the uncertain foreground candidates are confined to a different display.
+Unlisted unknown-title windows are allowed by explicit policy, while genuine
+helper exit, JSON parse, or display-inventory failures still produce a
+fixed-code `failed` decision.
 
 Menus, popovers, and non-layer-0 floating panels are not independently treated
 as protected full-display windows by their titles. Once a normal protected
@@ -160,6 +173,11 @@ prove absence of a different application's privacy window that appears and
 disappears entirely between the two snapshots. For high-risk workflows, keep
 password managers in the app/bundle denylist and pause capture before displaying
 secrets.
+
+The unknown-title Bundle scope does not weaken direct app/bundle rules or
+reliable title matches. Removing a browser from the scope is an explicit privacy
+reduction limited to moments when that browser's title identity cannot be
+established.
 
 ## Privacy protection indicators
 

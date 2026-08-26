@@ -792,7 +792,7 @@ def test_monitor_title_uncertainty_silences_mapped_unknown_without_changing_prot
         windows=(
             VisibleWindow(
                 "Edge",
-                "edge",
+                "com.microsoft.edgemac",
                 "",
                 ScreenRegion(110, 0, 80, 90),
                 is_active=True,

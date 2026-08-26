@@ -161,6 +161,14 @@ case-insensitive matches; window-title, URL, and text rules use Python regular
 expressions with case-insensitive matching. Empty rules are rejected in the UI,
 and Python validates every expression before any file is written.
 
+The same editor exposes **Unknown-title Protected Bundle IDs**. It defaults to
+Edge (`com.microsoft.edgemac`), Chrome (`com.google.Chrome`), and Firefox
+(`org.mozilla.firefox`). This list scopes only the conservative case where a
+visible window has no trustworthy title while title rules are configured.
+Reliable title matches and direct app/bundle matches remain global; an empty
+list disables only unknown-title protection. The collapsed settings view shows
+only the list count.
+
 Every save is strictly validated, checks that the file has not changed since it
 was loaded, creates a timestamped `config.toml.backup-*`, and atomically replaces
 the original. Unknown keys and comments survive common-form updates. **Save**
