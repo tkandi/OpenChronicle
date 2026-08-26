@@ -48,6 +48,7 @@ final class ConfigurationTests: XCTestCase {
           "privacy_reason_trigger": "hover",
           "privacy_counts": {
             "deny_app_names": 1, "deny_bundle_ids": 0,
+            "protect_unknown_title_bundle_ids": 3,
             "deny_window_title_patterns": 1, "deny_url_patterns": 0,
             "deny_text_patterns": 0
           }
@@ -78,6 +79,9 @@ final class ConfigurationTests: XCTestCase {
       "values": {
         "deny_app_names": ["Mail"],
         "deny_bundle_ids": [],
+        "protect_unknown_title_bundle_ids": [
+          "com.microsoft.edgemac", "com.google.Chrome", "org.mozilla.firefox"
+        ],
         "deny_window_title_patterns": ["Private"],
         "deny_url_patterns": [],
         "deny_text_patterns": []
@@ -386,6 +390,34 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(edited.validationError, "URL patterns cannot contain an empty rule.")
   }
 
+  func testUnknownTitleProtectedBundlesDecodeValidateAndEmitChanges() throws {
+    let snapshot = try JSONDecoder().decode(
+      PrivacyConfigurationSnapshot.self,
+      from: Data(privacySnapshotPayload(path: "/tmp/config.toml").utf8)
+    )
+    let original = try XCTUnwrap(PrivacyConfigurationDraft(snapshot: snapshot))
+    XCTAssertEqual(
+      original.protectUnknownTitleBundleIDs,
+      ["com.microsoft.edgemac", "com.google.Chrome", "org.mozilla.firefox"]
+    )
+
+    var edited = original
+    edited.protectUnknownTitleBundleIDs = ["com.microsoft.edgemac"]
+    let updates = edited.updates(comparedTo: original)
+
+    XCTAssertEqual(updates.count, 1)
+    XCTAssertEqual(
+      updates["capture.protect_unknown_title_bundle_ids"] as? [String],
+      ["com.microsoft.edgemac"]
+    )
+    XCTAssertNil(edited.validationError)
+    edited.protectUnknownTitleBundleIDs.append("   ")
+    XCTAssertEqual(
+      edited.validationError,
+      "Unknown-title protected Bundle IDs cannot contain an empty rule."
+    )
+  }
+
   @MainActor
   func testConfigurationControllerLoadsAndSendsPatch() async throws {
     let root = FileManager.default.temporaryDirectory
@@ -439,6 +471,12 @@ final class ConfigurationTests: XCTestCase {
     XCTAssertEqual(
       controller.snapshot?.values?.capture.privacyCount("deny_app_names"),
       1
+    )
+    XCTAssertEqual(
+      controller.snapshot?.values?.capture.privacyCount(
+        "protect_unknown_title_bundle_ids"
+      ),
+      3
     )
     await controller.loadPrivacy()
     XCTAssertNil(controller.lastError)

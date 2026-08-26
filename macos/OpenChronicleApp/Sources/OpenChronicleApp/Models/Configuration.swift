@@ -467,6 +467,7 @@ struct PrivacyConfigurationSnapshot: Decodable, Equatable {
 struct PrivacyConfigurationValues: Decodable, Equatable {
   let denyAppNames: [String]
   let denyBundleIDs: [String]
+  let protectUnknownTitleBundleIDs: [String]
   let denyWindowTitlePatterns: [String]
   let denyURLPatterns: [String]
   let denyTextPatterns: [String]
@@ -474,6 +475,7 @@ struct PrivacyConfigurationValues: Decodable, Equatable {
   enum CodingKeys: String, CodingKey {
     case denyAppNames = "deny_app_names"
     case denyBundleIDs = "deny_bundle_ids"
+    case protectUnknownTitleBundleIDs = "protect_unknown_title_bundle_ids"
     case denyWindowTitlePatterns = "deny_window_title_patterns"
     case denyURLPatterns = "deny_url_patterns"
     case denyTextPatterns = "deny_text_patterns"
@@ -483,6 +485,7 @@ struct PrivacyConfigurationValues: Decodable, Equatable {
 struct PrivacyConfigurationDraft: Equatable {
   var denyAppNames: [String]
   var denyBundleIDs: [String]
+  var protectUnknownTitleBundleIDs: [String]
   var denyWindowTitlePatterns: [String]
   var denyURLPatterns: [String]
   var denyTextPatterns: [String]
@@ -491,6 +494,7 @@ struct PrivacyConfigurationDraft: Equatable {
     guard let values = snapshot.values else { return nil }
     denyAppNames = values.denyAppNames
     denyBundleIDs = values.denyBundleIDs
+    protectUnknownTitleBundleIDs = values.protectUnknownTitleBundleIDs
     denyWindowTitlePatterns = values.denyWindowTitlePatterns
     denyURLPatterns = values.denyURLPatterns
     denyTextPatterns = values.denyTextPatterns
@@ -500,6 +504,7 @@ struct PrivacyConfigurationDraft: Equatable {
     let groups: [(String, [String])] = [
       ("App names", denyAppNames),
       ("Bundle IDs", denyBundleIDs),
+      ("Unknown-title protected Bundle IDs", protectUnknownTitleBundleIDs),
       ("Window-title patterns", denyWindowTitlePatterns),
       ("URL patterns", denyURLPatterns),
       ("Text patterns", denyTextPatterns),
@@ -514,6 +519,12 @@ struct PrivacyConfigurationDraft: Equatable {
     var updates: [String: Any] = [:]
     add(&updates, "capture.deny_app_names", denyAppNames, original.denyAppNames)
     add(&updates, "capture.deny_bundle_ids", denyBundleIDs, original.denyBundleIDs)
+    add(
+      &updates,
+      "capture.protect_unknown_title_bundle_ids",
+      protectUnknownTitleBundleIDs,
+      original.protectUnknownTitleBundleIDs
+    )
     add(
       &updates,
       "capture.deny_window_title_patterns",

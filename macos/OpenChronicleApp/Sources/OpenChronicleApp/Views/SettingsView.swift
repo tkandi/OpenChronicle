@@ -436,6 +436,14 @@ struct SettingsView: View {
           )
           Divider()
           PrivacyRuleList(
+            title: "Unknown-title Protected Bundle IDs",
+            detail:
+              "Exact Bundle IDs whose windows stay protected when a reliable title cannot be read.",
+            placeholder: "com.microsoft.edgemac",
+            values: privacyBinding(\.protectUnknownTitleBundleIDs, fallback: [])
+          )
+          Divider()
+          PrivacyRuleList(
             title: "Window-title Patterns",
             detail: "Case-insensitive Python regular expressions matched against window titles.",
             placeholder: "(?i)private|incognito",
@@ -484,6 +492,10 @@ struct SettingsView: View {
       } else {
         privacyCountRow("App names", field: "deny_app_names")
         privacyCountRow("Bundle IDs", field: "deny_bundle_ids")
+        privacyCountRow(
+          "Unknown-title protected bundles",
+          field: "protect_unknown_title_bundle_ids"
+        )
         privacyCountRow("Window-title patterns", field: "deny_window_title_patterns")
         privacyCountRow("URL patterns", field: "deny_url_patterns")
         privacyCountRow("Text patterns", field: "deny_text_patterns")
