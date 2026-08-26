@@ -34,6 +34,7 @@ MODEL_STAGES = ("default", "timeline", "reducer", "classifier", "compact")
 PRIVACY_FIELDS = (
     "deny_app_names",
     "deny_bundle_ids",
+    "protect_unknown_title_bundle_ids",
     "deny_window_title_patterns",
     "deny_url_patterns",
     "deny_text_patterns",
@@ -286,11 +287,20 @@ def validate_mapping(raw: dict[str, Any]) -> None:
     for key in (
         "deny_app_names",
         "deny_bundle_ids",
+        "protect_unknown_title_bundle_ids",
         "deny_window_title_patterns",
         "deny_url_patterns",
         "deny_text_patterns",
     ):
         values = _validate_string_list(capture, key, f"capture.{key}")
+        if (
+            key == "protect_unknown_title_bundle_ids"
+            and values is not None
+            and any(not value.strip() for value in values)
+        ):
+            raise ConfigEditorError(
+                "capture.protect_unknown_title_bundle_ids cannot contain blank values"
+            )
         if values is not None and key.endswith("_patterns"):
             for pattern in values:
                 try:

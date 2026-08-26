@@ -40,6 +40,10 @@ deny_text_patterns = ["private phrase that should stay in TOML"]
     assert payload["values"]["models"]["default"]["uses_direct_api_key"] is True
     assert "api_key" not in payload["values"]["models"]["default"]
     assert payload["values"]["capture"]["privacy_counts"]["deny_text_patterns"] == 1
+    assert payload["values"]["capture"]["privacy_counts"][
+        "protect_unknown_title_bundle_ids"
+    ] == 3
+    assert "com.microsoft.edgemac" not in result.output
 
 
 def test_config_indicator_style_is_editable_and_validated(ac_root: Path) -> None:
@@ -199,6 +203,11 @@ deny_url_patterns = ["{private_rule}"]
     assert result.exit_code == 0, result.output
     assert payload["valid"] is True
     assert payload["values"]["deny_url_patterns"] == [private_rule]
+    assert payload["values"]["protect_unknown_title_bundle_ids"] == [
+        "com.microsoft.edgemac",
+        "com.google.Chrome",
+        "org.mozilla.firefox",
+    ]
     assert secret not in result.output
     assert "api_key" not in result.output
 
@@ -330,6 +339,74 @@ heartbeat_minutes = 10
     assert "# keep before" in updated
     assert "# keep after" in updated
     assert Path(payload["backup"]).read_text() == original
+
+
+def test_config_patch_unknown_title_bundle_scope_is_private_and_targeted(
+    ac_root: Path,
+) -> None:
+    path = ac_root / "config.toml"
+    original = """[capture]
+# keep before
+deny_bundle_ids = ["com.apple.Passwords"]
+# keep after
+heartbeat_minutes = 10
+"""
+    path.write_text(original)
+    runner = CliRunner()
+    _, snapshot = _invoke_json(runner, ["config", "--json"])
+
+    result, payload = _invoke_json(
+        runner,
+        ["config", "--patch-json"],
+        {
+            "expected_sha256": snapshot["sha256"],
+            "updates": {
+                "capture.protect_unknown_title_bundle_ids": [
+                    "com.microsoft.edgemac"
+                ]
+            },
+        },
+    )
+
+    assert result.exit_code == 0, result.output
+    assert payload["changed"] is True
+    updated = path.read_text()
+    parsed = tomllib.loads(updated)
+    assert parsed["capture"]["protect_unknown_title_bundle_ids"] == [
+        "com.microsoft.edgemac"
+    ]
+    assert parsed["capture"]["deny_bundle_ids"] == ["com.apple.Passwords"]
+    assert "# keep before" in updated
+    assert "# keep after" in updated
+    assert Path(payload["backup"]).read_text() == original
+
+    _, normal = _invoke_json(runner, ["config", "--json"])
+    assert "com.microsoft.edgemac" not in json.dumps(normal)
+    _, private = _invoke_json(runner, ["config", "--privacy-json"])
+    assert private["values"]["protect_unknown_title_bundle_ids"] == [
+        "com.microsoft.edgemac"
+    ]
+
+
+def test_config_rejects_invalid_unknown_title_bundle_scope(ac_root: Path) -> None:
+    path = ac_root / "config.toml"
+    original = "[capture]\nheartbeat_minutes = 10\n"
+    path.write_text(original)
+    runner = CliRunner()
+
+    for invalid in ('[""]', '["   "]', '[123]'):
+        result, payload = _invoke_json(
+            runner,
+            ["config", "--validate-json"],
+            {
+                "content": (
+                    "[capture]\nprotect_unknown_title_bundle_ids = " + invalid + "\n"
+                )
+            },
+        )
+        assert result.exit_code == 2
+        assert "protect_unknown_title_bundle_ids" in payload["error"]
+        assert path.read_text() == original
 
 
 def test_config_validate_json_checks_semantic_ranges(ac_root: Path) -> None:
