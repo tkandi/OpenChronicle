@@ -27,6 +27,7 @@ from openchronicle.capture.protection_monitor import (
     ProtectionDecision,
 )
 from openchronicle.capture.protection_reason import ProtectionReasonCode
+from openchronicle.capture.protection_smoothing import ProtectionPresentationSmoother
 from openchronicle.config import CaptureConfig, Config
 
 
@@ -224,6 +225,7 @@ def test_unconfirmed_indicator_publishes_fixed_diagnostic_without_exact_values(
         overlay=RejectingOverlay(),
         inventory_reader=lambda: inventory,
         pause_reader=lambda: False,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
     )
 
     with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
@@ -276,6 +278,7 @@ def test_monitor_carries_exact_generation_window_ids_only_in_memory(
         overlay=overlay,
         inventory_reader=lambda: inventory,
         pause_reader=lambda: False,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
     )
 
     decision = monitor.decision_for_capture(force=True)
@@ -308,6 +311,7 @@ def test_monitor_keeps_rendered_indicator_but_drops_ids_when_id_read_fails(
         overlay=FailingWindowIDOverlay(41),
         inventory_reader=lambda: inventory,
         pause_reader=lambda: False,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
     )
 
     with caplog.at_level(logging.DEBUG, logger="openchronicle.capture"):
