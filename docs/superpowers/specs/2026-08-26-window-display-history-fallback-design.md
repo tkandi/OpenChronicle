@@ -1,7 +1,7 @@
 # 窗口显示器历史回退与映射阶段静默设计
 
 日期：2026-08-26
-状态：已实现，等待实机验证
+状态：已实现并验证
 
 ## 背景
 
@@ -247,9 +247,11 @@ known-title 或 diagnostics 命中仍使用普通 `quiet-shield`。该分类不�
 - normal PROTECTED；
 - history fallback PROTECTED；
 - allowlisted mapping FAILED。
+- title uncertainty PROTECTED。
 
 因此已持续超过 800ms 的 InPrivate 被普通全屏窗口覆盖后，可以继续显示完整“已保护”；用户已接受这一
-保守行为。只有新开始、短暂的映射不确定阶段完全静默。
+保守行为。新开始、短暂的映射不确定和仅标题元数据不确定阶段都完全静默；两者仍从第一帧按原 policy
+阻断截图和 AX。
 
 ### clear pending
 
