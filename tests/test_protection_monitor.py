@@ -757,7 +757,7 @@ def test_stop_waits_for_inflight_history_resolve_then_resets_late_state(
     assert history.live_generation is None
 
 
-def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
+def test_monitor_publishes_silent_then_configured_style_with_new_generations(
     tmp_path, inventory, fake_overlay
 ) -> None:
     clock = FakeMonotonic()
@@ -768,14 +768,15 @@ def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
         monotonic=clock,
     )
     transient = monitor.decision_for_capture(force=True)
-    clock.advance(0.8)
+    clock.advance(1.0)
     sustained = monitor.decision_for_capture(force=True)
 
     assert transient.snapshot.state is ProtectionState.PROTECTED
     assert transient.raw_state is ProtectionState.PROTECTED
     assert transient.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
-    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.snapshot.indicator_style == "off"
     assert transient.overlay_reasons_enabled is False
+    assert transient.indicator_window_ids == ()
     assert sustained.raw_state is ProtectionState.PROTECTED
     assert sustained.presentation_phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
     assert sustained.snapshot.indicator_style == "pill"
@@ -851,14 +852,14 @@ def test_monitor_holds_capture_until_safe_confirmation_deadline(
     clock.advance(0.001)
     confirmed_safe = monitor.decision_for_capture(force=True)
 
-    assert protected.snapshot.indicator_style == "quiet-shield"
+    assert protected.snapshot.indicator_style == "off"
     for held in (first_safe, early_safe):
         assert held.raw_state is ProtectionState.INACTIVE
         assert held.snapshot.state is ProtectionState.PROTECTED
         assert held.snapshot.protected_display_ids == frozenset({2})
         assert held.snapshot.protected_window_ids
         assert held.indicator_confirmed is True
-        assert held.indicator_window_ids == (7, 41)
+        assert held.indicator_window_ids == ()
         assert held.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
     assert confirmed_safe.snapshot.state is ProtectionState.INACTIVE
     assert confirmed_safe.raw_state is ProtectionState.INACTIVE
@@ -886,7 +887,7 @@ def test_monitor_cancels_clear_when_protection_returns(
     returned = monitor.decision_for_capture(force=True)
     assert returned.snapshot.state is ProtectionState.PROTECTED
     assert returned.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
-    assert returned.snapshot.indicator_style == "quiet-shield"
+    assert returned.snapshot.indicator_style == "off"
 
 
 def test_monitor_mapping_failure_to_protected_keeps_episode_deadline(
@@ -912,7 +913,7 @@ def test_monitor_mapping_failure_to_protected_keeps_episode_deadline(
     failed = monitor.decision_for_capture(force=True)
     clock.advance(0.4)
     protected = monitor.decision_for_capture(force=True)
-    clock.advance(0.4)
+    clock.advance(0.6)
     promoted = monitor.decision_for_capture(force=True)
 
     assert (
@@ -920,12 +921,12 @@ def test_monitor_mapping_failure_to_protected_keeps_episode_deadline(
         is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
     )
     assert failed.snapshot.created_monotonic == pytest.approx(10.0)
-    assert failed.presentation_deadline_monotonic == pytest.approx(10.8)
+    assert failed.presentation_deadline_monotonic == pytest.approx(11.0)
     assert protected.presentation_phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
     assert protected.snapshot.created_monotonic == pytest.approx(10.4)
-    assert protected.presentation_deadline_monotonic == pytest.approx(10.8)
+    assert protected.presentation_deadline_monotonic == pytest.approx(11.0)
     assert promoted.presentation_phase is ProtectionPresentationPhase.SUSTAINED_PROTECTED
-    assert promoted.snapshot.created_monotonic == pytest.approx(10.8)
+    assert promoted.snapshot.created_monotonic == pytest.approx(11.0)
     assert promoted.presentation_deadline_monotonic is None
 
 
@@ -991,13 +992,13 @@ def test_worker_wakes_at_promotion_deadline_without_another_timer(
         deadline = time.monotonic() + 0.3
         while time.monotonic() < deadline:
             if [snapshot.indicator_style for snapshot in fake_overlay.snapshots][:2] == [
-                "quiet-shield",
+                "off",
                 "pill",
             ]:
                 break
             time.sleep(0.005)
         assert [snapshot.indicator_style for snapshot in fake_overlay.snapshots][:2] == [
-            "quiet-shield",
+            "off",
             "pill",
         ]
         assert inventory_reads >= 2
@@ -1056,7 +1057,7 @@ def test_external_deadline_publication_wakes_worker_for_fresh_promotion(
         publisher.join(timeout=0.5)
         assert not publisher.is_alive()
         assert external_errors == []
-        assert external_decisions[0].snapshot.indicator_style == "quiet-shield"
+        assert external_decisions[0].snapshot.indicator_style == "off"
 
         deadline = time.monotonic() + 0.4
         while time.monotonic() < deadline:
@@ -1136,7 +1137,7 @@ def test_monitor_smooths_mapping_failure_without_changing_failed_state(
         monotonic=clock,
     )
     transient = monitor.decision_for_capture(force=True)
-    clock.advance(0.8)
+    clock.advance(1.0)
     sustained = monitor.decision_for_capture(force=True)
 
     assert transient.raw_state is ProtectionState.FAILED
@@ -1193,14 +1194,16 @@ def test_listener_and_wait_use_acknowledged_effective_decision(
     inventory, fake_overlay
 ) -> None:
     published: list[ProtectionDecision] = []
+    clock = FakeMonotonic()
     monitor = make_monitor(
         inventory=inventory,
         overlay=fake_overlay,
+        monotonic=clock,
         decision_listener=published.append,
     )
     transient = monitor.decision_for_capture(force=True)
     assert published == [transient]
-    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert transient.snapshot.indicator_style == "off"
     assert transient.snapshot.display_reasons.reasons
     assert monitor.wait_for_display_protection(
         2,
@@ -1208,6 +1211,7 @@ def test_listener_and_wait_use_acknowledged_effective_decision(
         timeout=0.1,
     ) == transient.snapshot.generation
 
+    clock.advance(1.0)
     fake_overlay.render_result = False
     unconfirmed = monitor.decision_for_capture(force=True)
     assert unconfirmed.indicator_confirmed is False
@@ -1383,7 +1387,11 @@ def test_monitor_accepts_typed_pause_decision_and_preserves_reason(inventory, fa
 
 def test_required_overlay_timeout_is_unconfirmed(inventory, fake_overlay) -> None:
     fake_overlay.render_result = False
-    monitor = make_monitor(inventory=inventory, overlay=fake_overlay)
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
+    )
 
     decision = monitor.decision_for_capture(force=True)
 
@@ -1463,6 +1471,7 @@ def test_wait_rejects_stale_or_unconfirmed_display_generation(
         inventory=inventory,
         overlay=fake_overlay,
         diagnostics_guard_reader=guard.snapshot,
+        smoother=ProtectionPresentationSmoother(promotion_seconds=0),
     )
     decision = monitor.decision_for_capture(force=True)
 
@@ -1654,10 +1663,10 @@ def test_transient_and_sustained_use_latest_hot_loaded_style_and_position(
     os.utime(config_path, ns=(old_mtime + 1, old_mtime + 1))
     clock.advance(0.4)
     transient = monitor.decision_for_capture(force=True)
-    clock.advance(0.4)
+    clock.advance(0.6)
     sustained = monitor.decision_for_capture(force=True)
-    assert first.snapshot.indicator_style == "quiet-shield"
-    assert transient.snapshot.indicator_style == "quiet-shield"
+    assert first.snapshot.indicator_style == "off"
+    assert transient.snapshot.indicator_style == "off"
     assert transient.snapshot.indicator_placement == "bottom-right-work-area"
     assert sustained.snapshot.indicator_style == "border"
 

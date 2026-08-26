@@ -257,7 +257,7 @@ def test_category_snapshot_exposes_safe_presentation_fields(tmp_path: Path) -> N
     marker = "private-window-title"
     effective = _private_decision(marker).snapshot
     decision = ProtectionDecision(
-        snapshot=replace(effective, indicator_style="quiet-shield"),
+        snapshot=replace(effective, indicator_style="off"),
         indicator_confirmed=True,
         raw_state=ProtectionState.PROTECTED,
         presentation_phase=ProtectionPresentationPhase.TRANSIENT_PROTECTED,
@@ -271,7 +271,7 @@ def test_category_snapshot_exposes_safe_presentation_fields(tmp_path: Path) -> N
         )
         assert response["raw_state"] == "protected"
         assert response["presentation_phase"] == "transient-protected"
-        assert response["indicator_style"] == "quiet-shield"
+        assert response["indicator_style"] == "off"
         assert response["overlay_reasons_enabled"] is False
         assert response["display_mapping_fallback_active"] is False
         assert marker not in json.dumps(response)
@@ -305,7 +305,7 @@ def test_category_mapping_fallback_is_safe_and_reports_blocked_policy() -> None:
         raw_state=ProtectionState.PROTECTED,
         presentation_phase=ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK,
         overlay_reasons_enabled=False,
-        presentation_deadline_monotonic=10.8,
+        presentation_deadline_monotonic=11.0,
     )
 
     category = PrivacyDiagnosticsServer._snapshot_payload(
@@ -440,7 +440,7 @@ def test_category_mapping_failure_presentation_does_not_expose_exact_values() ->
         deny_bundle_ids=[bundle_marker],
         deny_window_title_patterns=[title_rule_marker, alternate_rule_marker],
     )
-    times = iter([10.0, 10.0, 10.8, 10.8])
+    times = iter([10.0, 10.0, 11.0, 11.0])
     monitor = PrivacyProtectionMonitor(
         cfg,
         config_path=Path("/nonexistent/config.toml"),
@@ -478,11 +478,11 @@ def test_category_mapping_failure_presentation_does_not_expose_exact_values() ->
     assert transient["overlay_reasons_enabled"] is False
     assert transient["display_mapping_fallback_active"] is False
     assert transient["snapshot_created_monotonic"] == pytest.approx(10.0)
-    assert transient["presentation_deadline_monotonic"] == pytest.approx(10.8)
+    assert transient["presentation_deadline_monotonic"] == pytest.approx(11.0)
     assert sustained["presentation_phase"] == "sustained-mapping-failure"
     assert sustained["indicator_style"] == "pill"
     assert sustained["overlay_reasons_enabled"] is True
-    assert sustained["snapshot_created_monotonic"] == pytest.approx(10.8)
+    assert sustained["snapshot_created_monotonic"] == pytest.approx(11.0)
     assert sustained["presentation_deadline_monotonic"] is None
 
     category_json = json.dumps([transient, sustained])

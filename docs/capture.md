@@ -181,26 +181,27 @@ established.
 
 ## Privacy protection indicators
 
-When `privacy_indicator_style` is not `off`, the local `mac-privacy-overlay`
-helper displays the protection state after the protection decision is confirmed.
-The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
-`banner`.
+The local `mac-privacy-overlay` helper displays a confirmed presentation when
+the effective indicator style is not `off`. The selectable configured styles
+are `off`, `border`, `shield`, `pill`, `quiet-shield`, and `banner`.
 
 Protection and failure policy apply from the first inventory frame. A normal
 reliably mapped `protected` decision, a title-uncertainty-only `protected`
 decision, a history-fallback `protected` decision, and the two allowlisted
 mapping failures `active_window_unmapped` and `sensitive_window_unmapped` start
-the same visual risk episode. For the first 800ms, a normal mapped decision
-uses `quiet-shield`, while history fallback, title uncertainty, and allowlisted
-mapping failure use presentation style `off`; all suppress overlay reasons. A
-title-uncertainty-only decision has `window_title_unknown` plus, at most,
-`mode_all_inherited`; any app, bundle, known-title, diagnostics, or other
-reason remains a normal immediate `quiet-shield`. At exactly 800ms, a new
-confirmed generation promotes to the latest configured sustained style and
-reason setting. This is a fixed internal policy, not a TOML or settings-page
-control. The monitor does not detect Mission Control, F3, Spaces, thumbnails,
-or transition animation; those transitions neither weaken first-frame capture
-and AX blocking nor reset the shared episode timer.
+the same visual risk episode. For the first 1 second, every smoothed visual risk
+episode uses presentation style `off` and suppresses overlay reasons. Protection
+policy still applies from the first inventory frame. A title-uncertainty-only
+decision has `window_title_unknown` plus, at most, `mode_all_inherited`; app,
+bundle, known-title, diagnostics, and other direct reasons remain normal
+`transient-protected` decisions, but they use the same silent presentation. At
+exactly 1 second, a new confirmed generation promotes directly to the latest
+configured sustained style and reason setting. An explicitly configured
+`quiet-shield` therefore appears only after sustained promotion. This is a fixed
+internal policy, not a TOML or settings-page control. The monitor does not detect
+Mission Control, F3, Spaces, thumbnails, or transition animation; those
+transitions neither weaken first-frame capture and AX blocking nor reset the
+shared episode timer.
 
 Mapping failures remain raw and effective `failed` decisions. A valid history
 fallback remains effective `protected` and carries
@@ -213,7 +214,7 @@ still block globally from the first frame. The legacy
 remains fail-open and clears the overlay instead of letting presentation
 smoothing override that policy. Transitions among normal `protected`,
 history-fallback `protected`, and either allowlisted mapping failure keep one
-800ms deadline; changing state or mapping failure reason does not restart the
+1-second deadline; changing state or mapping failure reason does not restart the
 timer.
 
 Every other `failed` decision is outside the allowlist and immediately bypasses
@@ -236,12 +237,12 @@ without publishing an inactive decision. With
 promotion and reasons stay disabled, but effective capture policy and
 clear-pending still apply.
 
-During the transient quiet shield, title-uncertainty, or mapping silence, reason
-suppression applies only to overlay presentation. The effective snapshot,
-diagnostics, policy reasons, window-filtering authorization, screenshot
-blocking, and AX gates keep their complete structured reason data from the first
-frame. At sustained promotion, overlay reason presentation is restored,
-including when the configured sustained style is itself `quiet-shield`.
+During the silent transient, reason suppression applies only to overlay
+presentation. The effective snapshot, diagnostics, policy reasons,
+window-filtering authorization, screenshot blocking, and AX gates keep their
+complete structured reason data from the first frame. At sustained promotion,
+overlay reason presentation is restored, including when the configured
+sustained style is itself `quiet-shield`.
 Owner-only category diagnostics expose only safe presentation state, including
 `raw_state`, effective `state`, `presentation_phase`, `indicator_style`,
 `overlay_reasons_enabled`, and the boolean
