@@ -1,7 +1,15 @@
 # 保护标识静默防抖设计
 
 日期：2026-08-26
-状态：已批准，待实现
+状态：已实现并验证
+
+验证记录（2026-08-26）：
+
+- Python 全量回归：717 passed；变更文件 Ruff 检查通过。
+- 原生 overlay core：`MacPrivacyOverlayCoreTests passed`。
+- macOS App SwiftPM：92 tests，0 failures。
+- `scripts/build-macos-app.sh` 成功生成并验证签名归档
+  `dist/OpenChronicle.app.zip`。
 
 本设计取代以下既有结论：自动平滑的风险 episode 在前 800ms 显示
 `quiet-shield`。相关历史设计仍保留用于记录演进：
