@@ -217,27 +217,34 @@ indicator is not a protection confirmation: a failed helper cannot render the
 yellow state, and capture stays stopped until a later helper confirmation.
 
 On the first risk inventory frame, OpenChronicle applies the existing capture
-policy immediately. Normal reliably mapped `protected`, history-fallback
-`protected`, and the two allowlisted mapping failures
-`active_window_unmapped` and `sensitive_window_unmapped` share one visual risk
-episode. Before 800ms, normal mapped protection uses `quiet-shield`, while
-history fallback and allowlisted mapping failure use presentation style `off`;
-all suppress overlay reasons. At exactly 800ms, a newly acknowledged generation
-promotes to the latest configured sustained style and reason setting. The 800ms
-promotion and 200ms safe-confirmation interval are fixed internal constants;
-they do not add a configuration field or settings control.
+policy immediately. Normal reliably mapped `protected`, title-uncertainty-only
+`protected`, history-fallback `protected`, and the two allowlisted mapping
+failures `active_window_unmapped` and `sensitive_window_unmapped` share one
+visual risk episode. Before 800ms, normal mapped protection uses
+`quiet-shield`, while history fallback, title uncertainty, and allowlisted
+mapping failure use presentation style `off`; all suppress overlay reasons.
+Title uncertainty requires `window_title_unknown` and no reason except an
+optional `mode_all_inherited`; app, bundle, known-title, diagnostics, and every
+other reason remain immediate `quiet-shield`. At exactly 800ms, a newly
+acknowledged generation promotes to the latest configured sustained style and
+reason setting. The 800ms promotion and 200ms safe-confirmation interval are
+fixed internal constants; they do not add a configuration field or settings
+control.
 
 An allowlisted mapping failure remains raw and effective `failed`; only its
 presentation is smoothed. A valid display-history fallback remains effective
 per-display `protected`, even while its transient overlay is silent.
 Default/current fail-closed configuration and
 `mask-window`/`exclude-window` still block screenshots and AX globally from the
-first failed frame. Legacy `screenshot_privacy_fail_closed = false` with
+first failed frame. Title-uncertainty style `off` likewise changes only the
+overlay presentation: its protected display remains blocked from the first
+frame. Legacy `screenshot_privacy_fail_closed = false` with
 `skip-monitor` or `off` keeps its existing fail-open behavior and clears the
 overlay rather than showing a transient shield. Mapping `failed`, normal
 `protected`, and history-fallback `protected` transitions share one episode
-deadline, so Mission Control, F3, Space gestures, thumbnails, and animations
-cannot restart the 800ms timer by alternating those states.
+deadline. The monitor does not detect Mission Control, F3, Space gestures,
+thumbnails, or animations; those transitions cannot restart the 800ms timer by
+alternating those states.
 
 All non-allowlisted `failed` decisions immediately bypass smoothing. Their
 presentation result enables reasons and has no smoothing deadline. The monitor
@@ -258,19 +265,20 @@ while the effective capture policy and clear-pending behavior remain unchanged.
 
 Transient suppression hides reasons only in the overlay presentation. It does
 not remove reasons from the effective snapshot, diagnostics, capture policy,
-or filtering authorization. A sustained generation restores the configured
-overlay reason behavior, including when its configured style remains
+screenshot/AX authorization, or filtering authorization. A sustained generation
+restores the configured overlay reason behavior, including when its configured style remains
 `quiet-shield`.
 
 Owner-only category diagnostics add only safe presentation fields:
 `raw_state`, effective `state`, `presentation_phase`, `indicator_style`, and
 `overlay_reasons_enabled`, plus the boolean
 `display_mapping_fallback_active`. History fallback uses
-`transient-mapping-fallback`/`sustained-mapping-fallback`; mapping failures use
-`transient-mapping-failure`/`sustained-mapping-failure`. Category payloads do
-not reveal cached timestamps, window identities, exact app, bundle, title, URL,
-alternate-title, or rule values. Schema version remains 1, and older payloads
-without the additive boolean remain decodable.
+`transient-mapping-fallback`/`sustained-mapping-fallback`; title uncertainty
+uses `transient-title-uncertainty`/`sustained-title-uncertainty`; mapping
+failures use `transient-mapping-failure`/`sustained-mapping-failure`. Category
+payloads do not reveal cached timestamps, window identities, exact app, bundle,
+title, URL, alternate-title, or rule values. Schema version remains 1, and
+older payloads without the additive boolean remain decodable.
 
 ### Filtered screenshots
 

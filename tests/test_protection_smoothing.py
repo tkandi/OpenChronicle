@@ -53,6 +53,7 @@ def _snapshot(
     now: float = 10.0,
     protected_ids: frozenset[int] = frozenset({1}),
     fallback: bool = False,
+    reason_codes: tuple[ProtectionReasonCode, ...] | None = None,
 ) -> ProtectionSnapshot:
     protected = state is ProtectionState.PROTECTED
     return ProtectionSnapshot(
@@ -65,8 +66,14 @@ def _snapshot(
         active_display_id=1,
         created_monotonic=now,
         fresh_until=now + 0.25,
-        display_reasons=DisplayProtectionReasons.from_reasons([REASON]) if protected else (
-            DisplayProtectionReasons()
+        display_reasons=(
+            DisplayProtectionReasons.from_reasons(
+                [REASON]
+                if reason_codes is None
+                else [ProtectionReason(code, display_id=1) for code in reason_codes]
+            )
+            if protected
+            else DisplayProtectionReasons()
         ),
         protected_window_ids=frozenset({41}) if protected else frozenset(),
         protected_window_regions=(ScreenRegion(0, 0, 50, 50),) if protected else (),
@@ -140,6 +147,108 @@ def test_mapping_fallback_is_silent_until_exact_800ms_boundary() -> None:
     assert promoted.snapshot.indicator_style == "pill"
     assert promoted.overlay_reasons_enabled is True
     assert promoted.next_deadline is None
+
+
+def test_title_uncertainty_is_silent_until_exact_800ms_boundary() -> None:
+    smoother = ProtectionPresentationSmoother()
+    unknown = _snapshot(
+        1,
+        ProtectionState.PROTECTED,
+        reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,),
+    )
+    first = smoother.resolve(unknown, now=10.0)
+    before = smoother.resolve(replace(unknown, generation=2), now=10.799)
+    promoted = smoother.resolve(replace(unknown, generation=3), now=10.8)
+
+    assert first.phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert first.snapshot.indicator_style == "off"
+    assert first.overlay_reasons_enabled is False
+    assert first.snapshot.state is ProtectionState.PROTECTED
+    assert first.snapshot.ax_blocked is True
+    assert before.snapshot.indicator_style == "off"
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_TITLE_UNCERTAINTY
+    assert promoted.snapshot.indicator_style == "pill"
+
+
+def test_title_uncertainty_all_mode_inheritance_is_silent() -> None:
+    smoother = ProtectionPresentationSmoother()
+    result = smoother.resolve(
+        _snapshot(
+            1,
+            ProtectionState.PROTECTED,
+            reason_codes=(
+                ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,
+                ProtectionReasonCode.MODE_ALL_INHERITED,
+            ),
+        ),
+        now=10.0,
+    )
+
+    assert result.phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert result.snapshot.indicator_style == "off"
+    assert result.overlay_reasons_enabled is False
+
+
+@pytest.mark.parametrize(
+    "direct_code",
+    (
+        ProtectionReasonCode.APP_RULE,
+        ProtectionReasonCode.BUNDLE_RULE,
+        ProtectionReasonCode.WINDOW_TITLE_RULE,
+        ProtectionReasonCode.DIAGNOSTICS_REVEAL,
+    ),
+)
+def test_title_uncertainty_with_direct_reason_remains_quiet_shield(
+    direct_code: ProtectionReasonCode,
+) -> None:
+    smoother = ProtectionPresentationSmoother()
+    result = smoother.resolve(
+        _snapshot(
+            1,
+            ProtectionState.PROTECTED,
+            reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN, direct_code),
+        ),
+        now=10.0,
+    )
+
+    assert result.phase is ProtectionPresentationPhase.TRANSIENT_PROTECTED
+    assert result.snapshot.indicator_style == "quiet-shield"
+    assert result.overlay_reasons_enabled is False
+
+
+def test_mapping_fallback_has_priority_over_title_uncertainty() -> None:
+    smoother = ProtectionPresentationSmoother()
+    result = smoother.resolve(
+        _snapshot(
+            1,
+            ProtectionState.PROTECTED,
+            fallback=True,
+            reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,),
+        ),
+        now=10.0,
+    )
+
+    assert result.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FALLBACK
+    assert result.snapshot.indicator_style == "off"
+
+
+def test_title_uncertainty_configured_off_stays_off_through_promotion() -> None:
+    smoother = ProtectionPresentationSmoother()
+    unknown = _snapshot(
+        1,
+        ProtectionState.PROTECTED,
+        style="off",
+        reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,),
+    )
+    first = smoother.resolve(unknown, now=10.0)
+    promoted = smoother.resolve(replace(unknown, generation=2), now=10.8)
+
+    assert first.phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert first.snapshot.indicator_style == "off"
+    assert first.overlay_reasons_enabled is False
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_TITLE_UNCERTAINTY
+    assert promoted.snapshot.indicator_style == "off"
+    assert promoted.overlay_reasons_enabled is False
 
 
 @pytest.mark.parametrize("reason", MAPPING_FAILURES)
@@ -289,6 +398,53 @@ def test_mapping_fallback_clear_pending_holds_snapshot_and_return_keeps_episode(
     assert returned.phase is ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
     assert returned.next_deadline == pytest.approx(10.8)
     assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_MAPPING_FALLBACK
+
+
+def test_title_uncertainty_clear_pending_holds_off_snapshot_and_return_keeps_episode() -> None:
+    smoother = ProtectionPresentationSmoother()
+    unknown = _snapshot(
+        1,
+        ProtectionState.PROTECTED,
+        reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,),
+    )
+    first = smoother.resolve(unknown, now=10.0)
+    safe = smoother.resolve(_snapshot(2, ProtectionState.INACTIVE), now=10.1)
+    returned = smoother.resolve(replace(unknown, generation=3), now=10.2)
+    promoted = smoother.resolve(replace(unknown, generation=4), now=10.8)
+
+    assert first.phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert safe.phase is ProtectionPresentationPhase.CLEAR_PENDING
+    assert safe.snapshot.indicator_style == "off"
+    assert safe.overlay_reasons_enabled is False
+    assert returned.phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert returned.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_TITLE_UNCERTAINTY
+
+
+def test_title_uncertainty_shares_one_episode_deadline_with_other_risk() -> None:
+    smoother = ProtectionPresentationSmoother()
+    normal = smoother.resolve(_snapshot(1, ProtectionState.PROTECTED), now=10.0)
+    unknown = smoother.resolve(
+        _snapshot(
+            2,
+            ProtectionState.PROTECTED,
+            reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,),
+        ),
+        now=10.4,
+    )
+    promoted = smoother.resolve(
+        _snapshot(
+            3,
+            ProtectionState.PROTECTED,
+            reason_codes=(ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,),
+        ),
+        now=10.8,
+    )
+
+    assert normal.next_deadline == pytest.approx(10.8)
+    assert unknown.phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert unknown.next_deadline == pytest.approx(10.8)
+    assert promoted.phase is ProtectionPresentationPhase.SUSTAINED_TITLE_UNCERTAINTY
 
 
 @pytest.mark.parametrize("returned", ["protected", "mapping-failure"])

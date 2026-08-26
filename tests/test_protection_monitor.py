@@ -785,6 +785,48 @@ def test_monitor_publishes_quiet_then_configured_style_with_new_generations(
     assert transient.indicator_confirmed and sustained.indicator_confirmed
 
 
+def test_monitor_title_uncertainty_silences_mapped_unknown_without_changing_protection(
+    fake_overlay: FakeOverlay,
+) -> None:
+    unknown_inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "Edge",
+                "edge",
+                "",
+                ScreenRegion(110, 0, 80, 90),
+                is_active=True,
+                title_available=False,
+                window_id=73,
+            ),
+        ),
+        displays=(
+            DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+            DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+        ),
+    )
+    monitor = make_monitor(
+        inventory=unknown_inventory,
+        overlay=fake_overlay,
+        monotonic=FakeMonotonic(),
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.raw_state is ProtectionState.PROTECTED
+    assert decision.presentation_phase is ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
+    assert decision.snapshot.state is ProtectionState.PROTECTED
+    assert decision.snapshot.indicator_style == "off"
+    assert decision.snapshot.protected_display_ids == frozenset({2})
+    assert decision.snapshot.ax_blocked is True
+    assert decision.indicator_confirmed is True
+    assert decision.indicator_window_ids == ()
+    assert decision.overlay_reasons_enabled is False
+    assert decision.snapshot.reasons_for_display(2)[0].code is ProtectionReasonCode.WINDOW_TITLE_UNKNOWN
+    assert 1 not in decision.snapshot.protected_display_ids
+    assert fake_overlay.window_ids_by_generation == {}
+
+
 def test_monitor_holds_capture_until_safe_confirmation_deadline(
     tmp_path: Path,
     inventory: WindowInventory,

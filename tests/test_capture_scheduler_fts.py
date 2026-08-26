@@ -678,6 +678,63 @@ def test_protected_active_display_skips_ax_but_captures_safe_monitor(
     assert screenshot_calls[0]["blocked_regions"] == monitor.snapshot.protected_regions
 
 
+def test_title_uncertainty_style_off_keeps_ax_and_screenshot_authorization(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = _filtered_decision(
+        indicator_style="off",
+        indicator_window_ids=(),
+        window_filterable=False,
+        active_display_id=2,
+        presentation_phase=ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY,
+    )
+    monitor = _FakeProtectionMonitor(decision)
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://must-not-capture.example"))
+    mss_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", _safe_active_window)
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_filtered_many",
+        lambda **_kwargs: pytest.fail("unknown title must not authorize filtered capture"),
+    )
+    monkeypatch.setattr(
+        scheduler_mod.screenshot,
+        "grab_many",
+        lambda **kwargs: mss_calls.append(kwargs)
+        or [
+            scheduler_mod.screenshot.Screenshot(
+                image_base64="SAFE-DISPLAY-1",
+                width=100,
+                height=100,
+                monitor_index=1,
+                monitor_left=0,
+                monitor_top=0,
+                monitor_width=100,
+                monitor_height=100,
+            )
+        ],
+    )
+
+    out = scheduler_mod._build_capture(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            screenshot_privacy_mode="exclude-window",
+        ),
+        provider,
+        None,
+        protection_monitor=monitor,
+    )
+
+    assert out is not None
+    assert out["ax_skipped"] == "protected_display"
+    assert provider.calls == 0
+    assert out["screenshot"]["image_base64"] == "SAFE-DISPLAY-1"
+    assert mss_calls[0]["blocked_regions"] == decision.snapshot.protected_regions
+    assert decision.indicator_confirmed is True
+    assert decision.indicator_window_ids == ()
+
+
 def test_real_monitor_history_fallback_keeps_safe_display_and_revalidates_filtered_capture(
     ac_root: Path,
     monkeypatch: pytest.MonkeyPatch,

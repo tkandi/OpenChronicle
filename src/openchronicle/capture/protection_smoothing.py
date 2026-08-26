@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from .privacy import ProtectionFailureReason
 from .protection import ProtectionSnapshot, ProtectionState
+from .protection_reason import ProtectionReasonCode
 
 PROTECTED_PROMOTION_SECONDS: float = 0.8
 SAFE_CONFIRMATION_SECONDS: float = 0.2
@@ -12,6 +13,12 @@ PRESENTATION_SMOOTHED_FAILURES = frozenset(
     {
         ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
         ProtectionFailureReason.SENSITIVE_WINDOW_UNMAPPED,
+    }
+)
+_TITLE_UNCERTAINTY_CODES = frozenset(
+    {
+        ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,
+        ProtectionReasonCode.MODE_ALL_INHERITED,
     }
 )
 
@@ -31,6 +38,19 @@ def _is_mapping_fallback(snapshot: ProtectionSnapshot) -> bool:
     )
 
 
+def _is_title_uncertainty_only(snapshot: ProtectionSnapshot) -> bool:
+    if (
+        snapshot.state is not ProtectionState.PROTECTED
+        or snapshot.display_mapping_fallback_active
+    ):
+        return False
+    codes = {reason.code for reason in snapshot.display_reasons.reasons}
+    return (
+        ProtectionReasonCode.WINDOW_TITLE_UNKNOWN in codes
+        and codes <= _TITLE_UNCERTAINTY_CODES
+    )
+
+
 class ProtectionPresentationPhase(StrEnum):
     INACTIVE = "inactive"
     TRANSIENT_PROTECTED = "transient-protected"
@@ -39,6 +59,8 @@ class ProtectionPresentationPhase(StrEnum):
     SUSTAINED_MAPPING_FALLBACK = "sustained-mapping-fallback"
     TRANSIENT_MAPPING_FAILURE = "transient-mapping-failure"
     SUSTAINED_MAPPING_FAILURE = "sustained-mapping-failure"
+    TRANSIENT_TITLE_UNCERTAINTY = "transient-title-uncertainty"
+    SUSTAINED_TITLE_UNCERTAINTY = "sustained-title-uncertainty"
     CLEAR_PENDING = "clear-pending"
     BYPASS = "bypass"
 
@@ -48,6 +70,7 @@ def _risk_phase(
     promoted: bool,
     mapping_fallback: bool,
     mapping_failure: bool,
+    title_uncertainty: bool,
 ) -> ProtectionPresentationPhase:
     if mapping_fallback:
         return (
@@ -60,6 +83,12 @@ def _risk_phase(
             ProtectionPresentationPhase.SUSTAINED_MAPPING_FAILURE
             if promoted
             else ProtectionPresentationPhase.TRANSIENT_MAPPING_FAILURE
+        )
+    if title_uncertainty:
+        return (
+            ProtectionPresentationPhase.SUSTAINED_TITLE_UNCERTAINTY
+            if promoted
+            else ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY
         )
     return (
         ProtectionPresentationPhase.SUSTAINED_PROTECTED
@@ -124,6 +153,7 @@ class ProtectionPresentationSmoother:
 
         mapping_failure = _is_smoothed_mapping_failure(raw_snapshot)
         mapping_fallback = _is_mapping_fallback(raw_snapshot)
+        title_uncertainty = _is_title_uncertainty_only(raw_snapshot)
         risk_active = raw_snapshot.state is ProtectionState.PROTECTED or mapping_failure
         hard_bypass = raw_snapshot.state is ProtectionState.PAUSED or (
             raw_snapshot.state is ProtectionState.FAILED and not mapping_failure
@@ -147,7 +177,9 @@ class ProtectionPresentationSmoother:
             reasons_enabled = promoted and effective_style != "off"
             if not promoted and effective_style != "off":
                 effective_style = (
-                    "off" if mapping_fallback or mapping_failure else "quiet-shield"
+                    "off"
+                    if mapping_fallback or mapping_failure or title_uncertainty
+                    else "quiet-shield"
                 )
             effective = replace(raw_snapshot, indicator_style=effective_style)
             self._last_effective_risk = effective
@@ -158,6 +190,7 @@ class ProtectionPresentationSmoother:
                     promoted=promoted,
                     mapping_fallback=mapping_fallback,
                     mapping_failure=mapping_failure,
+                    title_uncertainty=title_uncertainty,
                 ),
                 next_deadline=(
                     None

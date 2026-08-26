@@ -211,6 +211,8 @@ owner key 出现时立即拒绝旧 entry。
 ```text
 transient-mapping-fallback
 sustained-mapping-fallback
+transient-title-uncertainty
+sustained-title-uncertainty
 ```
 
 ### transient 样式
@@ -221,15 +223,20 @@ sustained-mapping-fallback
 |---|---|---|
 | 正常可靠 PROTECTED | quiet-shield | false |
 | PROTECTED + history fallback | off | false |
+| 仅标题元数据不确定的 PROTECTED | off | false |
 | allowlisted mapping FAILED | off | false |
 
 style `off` 在这里代表“presentation 静默”，不改变 effective state 或 capture policy。
+标题不确定只允许 `window_title_unknown` 和可选的 `mode_all_inherited`；任何实际 app、bundle、
+known-title 或 diagnostics 命中仍使用普通 `quiet-shield`。该分类不检测 Mission Control、F3 或 Space，
+并且从第一帧继续阻断截图和 AX。
 
 ### sustained 样式
 
 满 800ms 后均使用最新用户配置样式和 reasons：
 
 - history fallback PROTECTED：`sustained-mapping-fallback`；
+- title uncertainty PROTECTED：`sustained-title-uncertainty`；
 - mapping FAILED：`sustained-mapping-failure`；
 - 正常 PROTECTED：`sustained-protected`。
 

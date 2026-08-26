@@ -1,7 +1,7 @@
 # Inventory 事务校验与标题不确定瞬态静默设计
 
 日期：2026-08-26
-状态：已确认，等待实现
+状态：已实现，等待实机验证
 
 ## 背景
 
@@ -54,8 +54,8 @@ entry。
 
 - effective state 为 `PROTECTED`；
 - 至少有一个 `WINDOW_TITLE_UNKNOWN` reason；
-- 所有保护 reason 只允许 `WINDOW_TITLE_UNKNOWN`；
-- `screenshot_monitor="all"` 下允许同时存在由同一保护派生的 `MODE_ALL_INHERITED`；
+- 所有保护 reason 只允许 `WINDOW_TITLE_UNKNOWN`，以及由同一保护派生的可选
+  `MODE_ALL_INHERITED`；
 - `display_mapping_fallback_active` 为 false。
 
 只要存在 `APP_RULE`、`BUNDLE_RULE`、`WINDOW_TITLE_RULE`、`DIAGNOSTICS_REVEAL` 或任何其他直接/硬 reason，就不是

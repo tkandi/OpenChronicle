@@ -341,6 +341,51 @@ def test_category_mapping_fallback_is_safe_and_reports_blocked_policy() -> None:
         assert marker in exact_json
 
 
+def test_category_title_uncertainty_phase_does_not_expose_exact_marker() -> None:
+    marker = "private-unknown-title-marker"
+    reason = ProtectionReason(
+        ProtectionReasonCode.WINDOW_TITLE_UNKNOWN,
+        display_id=2,
+        app_name="private-unknown-app",
+        bundle_id="private-unknown-bundle",
+        window_title=marker,
+    )
+    snapshot = replace(
+        _private_decision().snapshot,
+        indicator_style="off",
+        display_reasons=DisplayProtectionReasons.from_reasons([reason]),
+    )
+    decision = ProtectionDecision(
+        snapshot=snapshot,
+        indicator_confirmed=True,
+        raw_state=ProtectionState.PROTECTED,
+        presentation_phase=ProtectionPresentationPhase.TRANSIENT_TITLE_UNCERTAINTY,
+        overlay_reasons_enabled=False,
+    )
+
+    category = PrivacyDiagnosticsServer._snapshot_payload(
+        decision,
+        detail="category",
+        created_at="2026-08-26T00:00:00Z",
+    )
+    exact = PrivacyDiagnosticsServer._snapshot_payload(
+        decision,
+        detail="exact",
+        created_at="2026-08-26T00:00:00Z",
+    )
+
+    assert category["presentation_phase"] == "transient-title-uncertainty"
+    assert category["indicator_style"] == "off"
+    assert category["overlay_reasons_enabled"] is False
+    displays = {display["id"]: display for display in category["displays"]}
+    assert displays[2]["screenshot_blocked"] is True
+    assert displays[2]["ax_blocked"] is True
+    assert displays[1]["screenshot_blocked"] is False
+    assert displays[1]["ax_blocked"] is False
+    assert marker not in json.dumps(category)
+    assert marker in json.dumps(exact)
+
+
 def test_category_snapshot_omits_nonfinite_monotonic_values(tmp_path: Path) -> None:
     snapshot = replace(_private_decision().snapshot, created_monotonic=float("nan"))
     decision = ProtectionDecision(

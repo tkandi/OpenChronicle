@@ -169,16 +169,20 @@ The selectable styles are `off`, `border`, `shield`, `pill`, `quiet-shield`, and
 `banner`.
 
 Protection and failure policy apply from the first inventory frame. A normal
-reliably mapped `protected` decision, a history-fallback `protected` decision,
-and the two allowlisted mapping failures `active_window_unmapped` and
-`sensitive_window_unmapped` start the same visual risk episode. For the first
-800ms, a normal mapped decision uses `quiet-shield`, while history fallback and
-allowlisted mapping failure use presentation style `off`; all three suppress
-overlay reasons. At exactly 800ms, a new confirmed generation promotes to the
-latest configured sustained style and reason setting. This is a fixed internal
-policy, not a TOML or settings-page control. Mission Control, F3, Space
-gestures, thumbnails, and transition animation do not bypass capture policy
-while presentation is silent.
+reliably mapped `protected` decision, a title-uncertainty-only `protected`
+decision, a history-fallback `protected` decision, and the two allowlisted
+mapping failures `active_window_unmapped` and `sensitive_window_unmapped` start
+the same visual risk episode. For the first 800ms, a normal mapped decision
+uses `quiet-shield`, while history fallback, title uncertainty, and allowlisted
+mapping failure use presentation style `off`; all suppress overlay reasons. A
+title-uncertainty-only decision has `window_title_unknown` plus, at most,
+`mode_all_inherited`; any app, bundle, known-title, diagnostics, or other
+reason remains a normal immediate `quiet-shield`. At exactly 800ms, a new
+confirmed generation promotes to the latest configured sustained style and
+reason setting. This is a fixed internal policy, not a TOML or settings-page
+control. The monitor does not detect Mission Control, F3, Spaces, thumbnails,
+or transition animation; those transitions neither weaken first-frame capture
+and AX blocking nor reset the shared episode timer.
 
 Mapping failures remain raw and effective `failed` decisions. A valid history
 fallback remains effective `protected` and carries
@@ -214,20 +218,21 @@ without publishing an inactive decision. With
 promotion and reasons stay disabled, but effective capture policy and
 clear-pending still apply.
 
-During the transient quiet shield or mapping silence, reason suppression
-applies only to overlay presentation. The effective snapshot, diagnostics,
-policy reasons, window-filtering authorization, and capture gates keep their
-complete structured reason data. At sustained promotion, overlay reason
-presentation is restored,
+During the transient quiet shield, title-uncertainty, or mapping silence, reason
+suppression applies only to overlay presentation. The effective snapshot,
+diagnostics, policy reasons, window-filtering authorization, screenshot
+blocking, and AX gates keep their complete structured reason data from the first
+frame. At sustained promotion, overlay reason presentation is restored,
 including when the configured sustained style is itself `quiet-shield`.
 Owner-only category diagnostics expose only safe presentation state, including
 `raw_state`, effective `state`, `presentation_phase`, `indicator_style`,
 `overlay_reasons_enabled`, and the boolean
 `display_mapping_fallback_active`. History fallback reports
-`transient-mapping-fallback` or `sustained-mapping-fallback`; mapping failures
-report `transient-mapping-failure` or `sustained-mapping-failure`. Category
-payloads do not add cached timestamps, window identities, exact app, bundle,
-title, URL, alternate-title, or matching-rule values.
+`transient-mapping-fallback` or `sustained-mapping-fallback`; title uncertainty
+reports `transient-title-uncertainty` or `sustained-title-uncertainty`; mapping
+failures report `transient-mapping-failure` or `sustained-mapping-failure`.
+Category payloads do not add cached timestamps, window identities, exact app,
+bundle, title, URL, alternate-title, or matching-rule values.
 
 The runtime executable is launched from a generated
 `runtime/helpers/OpenChroniclePrivacyOverlay.app` helper bundle under the active
