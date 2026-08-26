@@ -1219,6 +1219,134 @@ def test_listener_and_wait_use_acknowledged_effective_decision(
     ) is None
 
 
+def test_stop_blocks_listener_dispatch_after_publication_before_notification(
+    inventory,
+    fake_overlay,
+) -> None:
+    received: list[ProtectionDecision] = []
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=received.append,
+    )
+    refresh_errors: list[BaseException] = []
+
+    def refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            refresh_errors.append(exc)
+
+    with monitor._listeners_lock:
+        refresh_thread = threading.Thread(target=refresh)
+        refresh_thread.start()
+        with monitor._decision_condition:
+            assert monitor._decision_condition.wait_for(
+                lambda: monitor._decision is not None,
+                timeout=0.5,
+            )
+        monitor.stop()
+
+    refresh_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert len(refresh_errors) == 1
+    assert isinstance(refresh_errors[0], RuntimeError)
+    assert received == []
+
+
+def test_stop_drains_started_listener_and_blocks_later_listeners(
+    inventory,
+    fake_overlay,
+) -> None:
+    first_started = threading.Event()
+    release_first = threading.Event()
+    stop_finished = threading.Event()
+    received: list[str] = []
+
+    def first_listener(_decision: ProtectionDecision) -> None:
+        first_started.set()
+        assert release_first.wait(timeout=1.0)
+        received.append("first")
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=first_listener,
+    )
+    monitor.add_decision_listener(lambda _decision: received.append("second"))
+
+    refresh_errors: list[BaseException] = []
+
+    def refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            refresh_errors.append(exc)
+
+    refresh_thread = threading.Thread(
+        target=refresh,
+    )
+    refresh_thread.start()
+    assert first_started.wait(timeout=0.5)
+    stop_thread = threading.Thread(target=lambda: (monitor.stop(), stop_finished.set()))
+    stop_thread.start()
+    try:
+        assert stop_finished.wait(timeout=0.1) is False
+    finally:
+        release_first.set()
+        refresh_thread.join(timeout=1.0)
+        stop_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert not stop_thread.is_alive()
+    assert stop_finished.is_set()
+    assert len(refresh_errors) == 1
+    assert isinstance(refresh_errors[0], RuntimeError)
+    assert received == ["first"]
+
+
+def test_listener_can_stop_reentrantly_without_starting_later_listener(
+    inventory,
+    fake_overlay,
+) -> None:
+    received: list[str] = []
+    refresh_errors: list[BaseException] = []
+    refresh_finished = threading.Event()
+    monitor: PrivacyProtectionMonitor
+
+    def first_listener(_decision: ProtectionDecision) -> None:
+        received.append("first")
+        monitor.stop()
+        received.append("stopped")
+
+    monitor = make_monitor(
+        inventory=inventory,
+        overlay=fake_overlay,
+        decision_listener=first_listener,
+    )
+    monitor.add_decision_listener(lambda _decision: received.append("second"))
+
+    def refresh() -> None:
+        try:
+            monitor.decision_for_capture(force=True)
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            refresh_errors.append(exc)
+        finally:
+            refresh_finished.set()
+
+    refresh_thread = threading.Thread(target=refresh, daemon=True)
+    refresh_thread.start()
+
+    assert refresh_finished.wait(timeout=0.5)
+    refresh_thread.join(timeout=1.0)
+
+    assert not refresh_thread.is_alive()
+    assert len(refresh_errors) == 1
+    assert isinstance(refresh_errors[0], RuntimeError)
+    assert received == ["first", "stopped"]
+
+
 def test_monitor_renders_pause_on_all_displays(tmp_path, inventory, fake_overlay) -> None:
     cfg = CaptureConfig(privacy_indicator_style="pill")
     monitor = PrivacyProtectionMonitor(

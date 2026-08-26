@@ -132,6 +132,10 @@ class PrivacyProtectionMonitor:
             [decision_listener] if decision_listener is not None else []
         )
         self._lifecycle_lock = threading.Lock()
+        self._listener_dispatch_condition = threading.Condition(threading.Lock())
+        self._listener_dispatches_blocked = False
+        self._listener_dispatches_in_flight = 0
+        self._listener_dispatches_by_thread: dict[int, int] = {}
         self._overlay_call_condition = threading.Condition(threading.Lock())
         self._overlay_calls_blocked = False
         self._overlay_calls_in_flight = 0
@@ -163,30 +167,36 @@ class PrivacyProtectionMonitor:
             self._stop.set()
             self._wake.set()
             self._reset_window_display_history()
-            if self._overlay_closed:
-                return
-            self._overlay_closed = True
-            monitor_thread = self._thread
+            with self._listener_dispatch_condition:
+                self._listener_dispatches_blocked = True
+            close_overlay = not self._overlay_closed
+            if close_overlay:
+                self._overlay_closed = True
+                monitor_thread = self._thread
+            else:
+                monitor_thread = None
             with self._overlay_call_condition:
                 self._overlay_calls_blocked = True
         with self._decision_condition:
             self._next_smoothing_deadline = None
             self._decision_condition.notify_all()
-        self._overlay.mark_terminal()
-        drained = self._drain_overlay_calls()
-        if drained:
-            self._close_overlay_once()
-        else:
-            logger.warning(
-                "privacy protection indicator drain timed out: "
-                "category=overlay_call_in_flight"
-            )
-        if (
-            drained
-            and monitor_thread is not None
-            and monitor_thread is not threading.current_thread()
-        ):
-            monitor_thread.join(timeout=_MONITOR_JOIN_TIMEOUT)
+        if close_overlay:
+            self._overlay.mark_terminal()
+            drained = self._drain_overlay_calls()
+            if drained:
+                self._close_overlay_once()
+            else:
+                logger.warning(
+                    "privacy protection indicator drain timed out: "
+                    "category=overlay_call_in_flight"
+                )
+            if (
+                drained
+                and monitor_thread is not None
+                and monitor_thread is not threading.current_thread()
+            ):
+                monitor_thread.join(timeout=_MONITOR_JOIN_TIMEOUT)
+        self._drain_listener_dispatches()
 
     def request_refresh(self) -> None:
         with self._lifecycle_lock:
@@ -478,10 +488,46 @@ class PrivacyProtectionMonitor:
         with self._listeners_lock:
             listeners = tuple(self._decision_listeners)
         for listener in listeners:
+            if not self._begin_listener_dispatch():
+                return
             try:
                 listener(decision)
             except Exception as exc:
                 logger.warning("privacy protection listener failed: %s", type(exc).__name__)
+            finally:
+                self._end_listener_dispatch()
+
+    def _begin_listener_dispatch(self) -> bool:
+        with self._lifecycle_lock, self._listener_dispatch_condition:
+            if self._listener_dispatches_blocked:
+                return False
+            thread_id = threading.get_ident()
+            self._listener_dispatches_in_flight += 1
+            self._listener_dispatches_by_thread[thread_id] = (
+                self._listener_dispatches_by_thread.get(thread_id, 0) + 1
+            )
+            return True
+
+    def _end_listener_dispatch(self) -> None:
+        thread_id = threading.get_ident()
+        with self._listener_dispatch_condition:
+            self._listener_dispatches_in_flight -= 1
+            current_thread_dispatches = self._listener_dispatches_by_thread[thread_id] - 1
+            if current_thread_dispatches:
+                self._listener_dispatches_by_thread[thread_id] = current_thread_dispatches
+            else:
+                del self._listener_dispatches_by_thread[thread_id]
+            self._listener_dispatch_condition.notify_all()
+
+    def _drain_listener_dispatches(self) -> None:
+        thread_id = threading.get_ident()
+        with self._listener_dispatch_condition:
+            current_thread_dispatches = self._listener_dispatches_by_thread.get(
+                thread_id,
+                0,
+            )
+            while self._listener_dispatches_in_flight > current_thread_dispatches:
+                self._listener_dispatch_condition.wait()
 
     def _reload_indicator_settings(self) -> None:
         try:
