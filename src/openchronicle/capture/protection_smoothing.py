@@ -7,7 +7,7 @@ from .privacy import ProtectionFailureReason
 from .protection import ProtectionSnapshot, ProtectionState
 from .protection_reason import ProtectionReasonCode
 
-PROTECTED_PROMOTION_SECONDS: float = 0.8
+PROTECTED_PROMOTION_SECONDS: float = 1.0
 SAFE_CONFIRMATION_SECONDS: float = 0.2
 PRESENTATION_SMOOTHED_FAILURES = frozenset(
     {
@@ -175,12 +175,8 @@ class ProtectionPresentationSmoother:
             promoted = now >= self._episode_started_at + self._promotion_seconds
             effective_style = raw_snapshot.indicator_style
             reasons_enabled = promoted and effective_style != "off"
-            if not promoted and effective_style != "off":
-                effective_style = (
-                    "off"
-                    if mapping_fallback or mapping_failure or title_uncertainty
-                    else "quiet-shield"
-                )
+            if not promoted:
+                effective_style = "off"
             effective = replace(raw_snapshot, indicator_style=effective_style)
             self._last_effective_risk = effective
             self._last_overlay_reasons_enabled = reasons_enabled
