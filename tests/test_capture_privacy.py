@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import logging
+import math
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +11,9 @@ import pytest
 
 from openchronicle.capture import privacy, screenshot
 from openchronicle.config import CaptureConfig
+
+DISPLAY_1 = privacy.DisplayInfo(1, privacy.ScreenRegion(0, 0, 100, 100), True)
+DISPLAY_2 = privacy.DisplayInfo(2, privacy.ScreenRegion(100, 0, 100, 100), False)
 
 
 def _window(
@@ -297,6 +302,107 @@ def test_read_window_inventory_rejects_invalid_display_bounds(monkeypatch) -> No
     )
 
     assert privacy.read_window_inventory() is None
+
+
+@pytest.mark.parametrize(
+    ("inventory", "expected"),
+    [
+        (None, privacy.ProtectionFailureReason.INVENTORY_UNAVAILABLE),
+        (
+            privacy.WindowInventory(windows=(), displays=()),
+            privacy.ProtectionFailureReason.EMPTY_DISPLAYS,
+        ),
+        (
+            privacy.WindowInventory(windows=(), displays=(DISPLAY_1, replace(DISPLAY_1))),
+            privacy.ProtectionFailureReason.INVALID_DISPLAY_INVENTORY,
+        ),
+        *[
+            (
+                privacy.WindowInventory(
+                    windows=(),
+                    displays=(replace(DISPLAY_1, id=display_id),),
+                ),
+                privacy.ProtectionFailureReason.INVALID_DISPLAY_INVENTORY,
+            )
+            for display_id in (True, 0, -1, 0x1_0000_0000)
+        ],
+        *[
+            (
+                privacy.WindowInventory(
+                    windows=(),
+                    displays=(
+                        replace(
+                            DISPLAY_1,
+                            region=privacy.ScreenRegion(0, 0, width, 100),
+                        ),
+                    ),
+                ),
+                privacy.ProtectionFailureReason.INVALID_DISPLAY_INVENTORY,
+            )
+            for width in (math.nan, math.inf, -math.inf, 0, -1)
+        ],
+        (
+            privacy.WindowInventory(
+                windows=(
+                    privacy.VisibleWindow("One", "one", "", privacy.ScreenRegion(0, 0, 10, 10), True),
+                    privacy.VisibleWindow("Two", "two", "", privacy.ScreenRegion(10, 0, 10, 10), True),
+                ),
+                displays=(DISPLAY_1, DISPLAY_2),
+            ),
+            privacy.ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS,
+        ),
+        (
+            privacy.WindowInventory(windows=(), displays=(DISPLAY_1, DISPLAY_2)),
+            None,
+        ),
+    ],
+)
+def test_inventory_structure_failure_reason(inventory, expected) -> None:
+    assert privacy.inventory_structure_failure_reason(inventory) is expected
+
+
+@pytest.mark.parametrize("display_id", [True, 0, -1, 0x1_0000_0000, 1.0, "1"])
+def test_read_window_inventory_rejects_untyped_or_invalid_display_ids(monkeypatch, display_id) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult(
+            {
+                "windows": [],
+                "displays": [
+                    {"id": display_id, "left": 0, "top": 0, "width": 100, "height": 100}
+                ],
+            },
+            None,
+        ),
+    )
+
+    result = privacy.read_window_inventory_result()
+
+    assert result.inventory is None
+    assert result.failure_reason is privacy.ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
+
+
+def test_read_window_inventory_rejects_duplicate_display_ids(monkeypatch) -> None:
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult(
+            {
+                "windows": [],
+                "displays": [
+                    {"id": 1, "left": 0, "top": 0, "width": 100, "height": 100},
+                    {"id": 1, "left": 100, "top": 0, "width": 100, "height": 100},
+                ],
+            },
+            None,
+        ),
+    )
+
+    result = privacy.read_window_inventory_result()
+
+    assert result.inventory is None
+    assert result.failure_reason is privacy.ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
 
 
 def test_inventory_read_result_uses_fixed_reason_codes_without_private_markers(

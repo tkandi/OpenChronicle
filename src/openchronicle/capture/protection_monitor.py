@@ -17,6 +17,7 @@ from ..capture_pause import (
 )
 from ..config import CaptureConfig
 from ..logger import get
+from . import privacy
 from .privacy import (
     InventoryReadResult,
     ProtectionFailureReason,
@@ -316,6 +317,11 @@ class PrivacyProtectionMonitor:
                     )
                 diagnostic_display_ids = diagnostics_guard.display_ids
                 diagnostics_guard_invalid = diagnostics_guard.fail_closed_all
+                if inventory is not None and failure_reason is None:
+                    structure_failure = privacy.inventory_structure_failure_reason(inventory)
+                    if structure_failure is not None:
+                        inventory = None
+                        failure_reason = structure_failure
                 if inventory is not None and failure_reason is None:
                     try:
                         inventory = self._resolve_window_display_history(

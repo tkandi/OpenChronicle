@@ -5,6 +5,7 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -404,6 +405,39 @@ def test_failed_inventory_cannot_replace_existing_trusted_history(
     assert fallback.snapshot.protected_display_ids == frozenset({1})
     assert fallback.snapshot.display_mapping_fallback_active is True
     assert 2 not in fallback.snapshot.protected_display_ids
+    assert history.resolve_times == [10.0, 10.2]
+
+
+def test_invalid_inventory_cannot_replace_existing_trusted_history(
+    fake_overlay,
+) -> None:
+    clock = FakeMonotonic(10.0)
+    seed_display_1 = _history_inventory(ScreenRegion(10, 0, 80, 90))
+    invalid_display_2 = replace(
+        _history_inventory(ScreenRegion(110, 0, 80, 90)),
+        displays=(seed_display_1.displays[1], seed_display_1.displays[1]),
+    )
+    unmapped = _history_inventory(ScreenRegion(5000, 0, 80, 90))
+    readings = iter((seed_display_1, invalid_display_2, unmapped))
+    history = RecordingWindowDisplayHistory()
+    monitor = make_monitor(
+        inventory=seed_display_1,
+        overlay=fake_overlay,
+        inventory_reader=lambda: next(readings),
+        monotonic=clock,
+        window_display_history=history,
+    )
+
+    seed = monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    failed = monitor.decision_for_capture(force=True)
+    clock.advance(0.1)
+    after = monitor.decision_for_capture(force=True)
+
+    assert seed.snapshot.protected_display_ids == frozenset({1})
+    assert failed.snapshot.failure_reason is ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
+    assert after.snapshot.display_mapping_fallback_active is True
+    assert after.snapshot.protected_display_ids == frozenset({1})
     assert history.resolve_times == [10.0, 10.2]
 
 

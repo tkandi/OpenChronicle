@@ -977,6 +977,44 @@ def test_multiple_active_windows_fail_closed() -> None:
     assert snapshot.ax_blocked is True
 
 
+@pytest.mark.parametrize(
+    ("inventory", "expected_reason"),
+    [
+        (
+            WindowInventory(windows=(), displays=()),
+            ProtectionFailureReason.EMPTY_DISPLAYS,
+        ),
+        (
+            WindowInventory(
+                windows=(),
+                displays=(DisplayInfo(1, ScreenRegion(0, 0, float("nan"), 100), True),),
+            ),
+            ProtectionFailureReason.INVALID_DISPLAY_INVENTORY,
+        ),
+        (
+            WindowInventory(
+                windows=(
+                    VisibleWindow("One", "one", "", ScreenRegion(0, 0, 10, 10), True),
+                    VisibleWindow("Two", "two", "", ScreenRegion(10, 0, 10, 10), True),
+                ),
+                displays=(LEFT, RIGHT),
+            ),
+            ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS,
+        ),
+    ],
+)
+def test_direct_snapshot_resolver_rejects_invalid_inventory_structure(
+    inventory: WindowInventory,
+    expected_reason: ProtectionFailureReason,
+) -> None:
+    snapshot = build_protection_snapshot(
+        CaptureConfig(), inventory, paused=False, generation=10, now=13.0
+    )
+
+    assert snapshot.state is ProtectionState.FAILED
+    assert snapshot.failure_reason is expected_reason
+
+
 def test_snapshot_classifies_non_inventory_failure_reasons() -> None:
     duplicate_displays = WindowInventory(
         windows=(),

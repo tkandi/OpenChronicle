@@ -4,7 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 
-from .privacy import DisplayInfo, ScreenRegion, VisibleWindow, WindowInventory
+from .privacy import (
+    DisplayInfo,
+    ScreenRegion,
+    VisibleWindow,
+    WindowInventory,
+    inventory_structure_failure_reason,
+)
 
 WINDOW_DISPLAY_HISTORY_ABSENCE_SECONDS: float = 5.0
 
@@ -42,6 +48,14 @@ class WindowDisplayHistory:
             raise WindowDisplayHistoryError("monotonic clock moved backwards")
 
         self._previous_now = now
+        if inventory_structure_failure_reason(inventory) is not None:
+            return replace(
+                inventory,
+                windows=tuple(
+                    replace(window, fallback_display_ids=frozenset())
+                    for window in inventory.windows
+                ),
+            )
         active_display_ids = {display.id for display in inventory.displays}
         duplicate_ids = _duplicate_window_ids(inventory.windows)
         observed_owners = _unique_observed_owners(inventory.windows, duplicate_ids)
@@ -57,6 +71,7 @@ class WindowDisplayHistory:
                 identity.window_id not in observed_owners
                 or observed_owners[identity.window_id] == identity.owner_key
             )
+            and (entry.display_ids & active_display_ids)
             and not (
                 entry.absence_observed
                 and now - entry.last_seen_monotonic >= WINDOW_DISPLAY_HISTORY_ABSENCE_SECONDS

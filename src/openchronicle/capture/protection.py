@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from collections import Counter
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -117,21 +116,6 @@ def _regions_intersect(left: ScreenRegion, right: ScreenRegion) -> bool:
     return _intersection_area(left, right) > 0
 
 
-def _display_is_usable(display: DisplayInfo) -> bool:
-    region = display.region
-    return (
-        all(math.isfinite(value) for value in (region.left, region.top, region.width, region.height))
-        and region.width > 0
-        and region.height > 0
-    )
-
-
-def _displays_are_usable(displays: tuple[DisplayInfo, ...]) -> bool:
-    return bool(displays) and len({display.id for display in displays}) == len(displays) and all(
-        _display_is_usable(display) for display in displays
-    )
-
-
 def _usable_window_id(value: object) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and 0 < value <= 0xFFFFFFFF:
         return value
@@ -179,12 +163,13 @@ def build_protection_snapshot(
 ) -> ProtectionSnapshot:
     displays = inventory.displays if inventory is not None else ()
     all_ids = frozenset(display.id for display in displays)
+    structure_failure = privacy.inventory_structure_failure_reason(inventory)
     requested_diagnostic_ids = frozenset(diagnostic_display_ids)
     diagnostics_guard_active = diagnostics_guard_invalid or bool(requested_diagnostic_ids)
     diagnostics_guard_unmapped = (
         bool(requested_diagnostic_ids)
         and inventory is not None
-        and _displays_are_usable(displays)
+        and structure_failure is None
         and not requested_diagnostic_ids <= all_ids
     )
     effective_guard_invalid = diagnostics_guard_invalid or diagnostics_guard_unmapped
@@ -232,14 +217,8 @@ def build_protection_snapshot(
     )
     derived_failure_reason = failure_reason
     if derived_failure_reason is None:
-        if inventory is None:
-            derived_failure_reason = ProtectionFailureReason.INVENTORY_UNAVAILABLE
-        elif not displays:
-            derived_failure_reason = ProtectionFailureReason.EMPTY_DISPLAYS
-        elif not _displays_are_usable(displays):
-            derived_failure_reason = ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
-        elif len(active_windows) > 1:
-            derived_failure_reason = ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS
+        if structure_failure is not None:
+            derived_failure_reason = structure_failure
         elif (
             active_window is not None and not active_window_display_ids
         ) or has_unmapped_guarded_active_candidate:

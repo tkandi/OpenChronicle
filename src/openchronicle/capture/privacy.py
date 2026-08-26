@@ -73,6 +73,48 @@ class ProtectionFailureReason(StrEnum):
     PRESENTATION_STATE_INVALID = "presentation_state_invalid"
 
 
+def _valid_display_id(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 < value <= 0xFFFFFFFF
+    )
+
+
+def inventory_structure_failure_reason(
+    inventory: WindowInventory | None,
+) -> ProtectionFailureReason | None:
+    if inventory is None:
+        return ProtectionFailureReason.INVENTORY_UNAVAILABLE
+    displays = inventory.displays
+    if not displays:
+        return ProtectionFailureReason.EMPTY_DISPLAYS
+    ids = [display.id for display in displays]
+    invalid_bounds = any(
+        not all(
+            math.isfinite(value)
+            for value in (
+                display.region.left,
+                display.region.top,
+                display.region.width,
+                display.region.height,
+            )
+        )
+        or display.region.width <= 0
+        or display.region.height <= 0
+        for display in displays
+    )
+    if (
+        any(not _valid_display_id(display_id) for display_id in ids)
+        or len(set(ids)) != len(ids)
+        or invalid_bounds
+    ):
+        return ProtectionFailureReason.INVALID_DISPLAY_INVENTORY
+    if sum(window.is_active for window in inventory.windows) > 1:
+        return ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS
+    return None
+
+
 @dataclass(frozen=True)
 class WindowListReadResult:
     raw: dict[str, Any] | None
@@ -300,11 +342,11 @@ def read_window_inventory_result() -> InventoryReadResult:
         displays = tuple(_parse_display(row) for row in raw["displays"])
     except (KeyError, TypeError, ValueError):
         return InventoryReadResult(None, ProtectionFailureReason.INVALID_DISPLAY_INVENTORY)
-    if not displays:
-        return InventoryReadResult(None, ProtectionFailureReason.EMPTY_DISPLAYS)
-    if sum(window.is_active for window in windows) > 1:
-        return InventoryReadResult(None, ProtectionFailureReason.MULTIPLE_ACTIVE_WINDOWS)
-    return InventoryReadResult(WindowInventory(windows=windows, displays=displays), None)
+    inventory = WindowInventory(windows=windows, displays=displays)
+    failure_reason = inventory_structure_failure_reason(inventory)
+    if failure_reason is not None:
+        return InventoryReadResult(None, failure_reason)
+    return InventoryReadResult(inventory, None)
 
 
 def read_window_inventory() -> WindowInventory | None:
@@ -359,6 +401,9 @@ def _optional_window_id(row: dict[str, Any]) -> int | None:
 def _parse_display(row: Any) -> DisplayInfo:
     if not isinstance(row, dict):
         raise TypeError("display is not an object")
+    raw_display_id = row["id"]
+    if not _valid_display_id(raw_display_id):
+        raise ValueError("display id is not a positive CoreGraphics display ID")
     region = ScreenRegion(
         left=float(row["left"]),
         top=float(row["top"]),
@@ -372,7 +417,7 @@ def _parse_display(row: Any) -> DisplayInfo:
     ):
         raise ValueError("display has invalid bounds")
     return DisplayInfo(
-        id=int(row["id"]),
+        id=raw_display_id,
         region=region,
         is_primary=bool(row.get("is_primary")),
     )
