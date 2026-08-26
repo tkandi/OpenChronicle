@@ -1,6 +1,6 @@
 # Unknown-Title Browser Protection Scope
 
-**Date:** 2026-08-26  
+**Date:** 2026-08-26
 **Status:** Approved design
 
 ## Problem
