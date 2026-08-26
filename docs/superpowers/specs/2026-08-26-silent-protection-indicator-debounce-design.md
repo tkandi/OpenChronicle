@@ -19,8 +19,9 @@ OpenChronicle 当前在普通 protected episode 的前 800ms 自动显示轻量 
 再升级为用户配置的完整样式。短暂窗口或 Space 过渡因此仍会让小盾牌闪一下。用户希望短暂风险
 完全没有视觉闪烁；如果风险持续，则直接出现完整“已保护”标志。
 
-这只是 presentation policy 调整。截图选择和 AX gate 必须继续从第一份 protected/allowlisted
-failure 决策起立即 fail-closed，不能等待视觉防抖结束。
+这只是 presentation policy 调整。普通 protected 的截图选择和 AX gate 必须继续从第一份决策起
+立即 fail-closed；allowlisted mapping failure 则立即执行既有 failure policy。两者都不能等待视觉
+防抖结束才执行安全策略。
 
 ## 目标
 
@@ -44,7 +45,8 @@ failure 决策起立即 fail-closed，不能等待视觉防抖结束。
 
 从 inactive、paused 或硬故障恢复后进入可平滑风险 episode 时：
 
-1. 立即按 raw decision 阻止截图与 AX。
+1. 立即执行 raw decision 的捕获与 AX 策略：普通 protected 立即阻止，allowlisted mapping failure
+   沿用既有 failure policy。
 2. 记录 episode 的 monotonic 起点，并设置 `start + 1.0s` promotion deadline。
 3. deadline 前发布原有 transient phase，但 effective `indicator_style` 固定为 `off`，且
    `overlay_reasons_enabled=false`。
