@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import UserNotifications
 import XCTest
@@ -62,6 +63,71 @@ final class CapturePauseStateTests: XCTestCase {
     XCTAssertEqual(store.load(), expected)
     try store.clear()
     XCTAssertNil(store.load())
+  }
+
+  func testPauseStoreUsesOwnerOnlySiblingLockAndAtomicUpdate() throws {
+    let now = Date(timeIntervalSince1970: 2_000_000_000)
+    let original = CapturePauseState.timed(duration: 30 * 60, now: now)
+    try store.save(original)
+
+    let updated = try store.update(now: now) { current in
+      var current = try XCTUnwrap(current)
+      current.resumeAt = now.addingTimeInterval(60 * 60)
+      return current
+    }
+
+    XCTAssertEqual(store.lockFileURL.path, store.fileURL.path + ".lock")
+    XCTAssertEqual(store.load(), updated)
+    let attributes = try FileManager.default.attributesOfItem(
+      atPath: store.lockFileURL.path
+    )
+    let permissions = try XCTUnwrap(
+      attributes[FileAttributeKey.posixPermissions] as? NSNumber
+    )
+    XCTAssertEqual(permissions.intValue & 0o777, 0o600)
+  }
+
+  func testPauseStoreSaveWaitsForExistingProcessLock() throws {
+    let lockURL = URL(fileURLWithPath: store.fileURL.path + ".lock")
+    let descriptor = Darwin.open(
+      lockURL.path,
+      O_RDWR | O_CREAT,
+      S_IRUSR | S_IWUSR
+    )
+    XCTAssertGreaterThanOrEqual(descriptor, 0)
+    guard descriptor >= 0 else { return }
+    XCTAssertEqual(capturePauseFlock(descriptor, LOCK_EX), 0)
+
+    let started = DispatchSemaphore(value: 0)
+    let completed = DispatchSemaphore(value: 0)
+    let errorLock = NSLock()
+    var saveError: Error?
+    let state = CapturePauseState.indefinite(
+      now: Date(timeIntervalSince1970: 2_000_000_000)
+    )
+    let store = try XCTUnwrap(store)
+    DispatchQueue.global().async {
+      started.signal()
+      do {
+        try store.save(state)
+      } catch {
+        errorLock.lock()
+        saveError = error
+        errorLock.unlock()
+      }
+      completed.signal()
+    }
+
+    XCTAssertEqual(started.wait(timeout: .now() + 1), .success)
+    XCTAssertEqual(completed.wait(timeout: .now() + 0.1), .timedOut)
+    XCTAssertEqual(capturePauseFlock(descriptor, LOCK_UN), 0)
+    Darwin.close(descriptor)
+    XCTAssertEqual(completed.wait(timeout: .now() + 1), .success)
+    errorLock.lock()
+    let observedError = saveError
+    errorLock.unlock()
+    XCTAssertNil(observedError)
+    XCTAssertEqual(store.load(), state)
   }
 
   func testIndefiniteReminderUsesOneHourThenTwoHourIntervals() {

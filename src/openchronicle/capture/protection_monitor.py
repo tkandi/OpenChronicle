@@ -241,23 +241,32 @@ class PrivacyProtectionMonitor:
                 self._decision_condition.wait(remaining)
 
     def decision_for_capture(self, *, force: bool = True) -> ProtectionDecision:
-        must_refresh = force
-        while True:
+        self._raise_if_stopped()
+        with self._state_lock:
+            current = self._decision
+            required_epoch = self._requested_epoch
+            start_generation = self._generation
+        if (
+            not force
+            and current is not None
+            and current.covered_request_epoch >= required_epoch
+            and current.snapshot.fresh_until >= self._monotonic()
+        ):
             self._raise_if_stopped()
-            if must_refresh:
-                self._refresh()
-                must_refresh = False
+            return current
+
+        while True:
+            refreshed = self._refresh(
+                reuse_after_generation=start_generation,
+                required_epoch=required_epoch,
+            )
             with self._state_lock:
-                current = self._decision
-                requested_epoch = self._requested_epoch
-            if (
-                current is not None
-                and current.covered_request_epoch >= requested_epoch
-                and current.snapshot.fresh_until >= self._monotonic()
-            ):
+                latest_requested_epoch = self._requested_epoch
+            if refreshed.covered_request_epoch >= latest_requested_epoch:
                 self._raise_if_stopped()
-                return current
-            self._refresh()
+                return refreshed
+            start_generation = refreshed.snapshot.generation
+            required_epoch = latest_requested_epoch
 
     def _run(self) -> None:
         try:
@@ -281,9 +290,23 @@ class PrivacyProtectionMonitor:
                 except RuntimeError:
                     return
 
-    def _refresh(self) -> ProtectionDecision:
+    def _refresh(
+        self,
+        *,
+        reuse_after_generation: int | None = None,
+        required_epoch: int | None = None,
+    ) -> ProtectionDecision:
         with self._refresh_lock:
             self._raise_if_stopped()
+            if reuse_after_generation is not None and required_epoch is not None:
+                with self._state_lock:
+                    reusable = self._decision
+                if (
+                    reusable is not None
+                    and reusable.snapshot.generation > reuse_after_generation
+                    and reusable.covered_request_epoch >= required_epoch
+                ):
+                    return reusable
 
             self._reload_indicator_settings()
             with self._state_lock:
@@ -292,9 +315,11 @@ class PrivacyProtectionMonitor:
             self._raise_if_stopped()
             now = self._monotonic()
             generation = self._generation + 1
-            if self._diagnostics_guard_only and not (
+            paused, pause_failure_reason, pause_reason = self._read_pause_input()
+            empty_guard_only = self._diagnostics_guard_only and not (
                 diagnostics_guard.fail_closed_all or diagnostics_guard.display_ids
-            ):
+            )
+            if empty_guard_only and not paused and pause_failure_reason is None:
                 raw_snapshot = ProtectionSnapshot(
                     generation=generation,
                     state=ProtectionState.INACTIVE,
@@ -311,7 +336,11 @@ class PrivacyProtectionMonitor:
                     reason_trigger=self._cfg.privacy_reason_trigger,
                 )
             else:
-                paused, inventory, failure_reason, pause_reason = self._read_protection_inputs()
+                paused, inventory, failure_reason, pause_reason = self._read_inventory_input(
+                    paused=paused,
+                    failure_reason=pause_failure_reason,
+                    pause_reason=pause_reason,
+                )
                 self._raise_if_stopped()
                 snapshot_cfg = replace(
                     self._cfg,
@@ -553,13 +582,37 @@ class PrivacyProtectionMonitor:
         ProtectionFailureReason | None,
         ProtectionReason | None,
     ]:
+        paused, failure_reason, pause_reason = self._read_pause_input()
+        return self._read_inventory_input(
+            paused=paused,
+            failure_reason=failure_reason,
+            pause_reason=pause_reason,
+        )
+
+    def _read_pause_input(
+        self,
+    ) -> tuple[bool, ProtectionFailureReason | None, ProtectionReason | None]:
         try:
             pause_decision = self._normalize_pause_decision(self._pause_reader())
         except Exception as exc:  # A pause-read failure must not allow capture.
             logger.warning("privacy protection pause read failed: %s", type(exc).__name__)
-            return False, None, ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE, None
-        paused = pause_decision.paused
-        pause_reason = pause_reason_from_decision(pause_decision)
+            return False, ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE, None
+        return pause_decision.paused, None, pause_reason_from_decision(pause_decision)
+
+    def _read_inventory_input(
+        self,
+        *,
+        paused: bool,
+        failure_reason: ProtectionFailureReason | None,
+        pause_reason: ProtectionReason | None,
+    ) -> tuple[
+        bool,
+        WindowInventory | None,
+        ProtectionFailureReason | None,
+        ProtectionReason | None,
+    ]:
+        if failure_reason is not None:
+            return paused, None, failure_reason, pause_reason
         try:
             result = self._inventory_reader()
         except Exception:  # Inventory metadata and exception text must never be logged.

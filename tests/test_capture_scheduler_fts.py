@@ -1054,7 +1054,7 @@ def test_paused_initial_decision_writes_nothing_without_displays_or_capture_sour
     monkeypatch.setattr(
         scheduler_mod.window_meta,
         "active_window",
-        lambda: window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor"),
+        lambda: pytest.fail("paused initial decision must precede foreground metadata"),
     )
     monkeypatch.setattr(
         scheduler_mod.s1_parser,
@@ -2531,7 +2531,7 @@ def test_filtered_inactive_uses_current_fresh_decision_and_one_post_check(
     assert "screenshot fallback:" not in caplog.text
 
 
-def test_filtered_inactive_clear_failure_never_runs_unblocked_mss(
+def test_filtered_inactive_clear_failure_skips_screenshot_but_keeps_capture(
     ac_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2551,16 +2551,18 @@ def test_filtered_inactive_clear_failure_never_runs_unblocked_mss(
             screenshot_monitor="separate",
             screenshot_privacy_mode="mask-window",
         ),
-        _FakeProvider(raw_json=None),
+        _FakeProvider(raw_json=_edge_ax_tree("https://safe.example")),
         None,
         protection_monitor=monitor,
     )
 
-    assert out is None
+    assert out is not None
+    assert "ax_tree" in out
+    assert "screenshot" not in out
     assert monitor.force_calls == [True, False]
 
 
-def test_real_monitor_unconfirmed_inactive_clear_blocks_complete_tick_until_ack(
+def test_real_monitor_unconfirmed_inactive_clear_blocks_only_screenshot_until_ack(
     ac_root: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2626,7 +2628,7 @@ def test_real_monitor_unconfirmed_inactive_clear_blocks_complete_tick_until_ack(
         assert first_safe.presentation_phase is ProtectionPresentationPhase.CLEAR_PENDING
 
         now = 10.3
-        blocked = scheduler_mod._build_capture(
+        without_screenshot = scheduler_mod._build_capture(
             cfg,
             provider,
             None,
@@ -2639,14 +2641,16 @@ def test_real_monitor_unconfirmed_inactive_clear_blocks_complete_tick_until_ack(
             created_at="2026-08-25T00:00:00Z",
         )
 
-        assert blocked is None
-        assert provider.calls == 0
+        assert without_screenshot is not None
+        assert "ax_tree" in without_screenshot
+        assert "screenshot" not in without_screenshot
+        assert provider.calls == 1
         assert mss_calls == []
         assert filtered_calls == []
         assert unconfirmed.snapshot.state is ProtectionState.INACTIVE
         assert unconfirmed.indicator_confirmed is False
         assert all(display["screenshot_blocked"] is True for display in diagnostics["displays"])
-        assert all(display["ax_blocked"] is True for display in diagnostics["displays"])
+        assert all(display["ax_blocked"] is False for display in diagnostics["displays"])
 
         resumed = scheduler_mod._build_capture(
             cfg,
@@ -2659,7 +2663,7 @@ def test_real_monitor_unconfirmed_inactive_clear_blocks_complete_tick_until_ack(
 
     assert resumed is not None
     assert "ax_tree" in resumed
-    assert provider.calls == 1
+    assert provider.calls == 2
     assert len(mss_calls) == 1
     assert filtered_calls == []
 

@@ -82,81 +82,116 @@ final class CapturePauseController: ObservableObject {
   }
 
   func resume() {
-    let previousID = state?.id
-    do {
-      try store.clear()
-      state = nil
-      lastError = nil
-      backend.refresh()
-      if let previousID {
-        notificationCenter.removeDeliveredNotifications(
-          withIdentifiers: [warningIdentifier(for: previousID)]
-        )
-      }
-    } catch {
-      lastError = "Could not resume capture: \(error.localizedDescription)"
-    }
+    _ = resume(expectedPauseID: nil)
   }
 
   func extend(by duration: TimeInterval) {
+    _ = extend(by: duration, expectedPauseID: nil)
+  }
+
+  @discardableResult
+  private func extend(by duration: TimeInterval, expectedPauseID: String?) -> Bool {
     let now = Date()
-    guard var current = store.load(now: now) else {
-      pause(for: duration)
-      return
+    var updatedPauseID: String?
+    let applied = mutatePause(
+      at: now,
+      expectedPauseID: expectedPauseID
+    ) { existing in
+      var current = existing ?? CapturePauseState.timed(duration: duration, now: now)
+      if existing != nil {
+        current.mode = .timed
+        current.resumeAt = max(now, current.resumeAt ?? now).addingTimeInterval(duration)
+        current.resumeArmedAt = nil
+        current.appHeartbeatAt = now
+        current.lastReminderAt = nil
+      }
+      updatedPauseID = current.id
+      return current
     }
-    current.mode = .timed
-    current.resumeAt = max(now, current.resumeAt ?? now).addingTimeInterval(duration)
-    current.resumeArmedAt = nil
-    current.appHeartbeatAt = now
-    current.lastReminderAt = nil
-    notificationCenter.removeDeliveredNotifications(
-      withIdentifiers: [warningIdentifier(for: current.id)]
-    )
-    persist(current)
-    ensureNotificationAuthorization()
+    if applied {
+      if let updatedPauseID {
+        notificationCenter.removeDeliveredNotifications(
+          withIdentifiers: [warningIdentifier(for: updatedPauseID)]
+        )
+      }
+      ensureNotificationAuthorization()
+    }
+    return applied
   }
 
   func keepPaused() {
+    _ = keepPaused(expectedPauseID: nil)
+  }
+
+  @discardableResult
+  private func keepPaused(expectedPauseID: String?) -> Bool {
     let now = Date()
-    guard var current = store.load(now: now) else {
-      pause(for: nil)
-      return
+    var updatedPauseID: String?
+    let applied = mutatePause(
+      at: now,
+      expectedPauseID: expectedPauseID
+    ) { existing in
+      var current = existing ?? CapturePauseState.indefinite(now: now)
+      current.mode = .indefinite
+      current.resumeAt = nil
+      current.resumeArmedAt = nil
+      current.appHeartbeatAt = now
+      current.lastReminderAt = now
+      updatedPauseID = current.id
+      return current
     }
-    current.mode = .indefinite
-    current.resumeAt = nil
-    current.resumeArmedAt = nil
-    current.appHeartbeatAt = now
-    current.lastReminderAt = now
-    notificationCenter.removeDeliveredNotifications(
-      withIdentifiers: [warningIdentifier(for: current.id)]
-    )
-    persist(current)
+    if applied, let updatedPauseID {
+      notificationCenter.removeDeliveredNotifications(
+        withIdentifiers: [warningIdentifier(for: updatedPauseID)]
+      )
+    }
+    return applied
   }
 
   func prepareForSleep() {
-    guard var current = store.load(), current.mode == .timed else { return }
-    current.resumeArmedAt = nil
-    current.appHeartbeatAt = nil
-    notificationCenter.removeDeliveredNotifications(
-      withIdentifiers: [warningIdentifier(for: current.id)]
-    )
-    persist(current, refreshBackend: false)
+    var updatedPauseID: String?
+    _ = mutatePause(refreshBackend: false) { existing in
+      guard var current = existing, current.mode == .timed else { return existing }
+      current.resumeArmedAt = nil
+      current.appHeartbeatAt = nil
+      updatedPauseID = current.id
+      return current
+    }
+    if let updatedPauseID {
+      notificationCenter.removeDeliveredNotifications(
+        withIdentifiers: [warningIdentifier(for: updatedPauseID)]
+      )
+    }
   }
 
   func tick(now: Date = Date()) {
     displayNow = now
     refreshState(now: now)
-    guard var current = state else { return }
+    guard let current = state else { return }
 
     if current.needsWakeRearm(at: now) {
-      current.resumeArmedAt = nil
-      current.appHeartbeatAt = now
-      persist(current, refreshBackend: false)
+      _ = mutatePause(
+        at: now,
+        expectedPauseID: current.id,
+        refreshBackend: false
+      ) { existing in
+        guard var updated = existing else { return nil }
+        updated.resumeArmedAt = nil
+        updated.appHeartbeatAt = now
+        return updated
+      }
     } else if current.appHeartbeatAt == nil
       || now.timeIntervalSince(current.appHeartbeatAt!) >= CapturePauseState.heartbeatInterval
     {
-      current.appHeartbeatAt = now
-      persist(current, refreshBackend: false)
+      _ = mutatePause(
+        at: now,
+        expectedPauseID: current.id,
+        refreshBackend: false
+      ) { existing in
+        guard var updated = existing else { return nil }
+        updated.appHeartbeatAt = now
+        return updated
+      }
     }
 
     guard let refreshed = state else { return }
@@ -178,17 +213,14 @@ final class CapturePauseController: ObservableObject {
   }
 
   func handleNotificationAction(_ identifier: String, pauseID: String?) -> Bool {
-    guard let current = store.load(), current.id == pauseID else { return false }
+    guard let pauseID else { return false }
     switch identifier {
     case Self.resumeActionIdentifier:
-      resume()
-      return true
+      return resume(expectedPauseID: pauseID)
     case Self.extendActionIdentifier:
-      extend(by: 30 * 60)
-      return true
+      return extend(by: 30 * 60, expectedPauseID: pauseID)
     case Self.keepPausedActionIdentifier:
-      keepPaused()
-      return true
+      return keepPaused(expectedPauseID: pauseID)
     default:
       return false
     }
@@ -214,22 +246,61 @@ final class CapturePauseController: ObservableObject {
     }
   }
 
-  private func autoResume(previousState: CapturePauseState) {
+  @discardableResult
+  private func mutatePause(
+    at now: Date = Date(),
+    expectedPauseID: String? = nil,
+    refreshBackend: Bool = true,
+    errorPrefix: String = "Could not update capture pause",
+    _ transform: (CapturePauseState?) -> CapturePauseState?
+  ) -> Bool {
+    var applied = false
     do {
-      try store.clear()
-      state = nil
+      let updated = try store.update(now: now) { current in
+        guard expectedPauseID == nil || current?.id == expectedPauseID else {
+          return current
+        }
+        applied = true
+        return transform(current)
+      }
+      guard applied else { return false }
+      state = updated
       lastError = nil
-      backend.refresh()
+      if refreshBackend {
+        backend.refresh()
+      }
+      return true
+    } catch {
+      lastError = "\(errorPrefix): \(error.localizedDescription)"
+      return false
+    }
+  }
+
+  @discardableResult
+  private func resume(expectedPauseID: String?) -> Bool {
+    var previousID: String?
+    let applied = mutatePause(
+      expectedPauseID: expectedPauseID,
+      errorPrefix: "Could not resume capture"
+    ) { current in
+      previousID = current?.id
+      return nil
+    }
+    if applied, let previousID {
       notificationCenter.removeDeliveredNotifications(
-        withIdentifiers: [warningIdentifier(for: previousState.id)]
+        withIdentifiers: [warningIdentifier(for: previousID)]
       )
+    }
+    return applied
+  }
+
+  private func autoResume(previousState: CapturePauseState) {
+    if resume(expectedPauseID: previousState.id) {
       postInformationalNotification(
         identifier: "capture-resumed-\(previousState.id)",
         title: "OpenChronicle capture resumed",
         body: "The scheduled privacy pause has ended."
       )
-    } catch {
-      lastError = "Could not resume capture: \(error.localizedDescription)"
     }
   }
 
@@ -241,14 +312,20 @@ final class CapturePauseController: ObservableObject {
       body: "Capture will resume in 1 minute. Extend the pause if sensitive content is still visible.",
       now: now
     ) { [weak self] deliveredAt in
-      guard let self, var current = self.store.load(now: deliveredAt),
-        current.id == pause.id,
-        current.mode == .timed,
-        current.resumeArmedAt == nil
-      else { return }
-      current.resumeArmedAt = deliveredAt
-      current.appHeartbeatAt = deliveredAt
-      self.persist(current, refreshBackend: false)
+      guard let self else { return }
+      _ = self.mutatePause(
+        at: deliveredAt,
+        expectedPauseID: pause.id,
+        refreshBackend: false
+      ) { existing in
+        guard var current = existing,
+          current.mode == .timed,
+          current.resumeArmedAt == nil
+        else { return existing }
+        current.resumeArmedAt = deliveredAt
+        current.appHeartbeatAt = deliveredAt
+        return current
+      }
     }
   }
 
@@ -261,13 +338,19 @@ final class CapturePauseController: ObservableObject {
       body: "Capture has been paused for \(elapsed). Resume it if your privacy-sensitive work is finished.",
       now: now
     ) { [weak self] deliveredAt in
-      guard let self, var current = self.store.load(now: deliveredAt),
-        current.id == pause.id,
-        current.mode == .indefinite
-      else { return }
-      current.lastReminderAt = deliveredAt
-      current.appHeartbeatAt = deliveredAt
-      self.persist(current, refreshBackend: false)
+      guard let self else { return }
+      _ = self.mutatePause(
+        at: deliveredAt,
+        expectedPauseID: pause.id,
+        refreshBackend: false
+      ) { existing in
+        guard var current = existing, current.mode == .indefinite else {
+          return existing
+        }
+        current.lastReminderAt = deliveredAt
+        current.appHeartbeatAt = deliveredAt
+        return current
+      }
     }
   }
 

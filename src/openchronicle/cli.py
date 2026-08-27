@@ -21,6 +21,7 @@ from rich.table import Table
 from . import __version__, paths
 from . import config as config_mod
 from . import logger as logger_mod
+from .capture_pause import clear_capture_pause, write_capture_pause
 from .store import entries as entries_mod
 from .store import fts, index_md
 
@@ -389,15 +390,14 @@ def stop() -> None:
 def pause() -> None:
     """Pause capture (daemon stays up but skips captures)."""
     paths.ensure_dirs()
-    paths.paused_flag().write_text(datetime.now().isoformat())
+    write_capture_pause(datetime.now().isoformat().encode("utf-8"))
     console.print("[yellow]Capture paused.[/yellow]")
 
 
 @app.command()
 def resume() -> None:
     """Resume capture."""
-    with contextlib.suppress(FileNotFoundError):
-        paths.paused_flag().unlink()
+    clear_capture_pause()
     console.print("[green]Capture resumed.[/green]")
 
 

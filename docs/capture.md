@@ -10,8 +10,9 @@ Capture is the only layer that touches the outside world. It produces one JSON f
 
 Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 
-1. `window_meta.active_window()` — app name, title, bundle_id via `NSRunningApplication`.
-2. Force a protection-monitor decision when the background guard is enabled.
+1. Force a protection-monitor decision when the background guard is enabled;
+   a paused or fail-closed decision returns before foreground metadata work.
+2. `window_meta.active_window()` — app name, title, bundle_id via `NSRunningApplication`.
 3. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers, unless the decision blocks AX.
 4. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from an allowed AX tree (see [S1 fields](#s1-fields) below).
 5. Validate again against every refresh request observed during AX work; a newly protected or paused decision discards the complete in-memory capture.
@@ -53,20 +54,31 @@ The daemon runs the normal protection monitor for `skip-monitor`,
 `mask-window`, and `exclude-window`. It starts an `off`-mode monitor only when
 an existing Protection Diagnostics guard must remain fail-closed.
 
-With the three monitored modes, the bundled `mac-window-list`
-helper inventories only alpha-positive, positive-size windows returned by
-CoreGraphics as on-screen at normal layer 0. It records their owner, bundle ID,
-CoreGraphics title, and CoreGraphics bounds immediately before `mss` captures
-pixels. When one of those windows has a blank CoreGraphics title, the helper
-first collects top-level AX element and window-ID metadata without reading the
-AX title, then requires a globally unique, exact same-PID `CGWindowID` match
-before reading that accepted element's title. AX position, size, and geometry
-never authorize or locate a fallback. A blank title that cannot be resolved is
-still emitted with `title_available = false`; it does not invalidate unrelated
-windows. If any title deny rule is enabled, that unknown-title window is treated
-as sensitive only when its exact, case-insensitive Bundle ID appears in
+With the three monitored modes, the bundled `mac-window-list` helper inventories
+every alpha-positive, positive-size window returned by CoreGraphics as on-screen,
+including floating and auxiliary non-layer-0 windows whose pixels can appear in
+a display capture. It records each row's owner, bundle ID, CoreGraphics title,
+layer, and CoreGraphics bounds immediately before `mss` captures pixels. Only
+owners with an on-screen normal layer-0 window participate in top-level AX
+identity collection. When a layer-0 window has a blank CoreGraphics title, the
+helper requires a globally unique, exact same-PID `CGWindowID` match before
+reading that accepted AX element's title. Non-layer-0 rows never authorize AX
+title fallback or active-window identity. AX position, size, and geometry never
+authorize or locate a fallback. A blank title that cannot be resolved is still
+emitted with `title_available = false`; it does not invalidate unrelated windows.
+If any title deny rule is enabled, that unknown-title window is treated as
+sensitive only when its exact, case-insensitive Bundle ID appears in
 `protect_unknown_title_bundle_ids`, and only on the displays its CoreGraphics
 bounds intersect. The default scope contains Edge, Chrome, and Firefox.
+
+The helper output carries `schema_version = 1`. Missing or unsupported versions
+are rejected as `helper_parse` before any window/display rows are trusted. When
+bundled Swift sources are newer than an installed helper, a failed runtime
+recompile makes that stale binary ineligible rather than continuing with its old
+protocol. If the private `_AXUIElementGetWindow` identity symbol is unavailable,
+the helper still emits CoreGraphics windows and displays: reliable CoreGraphics
+titles remain usable, blank layer-0 titles remain unavailable, and frontmost
+layer-0 rows become active candidates without AX title fallback.
 
 This policy is title-based rather than a browser private-mode API:
 
@@ -77,21 +89,20 @@ This policy is title-based rather than a browser private-mode API:
 | unavailable | no | no | not protected |
 | unavailable | either | yes | protected by direct rule |
 
-The focused AX window is marked active only through the same exact identity. If
-that identity is unavailable, every on-screen layer-0 window owned by the
-frontmost PID is emitted as an active candidate. AX is then suppressed only when
-a candidate intersects a protected display. This avoids a global outage when
-the uncertain foreground candidates are confined to a different display.
-Unlisted unknown-title windows are allowed by explicit policy, while genuine
-helper exit, JSON parse, or display-inventory failures still produce a
+The focused AX window is marked active only through the same exact layer-0
+identity. If that identity is unavailable, every on-screen layer-0 window owned
+by the frontmost PID is emitted as an active candidate. AX is then suppressed
+only when a candidate intersects a protected display. This avoids a global
+outage when the uncertain foreground candidates are confined to a different
+display. Unlisted unknown-title windows are allowed by explicit policy, while
+genuine helper exit, JSON parse, or display-inventory failures still produce a
 fixed-code `failed` decision.
 
-Menus, popovers, and non-layer-0 floating panels are not independently treated
-as protected full-display windows by their titles. Once a normal protected
-window resolves to an owning application, however, filtered capture excludes
-all of that application's auxiliary windows at the source. Protection can also
-apply when an app or bundle denylist independently matches an inventoried
-normal window or the foreground window. The helper never traverses background AX trees
+Menus, popovers, and non-layer-0 floating panels participate in the same direct
+app, bundle, reliable-title, and scoped unknown-title rule evaluation using their
+CoreGraphics metadata. When any protected row resolves to a unique owning
+application, filtered capture excludes all of that application's normal and
+auxiliary windows at the source. The helper never traverses background AX trees
 or reads their controls and contents. In `separate` mode, only monitors
 intersecting a denied inventoried window are skipped. In `all` mode, any denied
 inventoried window skips the full virtual-desktop screenshot when the

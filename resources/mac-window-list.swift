@@ -24,6 +24,7 @@ struct WindowRecord: Codable {
     let top: Double
     let width: Double
     let height: Double
+    let layer: Int
     let is_active: Bool
     let title_available: Bool
     let is_active_candidate: Bool
@@ -31,6 +32,7 @@ struct WindowRecord: Codable {
 }
 
 struct Output: Codable {
+    let schema_version: Int
     let windows: [WindowRecord]
     let displays: [DisplayRecord]
 }
@@ -136,10 +138,7 @@ enum MacWindowList {
             exit(1)
         }
 
-        guard let getWindowID = resolveAXUIElementGetWindow() else {
-            fputs("Could not resolve window identity API\n", stderr)
-            exit(3)
-        }
+        let getWindowID = resolveAXUIElementGetWindow()
 
         var cgSources: [CGWindowSource] = []
         var visiblePIDs = Set<pid_t>()
@@ -150,7 +149,6 @@ enum MacWindowList {
 
             guard
                 let layer = info[kCGWindowLayer as String] as? NSNumber,
-                layer.intValue == 0,
                 let bounds = info[kCGWindowBounds as String] as? [String: Any],
                 let left = (bounds["X"] as? NSNumber)?.doubleValue,
                 let top = (bounds["Y"] as? NSNumber)?.doubleValue,
@@ -182,19 +180,21 @@ enum MacWindowList {
                 appName: appName,
                 bundleID: bundleID
             ))
-            if pid > 0 {
+            if pid > 0 && layer.intValue == 0 {
                 visiblePIDs.insert(pid)
             }
         }
 
         // Phase one records AX elements and identities without reading titles.
         var axSources: [AXWindowSource] = []
-        for pid in visiblePIDs.sorted() {
-            axSources.append(contentsOf: axWindowSources(
-                pid: pid,
-                frontmostPID: frontmostPID,
-                getWindowID: getWindowID
-            ))
+        if let getWindowID {
+            for pid in visiblePIDs.sorted() {
+                axSources.append(contentsOf: axWindowSources(
+                    pid: pid,
+                    frontmostPID: frontmostPID,
+                    getWindowID: getWindowID
+                ))
+            }
         }
 
         let cgWindows = cgSources.map(\.metadata)
@@ -217,6 +217,7 @@ enum MacWindowList {
                 top: source.metadata.bounds.top,
                 width: source.metadata.bounds.width,
                 height: source.metadata.bounds.height,
+                layer: source.metadata.layer ?? 0,
                 is_active: resolved.isActive,
                 title_available: resolved.titleAvailable,
                 is_active_candidate: resolved.isActiveCandidate,
@@ -249,7 +250,11 @@ enum MacWindowList {
         do {
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(Output(windows: windows, displays: displays))
+            let data = try encoder.encode(Output(
+                schema_version: 1,
+                windows: windows,
+                displays: displays
+            ))
             FileHandle.standardOutput.write(data)
             FileHandle.standardOutput.write(Data("\n".utf8))
         } catch {

@@ -1,4 +1,13 @@
+import Darwin
 import Foundation
+
+@_silgen_name("flock")
+private func systemFlock(_ descriptor: Int32, _ operation: Int32) -> Int32
+
+@discardableResult
+func capturePauseFlock(_ descriptor: Int32, _ operation: Int32) -> Int32 {
+  systemFlock(descriptor, operation)
+}
 
 enum CapturePauseMode: String, Codable {
   case timed
@@ -88,7 +97,24 @@ struct CapturePauseStateStore {
   let fileURL: URL
   var fileManager: FileManager = .default
 
+  var lockFileURL: URL {
+    URL(fileURLWithPath: fileURL.path + ".lock")
+  }
+
   func load(now: Date = Date()) -> CapturePauseState? {
+    do {
+      return try withExclusiveLock {
+        loadUnlocked(now: now)
+      }
+    } catch {
+      guard fileManager.fileExists(atPath: fileURL.path) else { return nil }
+      let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path)
+      let modificationDate = attributes?[.modificationDate] as? Date
+      return Self.legacyState(startedAt: modificationDate ?? now)
+    }
+  }
+
+  private func loadUnlocked(now: Date) -> CapturePauseState? {
     guard fileManager.fileExists(atPath: fileURL.path) else { return nil }
     let attributes = try? fileManager.attributesOfItem(atPath: fileURL.path)
     let modificationDate = attributes?[.modificationDate] as? Date
@@ -124,6 +150,35 @@ struct CapturePauseStateStore {
   }
 
   func save(_ state: CapturePauseState) throws {
+    try withExclusiveLock {
+      try saveUnlocked(state)
+    }
+  }
+
+  func clear() throws {
+    try withExclusiveLock {
+      try clearUnlocked()
+    }
+  }
+
+  func update(
+    now: Date = Date(),
+    _ transform: (CapturePauseState?) throws -> CapturePauseState?
+  ) throws -> CapturePauseState? {
+    try withExclusiveLock {
+      let current = loadUnlocked(now: now)
+      let updated = try transform(current)
+      guard updated != current else { return current }
+      if let updated {
+        try saveUnlocked(updated)
+      } else {
+        try clearUnlocked()
+      }
+      return updated
+    }
+  }
+
+  private func saveUnlocked(_ state: CapturePauseState) throws {
     try fileManager.createDirectory(
       at: fileURL.deletingLastPathComponent(),
       withIntermediateDirectories: true
@@ -135,9 +190,35 @@ struct CapturePauseStateStore {
     try data.write(to: fileURL, options: .atomic)
   }
 
-  func clear() throws {
+  private func clearUnlocked() throws {
     guard fileManager.fileExists(atPath: fileURL.path) else { return }
     try fileManager.removeItem(at: fileURL)
+  }
+
+  private func withExclusiveLock<T>(_ body: () throws -> T) throws -> T {
+    try fileManager.createDirectory(
+      at: fileURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    let descriptor = Darwin.open(
+      lockFileURL.path,
+      O_RDWR | O_CREAT,
+      S_IRUSR | S_IWUSR
+    )
+    guard descriptor >= 0 else { throw Self.posixError() }
+    defer { Darwin.close(descriptor) }
+    guard Darwin.fchmod(descriptor, S_IRUSR | S_IWUSR) == 0 else {
+      throw Self.posixError()
+    }
+    guard capturePauseFlock(descriptor, LOCK_EX) == 0 else {
+      throw Self.posixError()
+    }
+    defer { capturePauseFlock(descriptor, LOCK_UN) }
+    return try body()
+  }
+
+  private static func posixError() -> NSError {
+    NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
   }
 
   private static func parseISO8601(_ value: String) -> Date? {

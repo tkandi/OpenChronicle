@@ -326,7 +326,7 @@ final class PrivacyDiagnosticsController: ObservableObject {
         protectedGeneration: protectedGeneration,
         released: released
       )
-    case .error(let code):
+    case .error(let code, _):
       handleServerError(code)
     }
   }
@@ -406,6 +406,11 @@ final class PrivacyDiagnosticsController: ObservableObject {
   private func handleServerError(_ code: String) {
     lastErrorCode = code
     hideExactSynchronously(clearPublishedModels: false)
+    if code == "unavailable" {
+      // Only subscribe emits this code. A lease operation may already be in
+      // flight behind that request and must retain ownership of its ack.
+      return
+    }
     let operation = pendingLeaseOperation
     pendingLeaseOperation = nil
 

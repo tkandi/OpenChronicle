@@ -102,8 +102,19 @@ def _peer_credentials(client: socket.socket) -> tuple[int | None, int | None]:
     return None, None
 
 
-def _error(code: str) -> dict[str, object]:
-    return {"schema_version": _SCHEMA_VERSION, "type": "error", "code": code}
+def _error(code: str, *, generation: int | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": _SCHEMA_VERSION,
+        "type": "error",
+        "code": code,
+    }
+    if generation is not None:
+        payload["generation"] = generation
+    return payload
+
+
+def _encode_payload(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
 
 
 def _valid_positive_int(value: object) -> bool:
@@ -601,7 +612,10 @@ class PrivacyDiagnosticsServer:
         client.protected_generation = None
         protected_generation = self._refresh_and_wait(display_id, baseline)
         if protected_generation is None:
-            self._queue_payload(selector, clients, client, _error("protection_timeout"))
+            rollback_error = self._rollback_unacknowledged_move(
+                transition.transition_id
+            )
+            self._queue_payload(selector, clients, client, _error(rollback_error))
             return
         try:
             lease = self._lease_manager.commit_move(transition.transition_id)
@@ -635,6 +649,20 @@ class PrivacyDiagnosticsServer:
             decision = publication.decision if publication is not None else None
             if self._exact_is_authorized(client, decision):
                 self._queue_snapshot(selector, clients, client, publication)
+
+    def _rollback_unacknowledged_move(self, transition_id: str) -> str:
+        try:
+            self._lease_manager.rollback_move(transition_id)
+        except (OSError, RuntimeError, ValueError):
+            error_code = "guard_unavailable"
+        else:
+            error_code = "protection_timeout"
+        try:
+            self._request_refresh()
+        except Exception:
+            if error_code == "protection_timeout":
+                return "refresh_failed"
+        return error_code
 
     def _handle_release(
         self,
@@ -733,6 +761,23 @@ class PrivacyDiagnosticsServer:
             detail=detail,
             created_at=publication.created_at,
         )
+        if len(_encode_payload(payload)) > _MAX_LINE_BYTES + 1 and detail == "exact":
+            payload = self._snapshot_payload(
+                decision,
+                detail="category",
+                created_at=publication.created_at,
+            )
+        if len(_encode_payload(payload)) > _MAX_LINE_BYTES + 1:
+            self._queue_payload(
+                selector,
+                clients,
+                client,
+                _error(
+                    "response_too_large",
+                    generation=decision.snapshot.generation,
+                ),
+            )
+            return
         if self._queue_payload(selector, clients, client, payload):
             client.last_queued_generation = decision.snapshot.generation
 
@@ -836,10 +881,7 @@ class PrivacyDiagnosticsServer:
         else:
             screenshot_blocked = False
 
-        if snapshot.state is ProtectionState.PAUSED or (
-            snapshot.state is ProtectionState.INACTIVE
-            and not decision.capture_confirmation_satisfied
-        ):
+        if snapshot.state is ProtectionState.PAUSED:
             ax_blocked = True
         elif snapshot.state is ProtectionState.FAILED:
             ax_blocked = decision.failure_capture_blocked
@@ -873,12 +915,9 @@ class PrivacyDiagnosticsServer:
         client: _ClientState,
         payload: dict[str, object],
     ) -> bool:
-        encoded = json.dumps(payload, separators=(",", ":")).encode("utf-8") + b"\n"
+        encoded = _encode_payload(payload)
         if len(encoded) > _MAX_LINE_BYTES + 1:
-            encoded = json.dumps(
-                _error("response_too_large"),
-                separators=(",", ":"),
-            ).encode() + b"\n"
+            encoded = _encode_payload(_error("response_too_large"))
         if (
             len(client.outgoing) >= _MAX_SEND_MESSAGES
             or client.outgoing_bytes + len(encoded) > _MAX_SEND_BYTES

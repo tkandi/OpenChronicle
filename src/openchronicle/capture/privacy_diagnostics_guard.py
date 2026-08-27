@@ -180,6 +180,22 @@ class DiagnosticsLeaseManager:
             self._transition = None
             return committed_lease
 
+    def rollback_move(self, transition_id: str) -> DiagnosticsRevealLease:
+        """Restore the old display set after destination protection times out."""
+        with self._lock:
+            if self._transition is None or self._transition.transition_id != transition_id:
+                raise ValueError("unknown diagnostics lease transition")
+            transition = self._transition
+            rolled_back_lease = DiagnosticsRevealLease(
+                transition.lease_id,
+                transition.pid,
+                transition.old_display_ids,
+            )
+            self._write_guard(rolled_back_lease)
+            self._lease = rolled_back_lease
+            self._transition = None
+            return rolled_back_lease
+
     def release(self, lease_id: str, *, pid: int) -> DiagnosticsGuardSnapshot:
         """Clear a lease only when both its nonce and owning process match."""
         with self._lock:
@@ -269,15 +285,21 @@ class DiagnosticsLeaseManager:
             suffix=".tmp",
         )
         temporary = Path(temporary_name)
+        owned_fd: int | None = fd
         try:
             os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle = os.fdopen(fd, "w", encoding="utf-8")
+            owned_fd = None
+            with handle:
                 json.dump(payload, handle, separators=(",", ":"))
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self._guard_path)
             self._fsync_parent()
         except BaseException:
+            if owned_fd is not None:
+                with contextlib.suppress(OSError):
+                    os.close(owned_fd)
             with contextlib.suppress(OSError):
                 temporary.unlink()
             raise

@@ -440,7 +440,7 @@ def test_category_mapping_failure_presentation_does_not_expose_exact_values() ->
         deny_bundle_ids=[bundle_marker],
         deny_window_title_patterns=[title_rule_marker, alternate_rule_marker],
     )
-    times = iter([10.0, 10.0, 11.0, 11.0])
+    current_time = 10.0
     monitor = PrivacyProtectionMonitor(
         cfg,
         config_path=Path("/nonexistent/config.toml"),
@@ -450,9 +450,10 @@ def test_category_mapping_failure_presentation_does_not_expose_exact_values() ->
             ProtectionFailureReason.ACTIVE_WINDOW_UNMAPPED,
         ),
         pause_reader=lambda: False,
-        monotonic=lambda: next(times),
+        monotonic=lambda: current_time,
     )
     transient_decision = monitor.decision_for_capture(force=True)
+    current_time = 11.0
     sustained_decision = monitor.decision_for_capture(force=True)
 
     transient = PrivacyDiagnosticsServer._snapshot_payload(
@@ -815,6 +816,55 @@ def test_exact_snapshot_follows_lease_only_after_confirmed_generation(tmp_path: 
         _stop_test_server(server)
 
 
+def test_oversized_exact_snapshot_falls_back_to_same_generation_category(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "x" * 160
+    callbacks = FakeProtectionCallbacks()
+    monkeypatch.setattr(diagnostics_mod, "_MAX_LINE_BYTES", 850)
+    server = _start_test_server(
+        tmp_path,
+        callbacks=callbacks,
+        decision=_private_decision(marker, generation=7),
+    )
+    callbacks.wait_observer = lambda display_id: server.publish(
+        _private_decision(
+            marker,
+            generation=callbacks.confirmed_generation,
+            diagnostics_display_id=display_id,
+        )
+    )
+    try:
+        with _connect(server.socket_path) as client, client.makefile("rb") as reader:
+            _send_message(client, {"schema_version": 1, "action": "subscribe"})
+            category = _read_stream_message(reader)
+            assert marker not in json.dumps(category)
+
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "acquire_exact",
+                    "pid": os.getpid(),
+                    "display_id": 2,
+                },
+            )
+            lease = _read_stream_message(reader)
+            fallback = _read_stream_message(reader)
+
+        assert lease["type"] == "lease"
+        assert fallback["type"] == "snapshot"
+        assert fallback["generation"] == callbacks.confirmed_generation
+        assert fallback["displays"][0]["reasons"] == [
+            {"code": "diagnostics_reveal", "display_id": 2},
+            {"code": "window_title_rule", "display_id": 2},
+        ]
+        assert marker not in json.dumps(fallback)
+    finally:
+        _stop_test_server(server)
+
+
 def test_acquire_timeout_rolls_back_guard_and_allows_conflict_free_retry(
     tmp_path: Path,
 ) -> None:
@@ -914,7 +964,7 @@ def test_acquire_timeout_rollback_failure_stays_closed_until_dead_pid_recovery(
     assert not guard_path.exists()
 
 
-def test_move_timeout_keeps_the_known_lease_releasable(tmp_path: Path) -> None:
+def test_move_timeout_rolls_back_and_allows_same_lease_retry(tmp_path: Path) -> None:
     callbacks = FakeProtectionCallbacks()
     server = _start_test_server(tmp_path, callbacks=callbacks)
     guard_path = server.socket_path.parent / "privacy-reveal.guard"
@@ -946,7 +996,23 @@ def test_move_timeout_keeps_the_known_lease_releasable(tmp_path: Path) -> None:
                 "type": "error",
                 "code": "protection_timeout",
             }
-            assert json.loads(guard_path.read_text())["display_ids"] == [1, 2]
+            assert json.loads(guard_path.read_text())["display_ids"] == [1]
+
+            callbacks.confirmed = True
+            _send_message(
+                client,
+                {
+                    "schema_version": 1,
+                    "action": "move_exact",
+                    "pid": os.getpid(),
+                    "lease_id": acquired["lease_id"],
+                    "display_id": 2,
+                },
+            )
+            moved = _read_message(client)
+            assert moved["type"] == "lease"
+            assert moved["lease_id"] == acquired["lease_id"]
+            assert moved["display_id"] == 2
 
             _send_message(
                 client,

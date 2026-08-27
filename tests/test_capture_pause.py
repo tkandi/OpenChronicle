@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 import logging
+import stat
+import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from typer.testing import CliRunner
+
+from openchronicle import capture_pause as capture_pause_mod
+from openchronicle import cli as cli_mod
 from openchronicle.capture.protection_reason import ProtectionReasonCode
 from openchronicle.capture_pause import (
     CapturePauseKind,
@@ -183,3 +189,84 @@ def test_capture_is_paused_fails_closed_with_sanitized_log(
 
     assert messages == ["capture pause state unavailable; remaining paused: OSError"]
     assert marker not in "\n".join(messages)
+
+
+def test_pause_lock_path_is_stable_owner_only_sibling(tmp_path: Path) -> None:
+    pause_file = tmp_path / ".paused"
+
+    capture_pause_mod.write_capture_pause(b"paused", pause_path=pause_file)
+
+    lock_path = capture_pause_mod.capture_pause_lock_path(pause_file)
+    assert lock_path == tmp_path / ".paused.lock"
+    assert stat.S_IMODE(lock_path.stat().st_mode) == 0o600
+
+
+def test_extended_pause_written_under_lock_survives_daemon_auto_resume(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    now = datetime(2026, 7, 19, 8, tzinfo=UTC)
+    pause_file = tmp_path / ".paused"
+    expired_raw = _state(
+        resume_at=now - timedelta(seconds=1),
+        armed_at=now - timedelta(minutes=2),
+        heartbeat_at=now,
+    )
+    extended_raw = _state(
+        resume_at=now + timedelta(minutes=30),
+        armed_at=None,
+        heartbeat_at=now,
+    )
+    pause_file.write_bytes(expired_raw)
+
+    writer_should_start = threading.Event()
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    original_unlink = Path.unlink
+
+    def extend_pause() -> None:
+        assert writer_should_start.wait(timeout=1)
+        writer_started.set()
+        capture_pause_mod.write_capture_pause(extended_raw, pause_path=pause_file)
+        writer_finished.set()
+
+    def controlled_unlink(path: Path, *args, **kwargs) -> None:
+        if path == pause_file:
+            writer_should_start.set()
+            assert writer_started.wait(timeout=1)
+            assert not writer_finished.wait(timeout=0.2)
+        original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", controlled_unlink)
+    writer = threading.Thread(target=extend_pause)
+    writer.start()
+    try:
+        decision = capture_pause_decision_strict(pause_path=pause_file, now=now)
+    finally:
+        writer.join(timeout=1)
+
+    assert decision.paused is False
+    assert not writer.is_alive()
+    assert writer_finished.is_set()
+    assert pause_file.read_bytes() == extended_raw
+
+
+def test_cli_pause_and_resume_use_the_shared_pause_boundary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pause_file = tmp_path / ".paused"
+    monkeypatch.setattr(cli_mod.paths, "paused_flag", lambda: pause_file)
+    monkeypatch.setattr(cli_mod.paths, "ensure_dirs", lambda: None)
+    runner = CliRunner()
+
+    paused = runner.invoke(cli_mod.app, ["pause"])
+
+    assert paused.exit_code == 0
+    assert pause_file.exists()
+    assert capture_pause_mod.capture_pause_lock_path(pause_file).exists()
+
+    resumed = runner.invoke(cli_mod.app, ["resume"])
+
+    assert resumed.exit_code == 0
+    assert not pause_file.exists()

@@ -100,6 +100,10 @@ private final class FakePrivacyDiagnosticsTransport: PrivacyDiagnosticsTransport
     )
   }
 
+  func deliverError(_ code: String) {
+    onMessage?(.error(code: code))
+  }
+
   func deliverSnapshot(
     generation: Int,
     exact: Bool,
@@ -173,6 +177,25 @@ final class PrivacyDiagnosticsControllerTests: XCTestCase {
     XCTAssertEqual(
       controller.displayDiagnostics.first?.reasons.last?.windowTitle,
       "Private window title"
+    )
+  }
+
+  func testSubscribeUnavailableDoesNotConsumePendingAcquire() {
+    let transport = FakePrivacyDiagnosticsTransport()
+    let controller = makeController(transport: transport, detail: .exact)
+
+    controller.setDisplay(2)
+    controller.setPageVisible(true)
+    XCTAssertEqual(transport.sent.map(\.action), [.subscribe, .acquireExact])
+
+    transport.deliverError("unavailable")
+    transport.deliverLease(id: "lease-1", displayID: 2, protectedGeneration: 42)
+    transport.deliverSnapshot(generation: 42, exact: true)
+
+    XCTAssertTrue(controller.showsExactValues)
+    XCTAssertEqual(
+      transport.sent.filter { $0.action == .acquireExact }.count,
+      1
     )
   }
 
@@ -993,7 +1016,7 @@ final class ProtectionDiagnosticsWireTests: XCTestCase {
     let error = try JSONDecoder().decode(
       ProtectionDiagnosticsWireMessage.self,
       from: Data(
-        #"{"schema_version":1,"type":"error","code":"protection_timeout"}"#.utf8
+        #"{"schema_version":1,"type":"error","code":"protection_timeout","generation":42}"#.utf8
       )
     )
 
@@ -1015,7 +1038,7 @@ final class ProtectionDiagnosticsWireTests: XCTestCase {
         released: true
       )
     )
-    XCTAssertEqual(error, .error(code: "protection_timeout"))
+    XCTAssertEqual(error, .error(code: "protection_timeout", generation: 42))
   }
 
   func testUnknownReasonCodeBecomesFixedCategoryAndDropsExactFields() throws {
@@ -1110,7 +1133,7 @@ final class UnixPrivacyDiagnosticsTransportTests: XCTestCase {
     let transport = UnixPrivacyDiagnosticsTransport(socketURL: fixture.socketURL)
     transport.onMessage = { message in
       XCTAssertTrue(Thread.isMainThread)
-      guard case .error(let code) = message else {
+      guard case .error(let code, _) = message else {
         return XCTFail("Expected error message")
       }
       XCTAssertEqual(code, "unavailable")

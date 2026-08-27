@@ -1461,6 +1461,97 @@ def test_guard_only_monitor_ignores_normal_rules_and_becomes_inactive_after_rele
     assert released.snapshot.display_reasons.reasons == ()
 
 
+def test_empty_guard_only_monitor_honors_pause_state(inventory, fake_overlay) -> None:
+    pause_reads = 0
+
+    def read_pause() -> bool:
+        nonlocal pause_reads
+        pause_reads += 1
+        return True
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="pill",
+            screenshot_privacy_mode="off",
+        ),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=read_pause,
+        diagnostics_guard_reader=lambda: DiagnosticsGuardSnapshot(frozenset(), False),
+        diagnostics_guard_only=True,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert pause_reads == 1
+    assert decision.snapshot.state is ProtectionState.PAUSED
+    assert decision.snapshot.protected_display_ids == frozenset({1, 2})
+
+
+def test_empty_guard_only_monitor_fails_closed_when_pause_read_fails(
+    inventory,
+    fake_overlay,
+) -> None:
+    marker = "private-empty-guard-pause-marker"
+
+    def fail_pause_read() -> bool:
+        raise OSError(marker)
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="pill",
+            screenshot_privacy_mode="off",
+            screenshot_privacy_fail_closed=False,
+        ),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: pytest.fail("pause failure must not read inventory"),
+        pause_reader=fail_pause_read,
+        diagnostics_guard_reader=lambda: DiagnosticsGuardSnapshot(frozenset(), False),
+        diagnostics_guard_only=True,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert decision.snapshot.state is ProtectionState.FAILED
+    assert decision.snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+    assert decision.failure_capture_blocked is True
+    assert marker not in " ".join(
+        reason.code.value for reason in decision.snapshot.display_reasons.reasons
+    )
+
+
+def test_empty_safe_guard_only_monitor_skips_inventory(inventory, fake_overlay) -> None:
+    pause_reads = 0
+
+    def read_pause() -> bool:
+        nonlocal pause_reads
+        pause_reads += 1
+        return False
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(
+            screenshot_monitor="separate",
+            privacy_indicator_style="off",
+            screenshot_privacy_mode="off",
+        ),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: pytest.fail("safe guard-only path must skip inventory"),
+        pause_reader=read_pause,
+        diagnostics_guard_reader=lambda: DiagnosticsGuardSnapshot(frozenset(), False),
+        diagnostics_guard_only=True,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert pause_reads == 1
+    assert decision.snapshot.state is ProtectionState.INACTIVE
+
+
 def test_wait_rejects_stale_or_unconfirmed_display_generation(
     inventory,
     fake_overlay,
@@ -1768,6 +1859,99 @@ def test_inactive_state_clears_indicator_and_reuses_fresh_decision(fake_overlay)
     assert first.snapshot.state is ProtectionState.INACTIVE
     assert fake_overlay.clear_generations == [first.snapshot.generation]
     assert cached is first
+
+
+def test_forced_slow_refresh_returns_once_even_when_cache_window_elapsed(
+    inventory,
+    fake_overlay,
+) -> None:
+    class RepeatedRefreshDetected(BaseException):
+        pass
+
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    clock = FakeMonotonic(10.0)
+    read_count = 0
+
+    def read_inventory() -> WindowInventory:
+        nonlocal read_count
+        read_count += 1
+        if read_count > 1:
+            raise RepeatedRefreshDetected
+        clock.advance(0.3)
+        return safe_inventory
+
+    monitor = make_monitor(
+        inventory=safe_inventory,
+        overlay=fake_overlay,
+        inventory_reader=read_inventory,
+        monotonic=clock,
+    )
+
+    decision = monitor.decision_for_capture(force=True)
+
+    assert read_count == 1
+    assert decision.snapshot.state is ProtectionState.INACTIVE
+    assert decision.snapshot.fresh_until < clock()
+
+
+def test_concurrent_non_forced_callers_share_one_newer_refresh(
+    inventory,
+    fake_overlay,
+) -> None:
+    safe_inventory = WindowInventory(windows=(), displays=inventory.displays)
+    second_read_started = threading.Event()
+    release_second_read = threading.Event()
+    both_callers_entered = threading.Event()
+    entry_lock = threading.Lock()
+    entered_count = 0
+    read_count = 0
+
+    def read_inventory() -> WindowInventory:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 2:
+            second_read_started.set()
+            assert release_second_read.wait(timeout=1)
+            return inventory
+        return safe_inventory
+
+    monitor = make_monitor(
+        inventory=safe_inventory,
+        overlay=fake_overlay,
+        inventory_reader=read_inventory,
+        watchdog_seconds=10.0,
+    )
+    first = monitor.decision_for_capture(force=True)
+    monitor.request_refresh()
+    decisions: list[ProtectionDecision] = []
+    errors: list[BaseException] = []
+
+    def validate() -> None:
+        nonlocal entered_count
+        with entry_lock:
+            entered_count += 1
+            if entered_count == 2:
+                both_callers_entered.set()
+        try:
+            decisions.append(monitor.decision_for_capture(force=False))
+        except BaseException as exc:  # pragma: no cover - diagnostic capture
+            errors.append(exc)
+
+    callers = [threading.Thread(target=validate) for _ in range(2)]
+    for caller in callers:
+        caller.start()
+    assert both_callers_entered.wait(timeout=0.5)
+    assert second_read_started.wait(timeout=0.5)
+    release_second_read.set()
+    for caller in callers:
+        caller.join(timeout=1)
+
+    assert all(not caller.is_alive() for caller in callers)
+    assert errors == []
+    assert len(decisions) == 2
+    assert decisions[0] is decisions[1]
+    assert decisions[0].snapshot.generation > first.snapshot.generation
+    assert read_count == 2
 
 
 def test_non_forced_decision_covers_refresh_requested_during_refresh(

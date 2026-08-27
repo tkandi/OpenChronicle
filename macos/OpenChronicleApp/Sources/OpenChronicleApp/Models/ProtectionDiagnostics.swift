@@ -452,7 +452,7 @@ enum ProtectionDiagnosticsWireMessage: Codable, Equatable {
     protectedGeneration: Int?,
     released: Bool
   )
-  case error(code: String)
+  case error(code: String, generation: Int? = nil)
 
   enum CodingKeys: String, CodingKey {
     case schemaVersion = "schema_version"
@@ -462,6 +462,7 @@ enum ProtectionDiagnosticsWireMessage: Codable, Equatable {
     case protectedGeneration = "protected_generation"
     case released
     case code
+    case generation
   }
 
   init(from decoder: Decoder) throws {
@@ -522,7 +523,15 @@ enum ProtectionDiagnosticsWireMessage: Codable, Equatable {
           debugDescription: "invalid_error"
         )
       }
-      self = .error(code: code)
+      let generation = try container.decodeIfPresent(Int.self, forKey: .generation)
+      if let generation, generation <= 0 {
+        throw DecodingError.dataCorruptedError(
+          forKey: .generation,
+          in: container,
+          debugDescription: "invalid_generation"
+        )
+      }
+      self = .error(code: code, generation: generation)
     default:
       throw DecodingError.dataCorruptedError(
         forKey: .type,
@@ -548,9 +557,10 @@ enum ProtectionDiagnosticsWireMessage: Codable, Equatable {
         try container.encodeIfPresent(displayID, forKey: .displayID)
         try container.encodeIfPresent(protectedGeneration, forKey: .protectedGeneration)
       }
-    case .error(let code):
+    case .error(let code, let generation):
       try container.encode("error", forKey: .type)
       try container.encode(code, forKey: .code)
+      try container.encodeIfPresent(generation, forKey: .generation)
     }
   }
 }

@@ -38,10 +38,6 @@ def _decision_is_terminal(_cfg: CaptureConfig, decision: ProtectionDecision) -> 
             snapshot.state is ProtectionState.FAILED
             and decision.failure_capture_blocked
         )
-        or (
-            snapshot.state is ProtectionState.INACTIVE
-            and not decision.capture_confirmation_satisfied
-        )
     )
 
 
@@ -259,9 +255,15 @@ def _build_capture(
     """Build an enriched capture dict in memory. Returns None if capturing is paused."""
     paths.ensure_dirs()
 
-    if protection_monitor is None and capture_is_paused():
-        logger.info("capture skipped (paused)")
-        return None
+    decision: ProtectionDecision | None = None
+    if protection_monitor is None:
+        if capture_is_paused():
+            logger.info("capture skipped (paused)")
+            return None
+    else:
+        decision = protection_monitor.decision_for_capture(force=True)
+        if _decision_is_terminal(cfg, decision):
+            return None
 
     ts = _now_iso()
     out: dict[str, Any] = {
@@ -276,12 +278,6 @@ def _build_capture(
         "title": meta.title,
         "bundle_id": meta.bundle_id,
     }
-
-    decision: ProtectionDecision | None = None
-    if protection_monitor is not None:
-        decision = protection_monitor.decision_for_capture(force=True)
-        if _decision_is_terminal(cfg, decision):
-            return None
 
     reason = privacy.capture_denylist_reason(cfg, out)
     if reason is not None:

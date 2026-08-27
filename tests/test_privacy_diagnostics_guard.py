@@ -69,6 +69,20 @@ def test_move_protects_old_and_new_until_commit(tmp_path: Path) -> None:
     assert manager.snapshot().display_ids == frozenset({2})
 
 
+def test_move_rollback_restores_old_display_and_allows_retry(tmp_path: Path) -> None:
+    manager = make_manager(tmp_path)
+    lease = manager.acquire(pid=123, display_id=1)
+    transition = manager.begin_move(lease.lease_id, pid=123, new_display_id=2)
+
+    rolled_back = manager.rollback_move(transition.transition_id)
+
+    assert rolled_back.display_ids == frozenset({1})
+    assert manager.snapshot().display_ids == frozenset({1})
+    assert json.loads((tmp_path / "privacy-reveal.guard").read_text())["display_ids"] == [1]
+    retry = manager.begin_move(lease.lease_id, pid=123, new_display_id=2)
+    assert retry.old_display_ids == frozenset({1})
+
+
 def test_restarted_manager_rejects_a_second_move_from_an_uncommitted_guard(tmp_path: Path) -> None:
     """A restart must not turn an interrupted two-display handoff into three displays."""
     manager = make_manager(tmp_path)
@@ -245,3 +259,32 @@ def test_guard_uses_a_same_directory_atomic_replace(tmp_path: Path, monkeypatch:
     manager.acquire(pid=123, display_id=2)
 
     assert replacements
+
+
+def test_guard_closes_raw_fd_when_fchmod_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = make_manager(tmp_path)
+    real_mkstemp = guard_mod.tempfile.mkstemp
+    descriptors: list[int] = []
+
+    def recording_mkstemp(*args, **kwargs) -> tuple[int, str]:
+        descriptor, name = real_mkstemp(*args, **kwargs)
+        descriptors.append(descriptor)
+        return descriptor, name
+
+    monkeypatch.setattr(guard_mod.tempfile, "mkstemp", recording_mkstemp)
+    monkeypatch.setattr(
+        guard_mod.os,
+        "fchmod",
+        lambda _descriptor, _mode: (_ for _ in ()).throw(OSError("fixed-fchmod-failure")),
+    )
+
+    with pytest.raises(OSError, match="fixed-fchmod-failure"):
+        manager.acquire(pid=123, display_id=2)
+
+    assert len(descriptors) == 1
+    with pytest.raises(OSError):
+        os.fstat(descriptors[0])
+    assert not (tmp_path / "privacy-reveal.guard").exists()

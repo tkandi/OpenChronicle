@@ -8,6 +8,7 @@ import os
 import platform
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -20,6 +21,7 @@ from .protection_reason import ProtectionReasonCode
 logger = get("openchronicle.capture")
 _WARNED_BAD_PATTERNS: set[str] = set()
 _WINDOW_LIST_TIMEOUT = 5
+_WINDOW_LIST_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,7 @@ class VisibleWindow:
     is_active_candidate: bool = False
     alternate_title: str = ""
     window_id: int | None = None
+    layer: int = field(default=0, kw_only=True)
     fallback_display_ids: frozenset[int] = field(
         default_factory=frozenset,
         kw_only=True,
@@ -338,6 +341,8 @@ def read_window_inventory_result() -> InventoryReadResult:
         return InventoryReadResult(None, helper_result.failure_reason)
 
     raw = helper_result.raw
+    if type(raw.get("schema_version")) is not int or raw["schema_version"] != _WINDOW_LIST_SCHEMA_VERSION:
+        return InventoryReadResult(None, ProtectionFailureReason.HELPER_PARSE)
     try:
         windows = tuple(_parse_visible_window(row) for row in raw["windows"])
     except (KeyError, TypeError, ValueError):
@@ -383,6 +388,7 @@ def _parse_visible_window(row: Any) -> VisibleWindow:
         is_active_candidate=_optional_bool(row, "is_active_candidate", False),
         alternate_title=str(row.get("alternate_title") or ""),
         window_id=_optional_window_id(row),
+        layer=_optional_window_layer(row),
     )
 
 
@@ -399,6 +405,17 @@ def _optional_window_id(row: dict[str, Any]) -> int | None:
         return None
     if isinstance(value, bool) or not isinstance(value, int) or not 0 < value <= 0xFFFFFFFF:
         raise ValueError("window_id is not a positive CoreGraphics window ID")
+    return value
+
+
+def _optional_window_layer(row: dict[str, Any]) -> int:
+    value = row.get("layer", 0)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not -(2**31) <= value < 2**31
+    ):
+        raise TypeError("window has invalid layer")
     return value
 
 
@@ -427,16 +444,17 @@ def _parse_display(row: Any) -> DisplayInfo:
     )
 
 
-def _maybe_compile(swift_path: Path, binary_path: Path) -> None:
+def _maybe_compile(swift_path: Path, binary_path: Path) -> bool:
     core_path = swift_path.with_name("mac-window-list-core.swift")
     if not swift_path.is_file() or not core_path.is_file():
-        return
+        return binary_path.is_file() and os.access(binary_path, os.X_OK)
     if (
         binary_path.is_file()
+        and os.access(binary_path, os.X_OK)
         and binary_path.stat().st_mtime >= swift_path.stat().st_mtime
         and binary_path.stat().st_mtime >= core_path.stat().st_mtime
     ):
-        return
+        return True
 
     cache = Path("/tmp/clang-module-cache")
     cache.mkdir(parents=True, exist_ok=True)
@@ -444,34 +462,53 @@ def _maybe_compile(swift_path: Path, binary_path: Path) -> None:
     env["CLANG_MODULE_CACHE_PATH"] = str(cache)
     arch = "arm64" if platform.machine() in ("arm64", "aarch64") else "x86_64"
     target = f"{arch}-apple-macos12.0"
+    fd, temporary_name = tempfile.mkstemp(
+        dir=binary_path.parent,
+        prefix=f".{binary_path.name}.",
+        suffix=".tmp",
+    )
+    os.close(fd)
+    temporary = Path(temporary_name)
+    temporary.unlink(missing_ok=True)
     try:
-        result = subprocess.run(
-            [
-                "swiftc",
-                str(core_path),
-                str(swift_path),
-                "-o",
-                str(binary_path),
-                "-O",
-                "-target",
-                target,
-                "-swift-version",
-                "5",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=120,
-            env=env,
+        try:
+            result = subprocess.run(
+                [
+                    "swiftc",
+                    str(core_path),
+                    str(swift_path),
+                    "-o",
+                    str(temporary),
+                    "-O",
+                    "-target",
+                    target,
+                    "-swift-version",
+                    "5",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=env,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+            logger.warning("mac-window-list compile failed: %s (install Xcode CLT?)", exc)
+            return False
+        if result.returncode != 0 or not temporary.is_file() or not os.access(temporary, os.X_OK):
+            logger.warning(
+                "mac-window-list compile failed (%d): %s",
+                result.returncode,
+                result.stderr.strip()[:300],
+            )
+            return False
+        os.replace(temporary, binary_path)
+        return (
+            binary_path.is_file()
+            and os.access(binary_path, os.X_OK)
+            and binary_path.stat().st_mtime >= swift_path.stat().st_mtime
+            and binary_path.stat().st_mtime >= core_path.stat().st_mtime
         )
-    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-        logger.warning("mac-window-list compile failed: %s (install Xcode CLT?)", exc)
-        return
-    if result.returncode != 0:
-        logger.warning(
-            "mac-window-list compile failed (%d): %s",
-            result.returncode,
-            result.stderr.strip()[:300],
-        )
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _resolve_window_list_path() -> Path | None:
@@ -497,7 +534,6 @@ def _resolve_window_list_path() -> Path | None:
     dev_root = Path(__file__).resolve().parents[3]
     candidates.append(dev_root / "resources" / "mac-window-list")
     for binary_path in candidates:
-        _maybe_compile(binary_path.with_suffix(".swift"), binary_path)
-        if binary_path.is_file() and os.access(binary_path, os.X_OK):
+        if _maybe_compile(binary_path.with_suffix(".swift"), binary_path):
             return binary_path
     return None

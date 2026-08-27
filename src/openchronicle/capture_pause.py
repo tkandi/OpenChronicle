@@ -12,7 +12,11 @@ silently allowing capture to resume.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
+import os
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -27,6 +31,47 @@ logger = get("openchronicle.capture")
 
 NOTICE_GRACE = timedelta(seconds=60)
 HEARTBEAT_MAX_AGE = timedelta(seconds=90)
+
+
+def capture_pause_lock_path(pause_path: Path) -> Path:
+    """Return the persistent sibling lock used by every pause-file mutator."""
+    return pause_path.with_name(f"{pause_path.name}.lock")
+
+
+@contextlib.contextmanager
+def _capture_pause_lock(pause_path: Path) -> Iterator[None]:
+    pause_path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(
+        capture_pause_lock_path(pause_path),
+        os.O_RDWR | os.O_CREAT,
+        0o600,
+    )
+    try:
+        os.fchmod(fd, 0o600)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def write_capture_pause(
+    raw: bytes,
+    *,
+    pause_path: Path | None = None,
+) -> None:
+    """Write one pause marker while excluding every participating reader."""
+    pause_path = pause_path or paths.paused_flag()
+    with _capture_pause_lock(pause_path):
+        pause_path.write_bytes(raw)
+
+
+def clear_capture_pause(*, pause_path: Path | None = None) -> None:
+    """Remove the pause marker while excluding every participating reader."""
+    pause_path = pause_path or paths.paused_flag()
+    with _capture_pause_lock(pause_path):
+        pause_path.unlink(missing_ok=True)
 
 
 class CapturePauseKind(StrEnum):
@@ -104,6 +149,15 @@ def capture_pause_decision_strict(
 ) -> CapturePauseDecision:
     """Read the pause file, preserving the existing fail-closed auto-resume gate."""
     pause_path = pause_path or paths.paused_flag()
+    with _capture_pause_lock(pause_path):
+        return _capture_pause_decision_unlocked(pause_path, now=now)
+
+
+def _capture_pause_decision_unlocked(
+    pause_path: Path,
+    *,
+    now: datetime | None,
+) -> CapturePauseDecision:
     try:
         raw = pause_path.read_bytes()
     except FileNotFoundError:

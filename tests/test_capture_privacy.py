@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -66,12 +67,19 @@ def test_visible_window_parses_only_positive_integer_window_ids() -> None:
         "height": 200,
     }
 
-    assert privacy._parse_visible_window({**row, "window_id": 73}).window_id == 73
+    parsed = privacy._parse_visible_window({**row, "window_id": 73, "layer": 3})
+    assert parsed.window_id == 73
+    assert parsed.layer == 3
+    assert privacy._parse_visible_window(row).layer == 0
     assert privacy._parse_visible_window(row).window_id is None
 
     for invalid_id in (0, -1, 1.0, True, "73", 0x1_0000_0000):
         with pytest.raises((TypeError, ValueError)):
             privacy._parse_visible_window({**row, "window_id": invalid_id})
+
+    for invalid_layer in (1.0, True, "3"):
+        with pytest.raises((TypeError, ValueError)):
+            privacy._parse_visible_window({**row, "layer": invalid_layer})
 
 
 def test_visible_window_rule_matches_keep_every_matching_rule_and_value() -> None:
@@ -299,6 +307,7 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
         privacy,
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult({
+            "schema_version": 1,
             "windows": [
                 {
                     "app_name": "Cursor",
@@ -339,12 +348,38 @@ def test_read_window_inventory_parses_displays_and_active_window(monkeypatch) ->
     assert inventory.windows[0].is_active_candidate is True
 
 
-def test_read_window_inventory_defaults_uncertainty_flags_for_legacy_helper(monkeypatch) -> None:
+@pytest.mark.parametrize("schema_version", [None, True, 2, "1"])
+def test_read_window_inventory_rejects_incompatible_helper_schema(
+    monkeypatch,
+    schema_version,
+) -> None:
+    raw = {
+        "windows": [],
+        "displays": [
+            {"id": 1, "left": 0, "top": 0, "width": 100, "height": 100}
+        ],
+    }
+    if schema_version is not None:
+        raw["schema_version"] = schema_version
+    monkeypatch.setattr(
+        privacy,
+        "_read_window_list_helper",
+        lambda: privacy.WindowListReadResult(raw, None),
+    )
+
+    result = privacy.read_window_inventory_result()
+
+    assert result.inventory is None
+    assert result.failure_reason is privacy.ProtectionFailureReason.HELPER_PARSE
+
+
+def test_read_window_inventory_defaults_additive_flags_for_schema_one_helper(monkeypatch) -> None:
     monkeypatch.setattr(
         privacy,
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult(
             {
+                "schema_version": 1,
                 "windows": [
                     {
                         "title": "known",
@@ -370,11 +405,37 @@ def test_read_window_inventory_defaults_uncertainty_flags_for_legacy_helper(monk
     assert inventory.windows[0].alternate_title == ""
 
 
+def test_maybe_compile_rejects_stale_binary_when_compile_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    swift_path = tmp_path / "mac-window-list.swift"
+    core_path = tmp_path / "mac-window-list-core.swift"
+    binary_path = tmp_path / "mac-window-list"
+    swift_path.write_text("// main")
+    core_path.write_text("// core")
+    binary_path.write_text("old binary")
+    binary_path.chmod(0o755)
+    os.utime(binary_path, (1, 1))
+    os.utime(swift_path, (2, 2))
+    os.utime(core_path, (2, 2))
+    monkeypatch.setattr(
+        privacy.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stderr="fixed failure"),
+    )
+
+    assert privacy._maybe_compile(swift_path, binary_path) is False
+
+
 def test_read_window_inventory_rejects_empty_displays(monkeypatch) -> None:
     monkeypatch.setattr(
         privacy,
         "_read_window_list_helper",
-        lambda: privacy.WindowListReadResult({"windows": [], "displays": []}, None),
+        lambda: privacy.WindowListReadResult(
+            {"schema_version": 1, "windows": [], "displays": []},
+            None,
+        ),
     )
 
     assert privacy.read_window_inventory() is None
@@ -385,6 +446,7 @@ def test_read_window_inventory_rejects_invalid_display_bounds(monkeypatch) -> No
         privacy,
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult({
+            "schema_version": 1,
             "windows": [],
             "displays": [
                 {"id": 1, "left": 0, "top": 0, "width": 0, "height": 100, "is_primary": True}
@@ -459,6 +521,7 @@ def test_read_window_inventory_rejects_untyped_or_invalid_display_ids(monkeypatc
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult(
             {
+                "schema_version": 1,
                 "windows": [],
                 "displays": [
                     {"id": display_id, "left": 0, "top": 0, "width": 100, "height": 100}
@@ -480,6 +543,7 @@ def test_read_window_inventory_rejects_duplicate_display_ids(monkeypatch) -> Non
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult(
             {
+                "schema_version": 1,
                 "windows": [],
                 "displays": [
                     {"id": 1, "left": 0, "top": 0, "width": 100, "height": 100},
@@ -546,7 +610,10 @@ def test_inventory_read_result_classifies_empty_displays_and_multiple_active(mon
     monkeypatch.setattr(
         privacy,
         "_read_window_list_helper",
-        lambda: privacy.WindowListReadResult({"windows": [], "displays": []}, None),
+        lambda: privacy.WindowListReadResult(
+            {"schema_version": 1, "windows": [], "displays": []},
+            None,
+        ),
     )
     assert privacy.read_window_inventory_result().failure_reason.value == "empty_displays"
 
@@ -554,6 +621,7 @@ def test_inventory_read_result_classifies_empty_displays_and_multiple_active(mon
         privacy,
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult({
+            "schema_version": 1,
             "windows": [
                 {"left": 0, "top": 0, "width": 10, "height": 10, "is_active": True},
                 {"left": 10, "top": 0, "width": 10, "height": 10, "is_active": True},
@@ -570,6 +638,7 @@ def test_inventory_accepts_multiple_typed_active_candidates(monkeypatch) -> None
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult(
             {
+                "schema_version": 1,
                 "windows": [
                     {
                         "left": 0,
@@ -616,6 +685,7 @@ def test_inventory_rejects_non_boolean_uncertainty_flags(monkeypatch) -> None:
             "_read_window_list_helper",
             lambda field=field: privacy.WindowListReadResult(
                 {
+                    "schema_version": 1,
                     "windows": [{**base_window, field: "false"}],
                     "displays": [display],
                 },
@@ -635,6 +705,7 @@ def test_read_window_inventory_does_not_log_parser_private_marker(monkeypatch, c
         privacy,
         "_read_window_list_helper",
         lambda: privacy.WindowListReadResult({
+            "schema_version": 1,
             "windows": [],
             "displays": [
                 {

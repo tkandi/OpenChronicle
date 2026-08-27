@@ -19,6 +19,7 @@ private func testWindowRecordEncodesCoreGraphicsWindowID() {
         top: 10,
         width: 300,
         height: 200,
+        layer: 3,
         is_active: false,
         title_available: true,
         is_active_candidate: false,
@@ -29,6 +30,12 @@ private func testWindowRecordEncodesCoreGraphicsWindowID() {
     let payload = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
 
     precondition((payload["window_id"] as? NSNumber)?.uint32Value == 73)
+    precondition((payload["layer"] as? NSNumber)?.intValue == 3)
+
+    let output = Output(schema_version: 1, windows: [record], displays: [])
+    let outputData = try! JSONEncoder().encode(output)
+    let outputPayload = try! JSONSerialization.jsonObject(with: outputData) as! [String: Any]
+    precondition((outputPayload["schema_version"] as? NSNumber)?.intValue == 1)
 }
 
 private func testCoreGraphicsSourceMapsToWindowRecordID() {

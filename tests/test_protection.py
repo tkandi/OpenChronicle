@@ -113,6 +113,72 @@ def test_separate_marks_only_sensitive_display_and_blocks_ax_there() -> None:
     assert snapshot.ax_blocked is True
 
 
+@pytest.mark.parametrize(
+    ("cfg", "expected_reason"),
+    [
+        (
+            CaptureConfig(
+                screenshot_monitor="separate",
+                deny_bundle_ids=["com.1password.1password"],
+            ),
+            ProtectionReasonCode.BUNDLE_RULE,
+        ),
+        (
+            CaptureConfig(
+                screenshot_monitor="separate",
+                deny_window_title_patterns=["Quick Access"],
+            ),
+            ProtectionReasonCode.WINDOW_TITLE_RULE,
+        ),
+    ],
+)
+def test_non_layer_privacy_panel_protects_only_its_display(
+    cfg: CaptureConfig,
+    expected_reason: ProtectionReasonCode,
+) -> None:
+    panel_region = ScreenRegion(110, 0, 80, 90)
+    inventory = WindowInventory(
+        windows=(
+            VisibleWindow(
+                "1Password",
+                "com.1password.1password",
+                "Quick Access",
+                panel_region,
+                layer=3,
+                window_id=73,
+            ),
+            VisibleWindow(
+                "Cursor",
+                "com.cursor.Cursor",
+                "main.py",
+                ScreenRegion(10, 0, 80, 90),
+                True,
+                layer=0,
+                window_id=74,
+            ),
+        ),
+        displays=(LEFT, RIGHT),
+    )
+
+    snapshot = build_protection_snapshot(
+        cfg,
+        inventory,
+        paused=False,
+        generation=8,
+        now=11.0,
+    )
+
+    assert snapshot.state is ProtectionState.PROTECTED
+    assert snapshot.protected_display_ids == frozenset({2})
+    assert snapshot.active_display_id == 1
+    assert snapshot.ax_blocked is False
+    assert snapshot.protected_window_ids == frozenset({73})
+    assert snapshot.protected_window_regions == (panel_region,)
+    assert expected_reason in {
+        reason.code for reason in snapshot.reasons_for_display(2)
+    }
+
+
 def test_snapshot_carries_indicator_placement() -> None:
     cfg = CaptureConfig(privacy_indicator_placement="bottom-left-inset")
     inventory = WindowInventory(windows=(), displays=(LEFT, RIGHT))
