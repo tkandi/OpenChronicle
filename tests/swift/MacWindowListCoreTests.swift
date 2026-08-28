@@ -548,6 +548,29 @@ private func testTitleReadsOccurOnlyForGloballyAcceptedIdentity() {
     ])
 }
 
+private func testDisplaySelectionUsesAppKitFallbackOnlyWhenNeeded() {
+    precondition(selectDisplayIDs(
+        activeDisplayIDs: [11, 12],
+        appKitDisplayIDs: [21, 22]
+    ) == [11, 12])
+    precondition(selectDisplayIDs(
+        activeDisplayIDs: [11, 11],
+        appKitDisplayIDs: [21, 22]
+    ) == [11, 11])
+    precondition(selectDisplayIDs(
+        activeDisplayIDs: [0, 11],
+        appKitDisplayIDs: [21, 22]
+    ) == [0, 11])
+    precondition(selectDisplayIDs(
+        activeDisplayIDs: [],
+        appKitDisplayIDs: [21, 0, 21, 22]
+    ) == [21, 22])
+    precondition(selectDisplayIDs(
+        activeDisplayIDs: [],
+        appKitDisplayIDs: []
+    ).isEmpty)
+}
+
 @main
 enum MacWindowListCoreTests {
     static func main() {
@@ -567,6 +590,7 @@ enum MacWindowListCoreTests {
         testUnrelatedUnsupportedBlankTitleDoesNotDiscardKnownWindows()
         testExactFocusedIdentitySuppressesActiveCandidates()
         testTitleReadsOccurOnlyForGloballyAcceptedIdentity()
+        testDisplaySelectionUsesAppKitFallbackOnlyWhenNeeded()
         print("MacWindowListCoreTests passed")
     }
 }

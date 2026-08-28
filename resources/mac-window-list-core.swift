@@ -68,6 +68,24 @@ func windowRecordID(from source: OnScreenCGWindow) -> UInt32? {
     return windowID
 }
 
+func selectDisplayIDs(
+    activeDisplayIDs: [UInt32],
+    appKitDisplayIDs: [UInt32]
+) -> [UInt32] {
+    if !activeDisplayIDs.isEmpty {
+        return activeDisplayIDs
+    }
+
+    func normalized(_ displayIDs: [UInt32]) -> [UInt32] {
+        var seen = Set<UInt32>()
+        return displayIDs.filter { displayID in
+            displayID > 0 && seen.insert(displayID).inserted
+        }
+    }
+
+    return normalized(appKitDisplayIDs)
+}
+
 func resolveAXWindowMatches(
     cgWindows: [OnScreenCGWindow],
     axWindows: [AXWindowMetadata]

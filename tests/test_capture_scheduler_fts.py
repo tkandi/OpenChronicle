@@ -66,10 +66,16 @@ class _FakeProvider:
 
 
 class _FakeProtectionMonitor:
-    def __init__(self, *decisions: ProtectionDecision) -> None:
+    def __init__(
+        self,
+        *decisions: ProtectionDecision,
+        metadata_preflight: ProtectionDecision | None = None,
+    ) -> None:
         self.decisions = list(decisions)
         self.force_calls: list[bool] = []
         self.refresh_requests = 0
+        self.metadata_preflight = metadata_preflight
+        self.metadata_preflight_calls = 0
 
     @property
     def snapshot(self) -> ProtectionSnapshot:
@@ -83,6 +89,10 @@ class _FakeProtectionMonitor:
 
     def request_refresh(self) -> None:
         self.refresh_requests += 1
+
+    def capture_metadata_preflight(self) -> ProtectionDecision | None:
+        self.metadata_preflight_calls += 1
+        return self.metadata_preflight
 
 
 class _AlwaysConfirmedOverlay:
@@ -1049,7 +1059,10 @@ def test_failed_protection_snapshot_writes_nothing(
 def test_paused_initial_decision_writes_nothing_without_displays_or_capture_sources(
     ac_root: Path, monkeypatch,
 ) -> None:
-    monitor = _FakeProtectionMonitor(_paused_decision())
+    monitor = _FakeProtectionMonitor(
+        _paused_decision(),
+        metadata_preflight=_paused_decision(),
+    )
     provider = scheduler_mod.ax_capture.UnavailableAXProvider("test unavailable")
     monkeypatch.setattr(
         scheduler_mod.window_meta,
@@ -1075,7 +1088,7 @@ def test_paused_initial_decision_writes_nothing_without_displays_or_capture_sour
     )
 
     assert out is None
-    assert monitor.force_calls == [True]
+    assert monitor.metadata_preflight_calls == 1
 
 
 def test_inventory_failure_is_fail_open_only_when_configured(
@@ -1598,6 +1611,68 @@ def test_post_ax_validation_blocks_write_without_screenshot(
     assert out is None
     assert provider.calls == 1
     assert monitor.force_calls == [True, False]
+
+
+def test_event_during_foreground_metadata_is_reflected_before_ax(
+    ac_root: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = "private-window-during-foreground-metadata"
+    displays = (
+        DisplayInfo(1, ScreenRegion(0, 0, 100, 100), True),
+        DisplayInfo(2, ScreenRegion(100, 0, 100, 100), False),
+    )
+    safe_inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+        ),
+        displays=displays,
+    )
+    protected_inventory = WindowInventory(
+        windows=(
+            VisibleWindow("Edge", "edge", marker, ScreenRegion(0, 0, 80, 90)),
+            VisibleWindow("Cursor", "cursor", "main.py", ScreenRegion(0, 0, 80, 90), True),
+        ),
+        displays=displays,
+    )
+    inventory = safe_inventory
+    cfg = CaptureConfig(
+        include_screenshot=False,
+        screenshot_monitor="separate",
+        deny_window_title_patterns=[marker],
+    )
+    monitor = PrivacyProtectionMonitor(
+        cfg,
+        config_path=ac_root / "missing.toml",
+        overlay=_AlwaysConfirmedOverlay(),
+        inventory_reader=lambda: inventory,
+        pause_reader=lambda: False,
+        watchdog_seconds=10.0,
+    )
+    provider = _FakeProvider(raw_json=_edge_ax_tree("https://safe.example"))
+
+    def foreground_metadata() -> window_meta.WindowMeta:
+        nonlocal inventory
+        inventory = protected_inventory
+        monitor.request_refresh()
+        return window_meta.WindowMeta(app_name="Cursor", title="main.py", bundle_id="cursor")
+
+    monkeypatch.setattr(scheduler_mod.window_meta, "active_window", foreground_metadata)
+
+    try:
+        out = scheduler_mod._build_capture(
+            cfg,
+            provider,
+            None,
+            protection_monitor=monitor,
+        )
+    finally:
+        monitor.stop()
+
+    assert out is not None
+    assert out["ax_skipped"] == "protected_display"
+    assert "ax_tree" not in out
+    assert provider.calls == 0
 
 
 def test_event_during_ax_forces_post_ax_refresh_and_discards_capture(

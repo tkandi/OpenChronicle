@@ -268,6 +268,16 @@ class PrivacyProtectionMonitor:
             start_generation = refreshed.snapshot.generation
             required_epoch = latest_requested_epoch
 
+    def capture_metadata_preflight(self) -> ProtectionDecision | None:
+        """Publish an exact terminal pause decision before foreground metadata."""
+        self._raise_if_stopped()
+        pause_input = self._read_pause_input()
+        self._raise_if_stopped()
+        paused, failure_reason, _pause_reason = pause_input
+        if not paused and failure_reason is None:
+            return None
+        return self._refresh(pause_input=pause_input)
+
     def _run(self) -> None:
         try:
             self.decision_for_capture(force=True)
@@ -295,10 +305,20 @@ class PrivacyProtectionMonitor:
         *,
         reuse_after_generation: int | None = None,
         required_epoch: int | None = None,
+        pause_input: tuple[
+            bool,
+            ProtectionFailureReason | None,
+            ProtectionReason | None,
+        ]
+        | None = None,
     ) -> ProtectionDecision:
         with self._refresh_lock:
             self._raise_if_stopped()
-            if reuse_after_generation is not None and required_epoch is not None:
+            if (
+                pause_input is None
+                and reuse_after_generation is not None
+                and required_epoch is not None
+            ):
                 with self._state_lock:
                     reusable = self._decision
                 if (
@@ -315,7 +335,10 @@ class PrivacyProtectionMonitor:
             self._raise_if_stopped()
             now = self._monotonic()
             generation = self._generation + 1
-            paused, pause_failure_reason, pause_reason = self._read_pause_input()
+            if pause_input is None:
+                paused, pause_failure_reason, pause_reason = self._read_pause_input()
+            else:
+                paused, pause_failure_reason, pause_reason = pause_input
             empty_guard_only = self._diagnostics_guard_only and not (
                 diagnostics_guard.fail_closed_all or diagnostics_guard.display_ids
             )
@@ -336,11 +359,17 @@ class PrivacyProtectionMonitor:
                     reason_trigger=self._cfg.privacy_reason_trigger,
                 )
             else:
-                paused, inventory, failure_reason, pause_reason = self._read_inventory_input(
-                    paused=paused,
-                    failure_reason=pause_failure_reason,
-                    pause_reason=pause_reason,
-                )
+                if pause_input is None:
+                    paused, inventory, failure_reason, pause_reason = (
+                        self._read_inventory_input(
+                            paused=paused,
+                            failure_reason=pause_failure_reason,
+                            pause_reason=pause_reason,
+                        )
+                    )
+                else:
+                    inventory = None
+                    failure_reason = pause_failure_reason
                 self._raise_if_stopped()
                 snapshot_cfg = replace(
                     self._cfg,

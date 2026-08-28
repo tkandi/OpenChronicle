@@ -243,7 +243,8 @@ def visible_window_rule_matches(
             for rule in rules
         )
     if (
-        not window.title_available
+        window.layer == 0
+        and not window.title_available
         and any(cfg.deny_window_title_patterns)
         and exact_match(window.bundle_id, cfg.protect_unknown_title_bundle_ids)
     ):

@@ -120,6 +120,32 @@ private func axWindowSources(
     return sources
 }
 
+private func readActiveDisplayIDs() -> [CGDirectDisplayID] {
+    var displayCount: UInt32 = 0
+    guard
+        CGGetActiveDisplayList(0, nil, &displayCount) == .success,
+        displayCount > 0
+    else { return [] }
+
+    var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
+    guard CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount) == .success else {
+        return []
+    }
+    return Array(displayIDs.prefix(Int(displayCount)))
+}
+
+private func readAppKitDisplayIDs() -> [CGDirectDisplayID] {
+    let screenNumberKey = NSDeviceDescriptionKey("NSScreenNumber")
+    return NSScreen.screens.compactMap { screen in
+        guard
+            let number = screen.deviceDescription[screenNumberKey] as? NSNumber,
+            number.int64Value > 0,
+            number.uint64Value <= UInt64(UInt32.max)
+        else { return nil }
+        return CGDirectDisplayID(number.uint32Value)
+    }
+}
+
 #if !TESTING
 @main
 #endif
@@ -225,17 +251,12 @@ enum MacWindowList {
             )
         }
 
-        var displayCount: UInt32 = 0
-        guard CGGetActiveDisplayList(0, nil, &displayCount) == .success else {
-            fputs("Could not enumerate active displays\n", stderr)
-            exit(1)
-        }
-        var displayIDs = [CGDirectDisplayID](repeating: 0, count: Int(displayCount))
-        guard CGGetActiveDisplayList(displayCount, &displayIDs, &displayCount) == .success else {
-            fputs("Could not enumerate active displays\n", stderr)
-            exit(1)
-        }
-        let displays = displayIDs.prefix(Int(displayCount)).map { displayID in
+        let activeDisplayIDs = readActiveDisplayIDs()
+        let displayIDs = selectDisplayIDs(
+            activeDisplayIDs: activeDisplayIDs,
+            appKitDisplayIDs: activeDisplayIDs.isEmpty ? readAppKitDisplayIDs() : []
+        )
+        let displays = displayIDs.map { displayID in
             let bounds = CGDisplayBounds(displayID)
             return DisplayRecord(
                 id: displayID,

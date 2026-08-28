@@ -55,6 +55,9 @@ class FakeMonitor:
     def request_refresh(self) -> None:
         self.refresh_requests += 1
 
+    def capture_metadata_preflight(self) -> ProtectionDecision | None:
+        return None
+
     def wait_for_display_protection(
         self,
         display_id: int,

@@ -260,10 +260,8 @@ def _build_capture(
         if capture_is_paused():
             logger.info("capture skipped (paused)")
             return None
-    else:
-        decision = protection_monitor.decision_for_capture(force=True)
-        if _decision_is_terminal(cfg, decision):
-            return None
+    elif protection_monitor.capture_metadata_preflight() is not None:
+        return None
 
     ts = _now_iso()
     out: dict[str, Any] = {
@@ -283,6 +281,11 @@ def _build_capture(
     if reason is not None:
         logger.info("capture skipped (denylist: %s)", reason)
         return None
+
+    if protection_monitor is not None:
+        decision = protection_monitor.decision_for_capture(force=True)
+        if _decision_is_terminal(cfg, decision):
+            return None
 
     if decision is not None and _decision_blocks_ax(cfg, decision):
         out["ax_skipped"] = "protected_display"

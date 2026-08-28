@@ -104,6 +104,9 @@ class _StaticProtectionMonitor:
             return self._decisions.pop(0)
         return self._decisions[0]
 
+    def capture_metadata_preflight(self) -> ProtectionDecision | None:
+        return None
+
 
 def _private_other_display_decision(
     marker: str,

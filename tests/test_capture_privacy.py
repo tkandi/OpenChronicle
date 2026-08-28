@@ -25,6 +25,7 @@ def _window(
     alternate_title: str = "",
     left: float = 0,
     title_available: bool = True,
+    layer: int = 0,
 ) -> privacy.VisibleWindow:
     return privacy.VisibleWindow(
         app_name=app,
@@ -33,6 +34,7 @@ def _window(
         region=privacy.ScreenRegion(left=left, top=0, width=100, height=100),
         title_available=title_available,
         alternate_title=alternate_title,
+        layer=layer,
     )
 
 
@@ -171,6 +173,23 @@ def test_unknown_browser_title_is_protected_by_default(bundle: str) -> None:
     )
 
     assert [match.kind.value for match in matches] == ["window_title_unknown"]
+
+
+def test_non_layer_unknown_browser_title_does_not_match() -> None:
+    cfg = CaptureConfig(deny_window_title_patterns=["InPrivate"])
+
+    matches = privacy.visible_window_rule_matches(
+        cfg,
+        _window(
+            app="Microsoft Edge",
+            bundle="com.microsoft.edgemac",
+            title="",
+            title_available=False,
+            layer=3,
+        ),
+    )
+
+    assert matches == ()
 
 
 def test_unknown_feishu_title_is_not_protected() -> None:

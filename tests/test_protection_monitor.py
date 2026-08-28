@@ -1490,6 +1490,92 @@ def test_empty_guard_only_monitor_honors_pause_state(inventory, fake_overlay) ->
     assert decision.snapshot.protected_display_ids == frozenset({1, 2})
 
 
+def test_capture_metadata_preflight_publishes_pause_without_inventory(
+    fake_overlay,
+) -> None:
+    pause_reads = 0
+
+    def read_pause() -> bool:
+        nonlocal pause_reads
+        pause_reads += 1
+        return True
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: pytest.fail("paused preflight must not read inventory"),
+        pause_reader=read_pause,
+    )
+
+    decision = monitor.capture_metadata_preflight()
+
+    assert decision is not None
+    assert decision.snapshot.state is ProtectionState.PAUSED
+    assert pause_reads == 1
+
+
+def test_capture_metadata_preflight_publishes_exact_failed_read_without_inventory(
+    fake_overlay,
+) -> None:
+    marker = "private-metadata-preflight-pause-marker"
+    pause_reads = 0
+
+    def fail_pause_read() -> bool:
+        nonlocal pause_reads
+        pause_reads += 1
+        if pause_reads == 1:
+            raise OSError(marker)
+        return False
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(screenshot_privacy_fail_closed=False),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: pytest.fail("failed preflight must not read inventory"),
+        pause_reader=fail_pause_read,
+    )
+
+    failed = monitor.capture_metadata_preflight()
+
+    assert failed is not None
+    assert failed.snapshot.state is ProtectionState.FAILED
+    assert failed.snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+    assert pause_reads == 1
+    assert monitor.capture_metadata_preflight() is None
+    assert pause_reads == 2
+
+
+def test_capture_metadata_preflight_does_not_reuse_safe_decision_after_failure(
+    inventory,
+    fake_overlay,
+) -> None:
+    fail_pause_read = False
+
+    def read_pause() -> bool:
+        if fail_pause_read:
+            raise OSError("private-preflight-reuse-marker")
+        return False
+
+    monitor = PrivacyProtectionMonitor(
+        CaptureConfig(),
+        config_path=Path("/nonexistent/config.toml"),
+        overlay=fake_overlay,
+        inventory_reader=lambda: inventory,
+        pause_reader=read_pause,
+    )
+    safe = monitor.decision_for_capture(force=True)
+    fail_pause_read = True
+
+    failed = monitor.capture_metadata_preflight()
+
+    assert safe.snapshot.state is ProtectionState.INACTIVE
+    assert failed is not None
+    assert failed.snapshot.generation > safe.snapshot.generation
+    assert failed.snapshot.state is ProtectionState.FAILED
+    assert failed.snapshot.failure_reason is ProtectionFailureReason.PAUSE_STATE_UNAVAILABLE
+
+
 def test_empty_guard_only_monitor_fails_closed_when_pause_read_fails(
     inventory,
     fake_overlay,

@@ -10,16 +10,19 @@ Capture is the only layer that touches the outside world. It produces one JSON f
 
 Both funnel into `capture_once` in `capture/scheduler.py`, which runs:
 
-1. Force a protection-monitor decision when the background guard is enabled;
-   a paused or fail-closed decision returns before foreground metadata work.
+1. Read only the strict pause state when the background guard is enabled. A
+   paused or unreadable pause state aborts before foreground metadata; the full
+   paused/failed decision is still published for the indicator and diagnostics.
 2. `window_meta.active_window()` — app name, title, bundle_id via `NSRunningApplication`.
-3. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers, unless the decision blocks AX.
-4. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from an allowed AX tree (see [S1 fields](#s1-fields) below).
-5. Validate again against every refresh request observed during AX work; a newly protected or paused decision discards the complete in-memory capture.
-6. Capture screenshots unless `include_screenshot = false`. Depending on the
+3. Force the complete protection-monitor decision after foreground metadata
+   and before AX or screenshot I/O.
+4. `ax_capture.capture_frontmost(focused_window_only=True)` — one-shot invocation of `mac-ax-helper` for the current window, pruned to `ax_depth` layers, unless the decision blocks AX.
+5. `s1_parser.enrich()` — extracts `focused_element`, `visible_text`, and `url` from an allowed AX tree (see [S1 fields](#s1-fields) below).
+6. Validate again against every refresh request observed during AX work; a newly protected or paused decision discards the complete in-memory capture.
+7. Capture screenshots unless `include_screenshot = false`. Depending on the
    privacy mode, this uses source-filtered ScreenCaptureKit capture or the
    display-level `mss` fallback described below.
-7. Write `{iso8601_safe}.json` to the buffer.
+8. Write `{iso8601_safe}.json` to the buffer.
 
 Privacy denylist checks can short-circuit this flow:
 
@@ -66,10 +69,12 @@ reading that accepted AX element's title. Non-layer-0 rows never authorize AX
 title fallback or active-window identity. AX position, size, and geometry never
 authorize or locate a fallback. A blank title that cannot be resolved is still
 emitted with `title_available = false`; it does not invalidate unrelated windows.
-If any title deny rule is enabled, that unknown-title window is treated as
-sensitive only when its exact, case-insensitive Bundle ID appears in
+If any title deny rule is enabled, an unknown-title normal layer-0 window is
+treated as sensitive only when its exact, case-insensitive Bundle ID appears in
 `protect_unknown_title_bundle_ids`, and only on the displays its CoreGraphics
-bounds intersect. The default scope contains Edge, Chrome, and Firefox.
+bounds intersect. Unknown-title non-layer-0 menus, popovers, and helper panels
+do not activate this uncertainty-only branch. The default scope contains Edge,
+Chrome, and Firefox.
 
 The helper output carries `schema_version = 1`. Missing or unsupported versions
 are rejected as `helper_parse` before any window/display rows are trusted. When
@@ -80,14 +85,22 @@ the helper still emits CoreGraphics windows and displays: reliable CoreGraphics
 titles remain usable, blank layer-0 titles remain unavailable, and frontmost
 layer-0 rows become active candidates without AX title fallback.
 
+Display IDs prefer `CGGetActiveDisplayList`; every nonempty result is forwarded
+unchanged so Python structural validation can reject zero or duplicate IDs. If
+that API fails or reports zero while AppKit still exposes the active desktop,
+the helper lazily uses positive, unique `NSScreenNumber` IDs and keeps
+CoreGraphics bounds and primary-display mapping. If both sources are empty, the
+inventory remains invalid and fails closed as `empty_displays`.
+
 This policy is title-based rather than a browser private-mode API:
 
-| Title state | Bundle in unknown-title scope | Direct app/bundle match | Result |
-|---|---:|---:|---|
-| reliable and title regex matches | either | either | protected |
-| unavailable | yes | no | protected: `window_title_unknown` |
-| unavailable | no | no | not protected |
-| unavailable | either | yes | protected by direct rule |
+| Window layer | Title state | Bundle in unknown-title scope | Direct app/bundle match | Result |
+|---|---|---:|---:|---|
+| either | reliable and title regex matches | either | either | protected |
+| layer 0 | unavailable | yes | no | protected: `window_title_unknown` |
+| layer 0 | unavailable | no | no | not protected |
+| non-layer-0 | unavailable | yes | no | not protected |
+| either | unavailable | either | yes | protected by direct rule |
 
 The focused AX window is marked active only through the same exact layer-0
 identity. If that identity is unavailable, every on-screen layer-0 window owned
@@ -98,9 +111,10 @@ display. Unlisted unknown-title windows are allowed by explicit policy, while
 genuine helper exit, JSON parse, or display-inventory failures still produce a
 fixed-code `failed` decision.
 
-Menus, popovers, and non-layer-0 floating panels participate in the same direct
-app, bundle, reliable-title, and scoped unknown-title rule evaluation using their
-CoreGraphics metadata. When any protected row resolves to a unique owning
+Menus, popovers, and non-layer-0 floating panels participate in direct app,
+bundle, and reliable-title rule evaluation using their CoreGraphics metadata;
+they do not activate uncertainty-only unknown-title protection. When any
+protected row resolves to a unique owning
 application, filtered capture excludes all of that application's normal and
 auxiliary windows at the source. The helper never traverses background AX trees
 or reads their controls and contents. In `separate` mode, only monitors
